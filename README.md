@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-v0.08
+v0.09
 
 ## 使用方式
 
@@ -22,6 +22,7 @@ v0.08
 6. 当前正在继续优化截图1模板下的标题层级和蹄花块真实感。
 7. 当前广告语变量已更新为“一页一道新菜”。
 8. 当前默认每次生成 2 张图片，便于比选。
+9. 新增头像生成脚本 touxiang_generator.py，可批量生成 10 个头像到 touxiang 目录。
 
 ## 仓库地址
 
@@ -39,13 +40,15 @@ python main.py
 2. 文件名格式为：日期时间戳_菜名_序号.png。
 3. 若接口返回 revised prompt，会一并保存到 image 目录。
 4. 程序会把本次实际渲染后的 prompt 一并保存到 image 目录，便于调试。
+5. 运行 touxiang_generator.py 会将 10 个头像及对应 prompt 保存到 touxiang 目录。
 
 ## 当前主要文件
 
 1. main.py
 2. image_generator.py
-3. 临时调试prompt.txt
-4. guanggaoyu.txt
-5. 项目规范.md
-6. 项目记忆.md
-7. 版本记录.md
+3. touxiang_generator.py
+4. 临时调试prompt.txt
+5. guanggaoyu.txt
+6. 项目规范.md
+7. 项目记忆.md
+8. 版本记录.md
