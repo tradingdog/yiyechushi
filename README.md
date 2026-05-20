@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-v0.03
+v0.04
 
 ## 使用方式
 
@@ -17,6 +17,7 @@ v0.03
 1. 已实测运行 main.py，并成功生成首张图片。
 2. 本地 git 仓库已初始化并完成首个中文提交。
 3. GitHub 远程仓库已创建并完成首次推送。
+4. 关注文案改为从 guanggaoyu.txt 动态注入到 prompt。
 
 ## 仓库地址
 
@@ -33,12 +34,14 @@ python main.py
 1. 图片保存到 image 目录。
 2. 文件名格式为：日期时间戳_菜名_序号.png。
 3. 若接口返回 revised prompt，会一并保存到 image 目录。
+4. 程序会把本次实际渲染后的 prompt 一并保存到 image 目录，便于调试。
 
 ## 当前主要文件
 
 1. main.py
 2. image_generator.py
 3. 临时调试prompt.txt
-4. 项目规范.md
-5. 项目记忆.md
-6. 版本记录.md
+4. guanggaoyu.txt
+5. 项目规范.md
+6. 项目记忆.md
+7. 版本记录.md

@@ -13,6 +13,7 @@ from openai import OpenAI
 ROOT_DIR = Path(__file__).resolve().parent
 DEFAULT_PROMPT_FILE = ROOT_DIR / "临时调试prompt.txt"
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "image"
+DEFAULT_AD_COPY_FILE = ROOT_DIR / "guanggaoyu.txt"
 
 
 def load_env_file(env_file: Path) -> None:
@@ -50,6 +51,22 @@ def load_prompt(prompt_file: Path) -> str:
         raise ValueError(f"调试 prompt 文件为空：{prompt_file}")
 
     return prompt
+
+
+def load_text_variable(text_file: Path, variable_name: str) -> str:
+    if not text_file.exists():
+        raise FileNotFoundError(f"未找到变量文件 {variable_name}：{text_file}")
+
+    value = text_file.read_text(encoding="utf-8").strip()
+    if not value:
+        raise ValueError(f"变量文件 {variable_name} 为空：{text_file}")
+
+    return value
+
+
+def render_prompt_template(prompt: str) -> str:
+    ad_copy = load_text_variable(DEFAULT_AD_COPY_FILE, "guanggaoyu")
+    return prompt.replace("{{GUANGGAOYU}}", ad_copy)
 
 
 def sanitize_file_name(name: str) -> str:
@@ -114,7 +131,8 @@ def generate_images_from_prompt_file(
     prompt_file_name: str = "临时调试prompt.txt",
 ) -> dict[str, Any]:
     prompt_file = ROOT_DIR / prompt_file_name
-    prompt = load_prompt(prompt_file)
+    prompt_template = load_prompt(prompt_file)
+    prompt = render_prompt_template(prompt_template)
 
     client = build_client()
     model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2").strip() or "gpt-image-2"
@@ -145,12 +163,16 @@ def generate_images_from_prompt_file(
         timestamp=timestamp,
     )
 
+    rendered_prompt_file = DEFAULT_OUTPUT_DIR / f"{timestamp}_{sanitize_file_name(dish_name)}_prompt.txt"
+    rendered_prompt_file.write_text(prompt, encoding="utf-8")
+
     return {
         "model": model,
         "size": size,
         "quality": quality,
         "output_dir": str(DEFAULT_OUTPUT_DIR),
         "saved_files": saved_files,
+        "rendered_prompt_file": str(rendered_prompt_file),
         "timestamp": timestamp,
     }
 

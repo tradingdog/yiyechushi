@@ -15,6 +15,7 @@ def main() -> None:
 
     print("图片生成完成")
     print(f"输出目录：{result['output_dir']}")
+    print(f"本次实际 prompt：{result['rendered_prompt_file']}")
     for saved_file in result["saved_files"]:
         print(f"已保存：{saved_file}")
 
