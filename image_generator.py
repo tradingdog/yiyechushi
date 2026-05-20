@@ -138,7 +138,7 @@ def generate_images_from_prompt_file(
     model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2").strip() or "gpt-image-2"
     size = os.getenv("OPENAI_IMAGE_SIZE", "1024x1536").strip() or "1024x1536"
     quality = os.getenv("OPENAI_IMAGE_QUALITY", "high").strip() or "high"
-    image_count = int(os.getenv("OPENAI_IMAGE_COUNT", "1").strip() or "1")
+    image_count = int(os.getenv("OPENAI_IMAGE_COUNT", "2").strip() or "2")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     print(f"正在调用模型：{model}")
