@@ -2878,6 +2878,30 @@ def format_topic_tag(topic: str) -> str:
     return f"#{normalized}"
 
 
+def parse_publish_topic_candidates(raw_topics: str) -> list[str]:
+    if not raw_topics.strip():
+        return []
+
+    hashtag_tokens = re.findall(r"#?[0-9A-Za-z\u4e00-\u9fff]+", raw_topics)
+    raw_tokens = hashtag_tokens or re.split(r"[\s,，;；|]+", raw_topics)
+
+    topics: list[str] = []
+    seen: set[str] = set()
+    for token in raw_tokens:
+        tag = format_topic_tag(token)
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        topics.append(tag)
+    return topics
+
+
+def get_required_publish_topics() -> list[str]:
+    ensure_runtime_config_loaded()
+    raw_topics = os.getenv("PUBLISH_REQUIRED_TOPICS", "").strip()
+    return parse_publish_topic_candidates(raw_topics)
+
+
 def is_disallowed_publish_topic(topic: str, dish_name: str) -> bool:
     normalized_topic = normalize_topic_text(topic)
     normalized_dish_name = normalize_topic_text(dish_name)
@@ -2955,7 +2979,9 @@ def build_publish_activity_topics(source_text: str) -> list[str]:
 
 def infer_publish_topic_tags(dish_name: str, source_text: str, notes: str = "") -> list[str]:
     combined_text = f"{dish_name} {notes} {source_text}"
-    candidate_topics: list[str] = build_publish_activity_topics(combined_text)
+    required_topics = get_required_publish_topics()
+    required_topic_set = set(required_topics)
+    candidate_topics: list[str] = [*required_topics, *build_publish_activity_topics(combined_text)]
 
     if contains_any(combined_text, ["煲", "锅", "汤"]):
         candidate_topics.extend(["家常煲菜", "一锅出晚饭"])
@@ -2981,9 +3007,11 @@ def infer_publish_topic_tags(dish_name: str, source_text: str, notes: str = "") 
     tags: list[str] = []
     seen: set[str] = set()
     for topic in candidate_topics:
-        if is_disallowed_publish_topic(topic, dish_name=dish_name):
-            continue
         tag = format_topic_tag(topic)
+        if not tag:
+            continue
+        if tag not in required_topic_set and is_disallowed_publish_topic(topic, dish_name=dish_name):
+            continue
         if not tag or tag in seen:
             continue
         seen.add(tag)
@@ -3003,9 +3031,10 @@ def build_publish_copy_system_prompt(fixed_dish_name: str) -> str:
 2. 描述要像博主本人在认真安利这道菜，既有食欲，也有实用信息，还要让人觉得“这条存一下有用”。
 3. 标题和描述都要尽量贴近中文互联网和抖音里的流行表达，但不能过度夸张，不要低质鸡汤，不要硬凑热搜。
 4. 标题必须严格写成“菜名，卖点！”；菜名后必须用中文逗号，最后必须用中文叹号，卖点单独放在菜名后面。
-5. 描述最后必须单独放一行 5 个话题标签，每个标签都以 # 开头；不要生成菜名本身的话题，也不要生成 #阿叶造新菜。
-6. 话题优先按抖音常见美食搜索词和活动型话题的写法去想；如果你无法确认实时热榜，就选更稳的通用高频美食话题，不要编造榜单来源。
-6. 标题里必须保留菜名“{fixed_dish_name}”或非常直接地指向这道菜，不能改成别的菜。
+5. 描述最后必须单独放一行 5 个话题标签，每个标签都以 # 开头；自动补充的话题不要生成菜名本身的话题，也不要生成 #阿叶造新菜。
+6. 如果我另外给了“指定必带话题”，那几个话题必须优先保留在最终 5 个标签里。
+7. 话题优先按抖音常见美食搜索词和活动型话题的写法去想；如果你无法确认实时热榜，就选更稳的通用高频美食话题，不要编造榜单来源。
+8. 标题里必须保留菜名“{fixed_dish_name}”或非常直接地指向这道菜，不能改成别的菜。
 
 输出格式必须严格如下，不要加解释：
 
@@ -3030,10 +3059,13 @@ def build_publish_copy_user_prompt(
     source_label: str = "菜谱文案",
 ) -> str:
     note_text = notes.strip() or "无额外补充说明"
+    required_topics = get_required_publish_topics()
+    required_topics_text = " ".join(required_topics) if required_topics else "无"
     return f"""
 当前菜名：{dish_name}
 补充说明：{note_text}
 参考内容类型：{source_label}
+指定必带话题：{required_topics_text}
 
 请基于下面这份内容，生成最终抖音图文标题和图文描述：
 
@@ -3111,12 +3143,25 @@ def normalize_publish_copy(
     fallback = build_local_publish_copy(dish_name=dish_name, source_text=source_text, notes=notes)
     normalized_body = description_body or fallback["description"].splitlines()[0]
 
+    required_topics = get_required_publish_topics()
     normalized_tags: list[str] = []
     seen: set[str] = set()
-    for topic in parsed_tags + infer_publish_topic_tags(dish_name=dish_name, source_text=source_text, notes=notes):
-        if is_disallowed_publish_topic(topic, dish_name=dish_name):
-            continue
+    for topic in required_topics:
         tag = format_topic_tag(topic)
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        normalized_tags.append(tag)
+        if len(normalized_tags) >= 5:
+            break
+
+    inferred_topics = infer_publish_topic_tags(dish_name=dish_name, source_text=source_text, notes=notes)
+    for topic in parsed_tags + inferred_topics:
+        tag = format_topic_tag(topic)
+        if not tag:
+            continue
+        if tag not in set(required_topics) and is_disallowed_publish_topic(topic, dish_name=dish_name):
+            continue
         if not tag or tag in seen:
             continue
         seen.add(tag)

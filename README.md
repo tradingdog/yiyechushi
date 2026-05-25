@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-v0.57
+v0.58
 
 ## 使用方式
 
@@ -20,6 +20,8 @@ v0.57
 10. 如需单独只刷新 dish_name.txt 而不继续生成 prompt 或图片，直接运行 tools/generate_auto_dish_idea.py。
 11. 如需从某个 output 子目录里的多版本图片中自动筛出更适合发布的版本，运行 tools/select_publish_images.py；它会按页面分组让豆包逐页打分，再把胜出图移入 publish 文件夹。
 12. 默认情况下，主流程在整套图片和 Photoshop 合成都完成后，也会自动执行一次 publish 筛图并输出报告；若只想关掉这一步，把 config.env 里的 PUBLISH_AUTO_SELECT 改成 2。
+13. 如需手动指定 1 个或多个必须保留在最终 5 个抖音话题里的标签，修改 config.env 里的 PUBLISH_REQUIRED_TOPICS；多个话题可用空格、逗号、分号或换行分隔，写不写 # 都可以。
+14. 如需把 publish 目录里的图和对应标题/描述自动投喂到已登录的抖音创作者页，运行 tools/douyin_publish.py；运行前需先用带 9222 远程调试端口的方式打开 Chrome，并确保 creator.douyin.com 页面已经打开。
 
 ## 当前状态
 
@@ -88,6 +90,8 @@ v0.57
 63. 若某个标题页当前候选全部未通过居中硬门槛，正式模式会按该页已经落盘的文生图 prompt 单张补生新图，再把新图并回候选复评；dry-run 只会在报告里写出“需要补生”，不会真的调图片接口。
 64. 若当前目录里的成图已经是 Photoshop 合成后的 JPG，标题补生出来的新图会自动只对这一张补跑一次 PSD 模板再参与复评；如果补生阶段被图片接口 403 阻塞，该页不会进入 publish，但整轮仍会继续处理其它页面，并把阻塞原因写进报告。
 65. 主流程现在支持自动 publish 收尾：当 config.env 中 PUBLISH_AUTO_SELECT=1 时，main.py 会在所有图片与 Photoshop 完成后自动创建 publish，并打印 publish_selection_report.json 与 publish_selection_report.txt 路径。
+66. 新增 tools/douyin_publish.py，可通过 Playwright 接管已开启远程调试的 Chrome 抖音创作者页，自动上传 publish 里的 01.jpg 到 06.jpg、填写抖音图文标题与描述、单独上传 cover.jpg，并完成“个人观点或臆测”自主声明选择。脚本默认指向 output\20260525_043309_葱香海参酿 这套测试素材，也支持传入别的 output 子目录。
+67. config.env 新增 PUBLISH_REQUIRED_TOPICS；一旦配置，抖音图文描述最后 5 个话题里会优先保留这些手动话题，剩余名额再由程序自动补齐。自动补位的话题仍默认过滤菜名标签和 #阿叶造新菜。
 
 ## 仓库地址
 
@@ -128,6 +132,7 @@ python tools/generate_images_from_prompt_folder.py --text-only
 2. 每个 txt 文件会生成一份抖音图文标题 txt 和一份抖音图文描述 txt。
 3. 图文描述最后一行会自动带 5 个经过过滤的话题标签，不会再写入菜名标签或 #阿叶造新菜。
 4. 输出目录为 output 下对应的“日期时间戳_菜品名”目录。
+5. 若 config.env 中配置了 PUBLISH_REQUIRED_TOPICS，最终 5 个话题会优先保留这些手动话题，再补剩余标签。
 
 ## 单独只生成 txt 命令
 
@@ -191,6 +196,22 @@ python tools/select_publish_images.py output\某个目录 --title-retry-limit 5
 4. 工具会把每页胜出图移动到 output/日期时间戳_菜品名/publish；若传 --copy，则保留原图并复制一份到 publish。
 5. 工具会在 publish 目录下额外生成 publish_selection_report.json 和 publish_selection_report.txt 两份评分报告；若补生阶段被图片接口阻塞，对应页面会被标记为“未入 publish”，阻塞原因会直接写进报告。
 6. 默认优先读取 DOUBAO_REVIEW_MODEL；若未配置，则回退到 DOUBAO_TEXT_MODEL。标题补生上限默认读取 PUBLISH_TITLE_CENTER_RETRY_LIMIT。
+
+## 抖音图文自动发布命令
+
+```bash
+python tools/douyin_publish.py
+python tools/douyin_publish.py --dry-run
+python tools/douyin_publish.py output\某个目录
+python tools/douyin_publish.py output\某个目录 --cdp-url http://127.0.0.1:9222
+```
+
+说明：
+1. 该脚本会连接已经开启 Chrome 远程调试端口的浏览器，并在已打开标签页里锁定 URL 含 creator.douyin.com 的抖音创作者页面；运行前需确保页面已经登录。
+2. 默认测试目录为 output\20260525_043309_葱香海参酿；脚本会自动读取该目录下的抖音图文标题 txt、抖音图文描述 txt，以及 publish 目录里的 01.jpg 到 06.jpg 和 cover.jpg。
+3. 图文描述会按人类逐字输入；进入话题阶段后，脚本会按“# + 中文话题 + 空格确认 + 空格分隔”的顺序逐个录入 5 个标签。
+4. --dry-run 只校验本地文件、参数和默认素材，不连接 Chrome，适合先做无副作用预检。
+5. 若运行中途失败，脚本会尝试把当前页面截图保存为 tools/douyin_publish_last_error.png，便于回看网页实际状态。
 
 ## 回归检查
 
