@@ -4,4 +4,6 @@ __pycache__/
 image/
 touxiang/
 output/
+tools/chrome_automation_profile/
+tools/douyin_publish_last_error.png
 

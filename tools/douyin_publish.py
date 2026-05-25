@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Sequence
+from urllib.error import URLError
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 try:
     from playwright.sync_api import Browser, Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
@@ -24,12 +30,15 @@ DEFAULT_OUTPUT_DIR = ROOT_DIR / "output" / "20260525_043309_葱香海参酿"
 DEFAULT_PUBLISH_DIR_NAME = "publish"
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 DEFAULT_URL_KEYWORD = "creator.douyin.com"
+DEFAULT_CREATOR_HOME_URL = "https://creator.douyin.com/creator-micro/home"
 DEFAULT_TYPING_DELAY_MS = 120
 DEFAULT_AFTER_UPLOAD_WAIT_MS = 10_000
 DEFAULT_AFTER_OPEN_COVER_WAIT_MS = 5_000
 DEFAULT_AFTER_COVER_CONFIRM_WAIT_MS = 10_000
 DEFAULT_AFTER_DECLARATION_OPEN_WAIT_MS = 2_000
 DEFAULT_DEBUG_SCREENSHOT = ROOT_DIR / "tools" / "douyin_publish_last_error.png"
+DEFAULT_AUTOMATION_PROFILE_DIR = ROOT_DIR / "tools" / "chrome_automation_profile"
+DEFAULT_CDP_READY_TIMEOUT_MS = 20_000
 SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 LocatorWaitState = Literal["attached", "detached", "hidden", "visible"]
 
@@ -52,6 +61,11 @@ class PublishSettings:
     output_dir: Path
     cdp_url: str
     url_keyword: str
+    chrome_path: Path | None
+    automation_profile_dir: Path
+    auto_launch_browser: bool
+    creator_home_url: str
+    cdp_ready_timeout_ms: int
     typing_delay_ms: int
     after_upload_wait_ms: int
     after_open_cover_wait_ms: int
@@ -104,6 +118,31 @@ def parse_args() -> argparse.Namespace:
         help=f"用于锁定已打开抖音创作者标签页的 URL 关键字，默认 {DEFAULT_URL_KEYWORD}",
     )
     parser.add_argument(
+        "--chrome-path",
+        help="Chrome.exe 路径；不传时脚本会按本机常见路径自动查找。",
+    )
+    parser.add_argument(
+        "--automation-profile-dir",
+        default=str(DEFAULT_AUTOMATION_PROFILE_DIR),
+        help=f"自动化 Chrome 独立资料目录，默认 {DEFAULT_AUTOMATION_PROFILE_DIR}",
+    )
+    parser.add_argument(
+        "--creator-home-url",
+        default=DEFAULT_CREATOR_HOME_URL,
+        help=f"自动拉起浏览器时默认打开的抖音创作者页，默认 {DEFAULT_CREATOR_HOME_URL}",
+    )
+    parser.add_argument(
+        "--cdp-ready-timeout-ms",
+        type=int,
+        default=DEFAULT_CDP_READY_TIMEOUT_MS,
+        help=f"自动拉起 Chrome 后等待 CDP 就绪的超时时长，默认 {DEFAULT_CDP_READY_TIMEOUT_MS}ms",
+    )
+    parser.add_argument(
+        "--no-auto-launch-browser",
+        action="store_true",
+        help="当 9222 不可用时不自动拉起可接管的 Chrome 浏览器，而是直接报错退出。",
+    )
+    parser.add_argument(
         "--typing-delay-ms",
         type=int,
         default=DEFAULT_TYPING_DELAY_MS,
@@ -142,6 +181,27 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def default_chrome_candidates() -> tuple[Path, ...]:
+    local_app_data = Path(os.environ.get("LOCALAPPDATA", "")).expanduser()
+    candidates = [
+        local_app_data / "Google/Chrome/Application/chrome.exe",
+        Path("C:/Program Files/Google/Chrome/Application/chrome.exe"),
+        Path("C:/Program Files (x86)/Google/Chrome/Application/chrome.exe"),
+    ]
+    unique_candidates: list[Path] = []
+    for candidate in candidates:
+        if candidate and candidate not in unique_candidates:
+            unique_candidates.append(candidate)
+    return tuple(unique_candidates)
+
+
+def find_default_chrome_path() -> Path | None:
+    for candidate in default_chrome_candidates():
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
 def resolve_settings(args: argparse.Namespace) -> PublishSettings:
     ensure_runtime_config_loaded()
 
@@ -149,10 +209,18 @@ def resolve_settings(args: argparse.Namespace) -> PublishSettings:
     if not output_dir.exists() or not output_dir.is_dir():
         raise RuntimeError(f"输出目录不存在：{output_dir}")
 
+    chrome_path_text = str(args.chrome_path or "").strip()
+    chrome_path = resolve_path(chrome_path_text) if chrome_path_text else find_default_chrome_path()
+
     return PublishSettings(
         output_dir=output_dir,
         cdp_url=str(args.cdp_url or DEFAULT_CDP_URL).strip() or DEFAULT_CDP_URL,
         url_keyword=str(args.url_keyword or DEFAULT_URL_KEYWORD).strip() or DEFAULT_URL_KEYWORD,
+        chrome_path=chrome_path,
+        automation_profile_dir=resolve_path(args.automation_profile_dir),
+        auto_launch_browser=not bool(args.no_auto_launch_browser),
+        creator_home_url=str(args.creator_home_url or DEFAULT_CREATOR_HOME_URL).strip() or DEFAULT_CREATOR_HOME_URL,
+        cdp_ready_timeout_ms=parse_non_negative_int(args.cdp_ready_timeout_ms, field_name="cdp-ready-timeout-ms", default=DEFAULT_CDP_READY_TIMEOUT_MS),
         typing_delay_ms=parse_non_negative_int(args.typing_delay_ms, field_name="typing-delay-ms", default=DEFAULT_TYPING_DELAY_MS),
         after_upload_wait_ms=parse_non_negative_int(args.after_upload_wait_ms, field_name="after-upload-wait-ms", default=DEFAULT_AFTER_UPLOAD_WAIT_MS),
         after_open_cover_wait_ms=parse_non_negative_int(args.after_open_cover_wait_ms, field_name="after-open-cover-wait-ms", default=DEFAULT_AFTER_OPEN_COVER_WAIT_MS),
@@ -244,6 +312,77 @@ def log_assets(assets: PublishAssets) -> None:
         print(f"已识别上传图片：{image_path}")
 
 
+def cdp_version_url(cdp_url: str) -> str:
+    return cdp_url.rstrip("/") + "/json/version"
+
+
+def is_cdp_endpoint_ready(cdp_url: str, timeout_seconds: float = 1.5) -> bool:
+    try:
+        with urlopen(cdp_version_url(cdp_url), timeout=timeout_seconds) as response:
+            return response.status == 200
+    except (URLError, OSError, ValueError):
+        return False
+
+
+def extract_cdp_port(cdp_url: str) -> int:
+    parsed = urlparse(cdp_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise RuntimeError(f"暂时只支持 http/https 形式的 CDP 地址：{cdp_url}")
+    if not parsed.port:
+        raise RuntimeError(f"CDP 地址里缺少端口：{cdp_url}")
+    return parsed.port
+
+
+def ensure_cdp_browser_available(settings: PublishSettings) -> None:
+    if is_cdp_endpoint_ready(settings.cdp_url):
+        return
+
+    if not settings.auto_launch_browser:
+        raise RuntimeError(
+            "无法连接到 Chrome 远程调试端口，且当前已关闭自动拉起浏览器。"
+            f"\n当前连接地址：{settings.cdp_url}"
+        )
+
+    if settings.chrome_path is None:
+        searched_paths = "\n".join(str(path) for path in default_chrome_candidates())
+        raise RuntimeError(
+            "未找到可自动拉起的 Chrome.exe，请手动通过 --chrome-path 指定路径。"
+            f"\n已尝试这些位置：\n{searched_paths}"
+        )
+
+    settings.automation_profile_dir.mkdir(parents=True, exist_ok=True)
+    cdp_port = extract_cdp_port(settings.cdp_url)
+    launch_command = [
+        str(settings.chrome_path),
+        f"--remote-debugging-port={cdp_port}",
+        f"--user-data-dir={settings.automation_profile_dir}",
+        "--new-window",
+        "--no-first-run",
+        "--no-default-browser-check",
+        settings.creator_home_url,
+    ]
+    subprocess.Popen(launch_command)
+    print("检测到当前没有可接管的 Chrome 调试端口，已自动拉起独立的自动化 Chrome 窗口。")
+    print(f"自动化 Chrome 路径：{settings.chrome_path}")
+    print(f"自动化资料目录：{settings.automation_profile_dir}")
+    print("说明：这是独立的自动化 Chrome，不会直接接管你当前已经打开的普通 Chrome 窗口。")
+    print("如果这个自动化窗口是首次打开，请先在其中完成抖音登录；后续脚本会复用这个资料目录。")
+
+    deadline = time.time() + settings.cdp_ready_timeout_ms / 1000
+    while time.time() < deadline:
+        if is_cdp_endpoint_ready(settings.cdp_url):
+            print(f"Chrome 调试端口已就绪：{settings.cdp_url}")
+            return
+        time.sleep(0.5)
+
+    raise RuntimeError(
+        "脚本已经尝试自动拉起可接管的 Chrome，但调试端口仍未就绪。"
+        f"\n当前连接地址：{settings.cdp_url}"
+        f"\nChrome 路径：{settings.chrome_path}"
+        f"\n自动化资料目录：{settings.automation_profile_dir}"
+    )
+
+
 def find_target_page(browser: Browser, url_keyword: str) -> Page:
     matched_pages: list[Page] = []
     for context in browser.contexts:
@@ -260,6 +399,23 @@ def find_target_page(browser: Browser, url_keyword: str) -> Page:
     page.wait_for_load_state("domcontentloaded")
     print(f"已锁定抖音页面：{page.url}")
     return page
+
+
+def is_login_required_page(page: Page) -> bool:
+    login_keywords = (
+        "扫码登录",
+        "验证码登录",
+        "密码登录",
+        "登录/注册",
+        "创作者登录",
+    )
+    for keyword in login_keywords:
+        try:
+            if page.get_by_text(keyword, exact=False).first.is_visible(timeout=500):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def wait_for_locator(
@@ -506,6 +662,8 @@ def submit_declaration(page: Page, settings: PublishSettings) -> None:
 
 
 def run_publish(settings: PublishSettings, assets: PublishAssets) -> None:
+    ensure_cdp_browser_available(settings)
+
     with sync_playwright() as playwright:
         try:
             browser = playwright.chromium.connect_over_cdp(settings.cdp_url)
@@ -516,12 +674,20 @@ def run_publish(settings: PublishSettings, assets: PublishAssets) -> None:
                     "无法连接到 Chrome 远程调试端口。当前错误与 publish 图片无关，脚本已经识别到 "
                     f"{len(assets.image_paths)} 张图文图片和 1 张封面图。\n"
                     f"当前连接地址：{settings.cdp_url}\n"
-                    "请先用带 --remote-debugging-port=9222 参数的方式启动 Chrome，"
-                    "并确认 creator.douyin.com 页面已经在该浏览器里打开后再重试。"
+                    "普通已打开的 Chrome 进程默认不暴露可附着的标签页控制接口，"
+                    "所以 Playwright 不能直接接管它。脚本已优先尝试自动拉起独立的可接管 Chrome；"
+                    "若仍失败，请检查该自动化 Chrome 是否被安全软件拦截，或改用 --chrome-path 显式指定 Chrome.exe。"
                 ) from exc
             raise
 
         page = find_target_page(browser, settings.url_keyword)
+
+        if is_login_required_page(page):
+            raise RuntimeError(
+                "当前自动化 Chrome 打开的抖音创作者页还没有登录，所以脚本还不能继续点发布入口。\n"
+                "这不是 publish 图片问题，也不是标签页没匹配到；当前页面已经锁定成功，但它属于独立的自动化 Chrome 资料目录。\n"
+                "请先在这个自动化 Chrome 窗口里完成一次抖音登录，然后重新运行脚本。"
+            )
 
         try:
             ensure_publish_editor_ready(page)

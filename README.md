@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-v0.59
+v0.60
 
 ## 使用方式
 
@@ -21,7 +21,7 @@ v0.59
 11. 如需从某个 output 子目录里的多版本图片中自动筛出更适合发布的版本，运行 tools/select_publish_images.py；它会按页面分组让豆包逐页打分，再把胜出图移入 publish 文件夹。
 12. 默认情况下，主流程在整套图片和 Photoshop 合成都完成后，也会自动执行一次 publish 筛图并输出报告；若只想关掉这一步，把 config.env 里的 PUBLISH_AUTO_SELECT 改成 2。
 13. 如需手动指定 1 个或多个必须保留在最终 5 个抖音话题里的标签，修改 config.env 里的 PUBLISH_REQUIRED_TOPICS；多个话题可用空格、逗号、分号或换行分隔，写不写 # 都可以。
-14. 如需把 publish 目录里的图和对应标题/描述自动投喂到已登录的抖音创作者页，运行 tools/douyin_publish.py；运行前需先用带 9222 远程调试端口的方式打开 Chrome，并确保 creator.douyin.com 页面已经打开。
+14. 如需把 publish 目录里的图和对应标题/描述自动投喂到抖音创作者页，运行 tools/douyin_publish.py；若当前没有可接管的调试浏览器，脚本会自动拉起一个独立的 Chrome 自动化窗口。
 
 ## 当前状态
 
@@ -212,7 +212,9 @@ python tools/douyin_publish.py output\某个目录 --cdp-url http://127.0.0.1:92
 3. 图文描述会按人类逐字输入；进入话题阶段后，脚本会按“# + 中文话题 + 空格确认 + 空格分隔”的顺序逐个录入 5 个标签。
 4. --dry-run 只校验本地文件、参数和默认素材，不连接 Chrome，适合先做无副作用预检。
 5. 若运行中途失败，脚本会尝试把当前页面截图保存为 tools/douyin_publish_last_error.png，便于回看网页实际状态。
-6. 如果脚本提示“无法连接到 Chrome 远程调试端口”，那说明 publish 图片、标题和描述都已经识别成功，真正的问题是 Chrome 不是用 --remote-debugging-port=9222 启动的，或该端口当前没有监听。
+6. 如果当前没有可接管的 Chrome 调试端口，脚本会自动拉起一个独立的自动化 Chrome，并使用 tools/chrome_automation_profile 作为独立资料目录，不会直接接管你当前已经打开的普通 Chrome 窗口。
+7. 这个独立自动化 Chrome 第一次使用时需要你手动登录一次抖音创作者中心；后续脚本会复用该资料目录，不用每次重新登录。
+8. 如果脚本提示当前自动化 Chrome 还没登录，那说明 publish 图片、标题和描述都已经识别成功，真正缺的是这个独立自动化 Chrome 的登录态，而不是本地素材问题。
 
 ## 回归检查
 
