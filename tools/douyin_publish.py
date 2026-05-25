@@ -4,7 +4,7 @@ import argparse
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Literal, Sequence
 
 try:
     from playwright.sync_api import Browser, Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
@@ -31,6 +31,7 @@ DEFAULT_AFTER_COVER_CONFIRM_WAIT_MS = 10_000
 DEFAULT_AFTER_DECLARATION_OPEN_WAIT_MS = 2_000
 DEFAULT_DEBUG_SCREENSHOT = ROOT_DIR / "tools" / "douyin_publish_last_error.png"
 SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+LocatorWaitState = Literal["attached", "detached", "hidden", "visible"]
 
 
 @dataclass(frozen=True)
@@ -240,7 +241,7 @@ def log_assets(assets: PublishAssets) -> None:
     print(f"封面文件：{assets.cover_path}")
     print(f"图文图片数量：{len(assets.image_paths)}")
     for image_path in assets.image_paths:
-        print(f"待上传图片：{image_path}")
+        print(f"已识别上传图片：{image_path}")
 
 
 def find_target_page(browser: Browser, url_keyword: str) -> Page:
@@ -266,7 +267,7 @@ def wait_for_locator(
     locators: Sequence[Locator],
     *,
     description: str,
-    state: str = "visible",
+    state: LocatorWaitState = "visible",
     timeout_ms: int = 30_000,
 ) -> Locator:
     deadline_attempts = max(1, timeout_ms // 500)
@@ -288,7 +289,7 @@ def find_optional_locator(
     page: Page,
     locators: Sequence[Locator],
     *,
-    state: str = "visible",
+    state: LocatorWaitState = "visible",
     timeout_ms: int = 3_000,
 ) -> Locator | None:
     try:
@@ -506,7 +507,20 @@ def submit_declaration(page: Page, settings: PublishSettings) -> None:
 
 def run_publish(settings: PublishSettings, assets: PublishAssets) -> None:
     with sync_playwright() as playwright:
-        browser = playwright.chromium.connect_over_cdp(settings.cdp_url)
+        try:
+            browser = playwright.chromium.connect_over_cdp(settings.cdp_url)
+        except Exception as exc:
+            error_text = str(exc)
+            if "ECONNREFUSED" in error_text or "connect_over_cdp" in error_text:
+                raise RuntimeError(
+                    "无法连接到 Chrome 远程调试端口。当前错误与 publish 图片无关，脚本已经识别到 "
+                    f"{len(assets.image_paths)} 张图文图片和 1 张封面图。\n"
+                    f"当前连接地址：{settings.cdp_url}\n"
+                    "请先用带 --remote-debugging-port=9222 参数的方式启动 Chrome，"
+                    "并确认 creator.douyin.com 页面已经在该浏览器里打开后再重试。"
+                ) from exc
+            raise
+
         page = find_target_page(browser, settings.url_keyword)
 
         try:
