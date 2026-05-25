@@ -456,7 +456,9 @@ def save_review_reports(publish_dir: Path, report_payload: dict[str, Any]) -> tu
     lines: list[str] = []
     lines.append(f"评审目录：{report_payload.get('input_dir', '')}")
     lines.append(f"评审模型：{report_payload.get('model', '')}")
-    lines.append(f"移动方式：{'复制' if report_payload.get('copy_mode') else '移动'}")
+    lines.append(
+        f"执行模式：{'dry-run（只输出报告，不移动图片）' if report_payload.get('dry_run') else ('复制' if report_payload.get('copy_mode') else '移动')}"
+    )
     lines.append("")
 
     for result in report_payload.get("groups", []):
@@ -521,10 +523,9 @@ def select_publish_images(input_dir: str | Path, *, model: str | None = None, dr
         "groups": report_groups,
     }
 
-    if not settings.dry_run:
-        report_file, summary_file = save_review_reports(settings.publish_dir, report_payload)
-        report_payload["report_file"] = str(report_file)
-        report_payload["summary_file"] = str(summary_file)
+    report_file, summary_file = save_review_reports(settings.publish_dir, report_payload)
+    report_payload["report_file"] = str(report_file)
+    report_payload["summary_file"] = str(summary_file)
 
     return report_payload
 
@@ -577,10 +578,15 @@ def main() -> int:
             "groups": report_groups,
         }
 
+        report_file, summary_file = save_review_reports(settings.publish_dir, report_payload)
+        report_payload["report_file"] = str(report_file)
+        report_payload["summary_file"] = str(summary_file)
+
         if settings.dry_run:
+            print(f"评分报告 JSON：{report_file}")
+            print(f"评分摘要 TXT：{summary_file}")
             print("dry-run 结束：已完成评分和胜出图选择，未移动文件。")
         else:
-            report_file, summary_file = save_review_reports(settings.publish_dir, report_payload)
             print(f"评分报告 JSON：{report_file}")
             print(f"评分摘要 TXT：{summary_file}")
             print(f"publish 入选图片数量：{len(report_groups)}")
