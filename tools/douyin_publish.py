@@ -23,7 +23,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 
-from image_generator import ensure_runtime_config_loaded, split_description_body_and_tags  # noqa: E402
+from image_generator import ensure_runtime_config_loaded, get_required_publish_topics, split_description_body_and_tags  # noqa: E402
 
 
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "output" / "20260525_043309_葱香海参酿"
@@ -71,6 +71,7 @@ class PublishSettings:
     after_open_cover_wait_ms: int
     after_cover_confirm_wait_ms: int
     after_declaration_open_wait_ms: int
+    auto_submit_publish: bool
     debug_screenshot: Path
     dry_run: bool
 
@@ -99,7 +100,7 @@ def parse_non_negative_int(value: object, *, field_name: str, default: int) -> i
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="接管已开启远程调试的 Chrome 抖音创作者页，自动上传 publish 图片并填写标题、描述、封面与自主声明。",
+        description="接管已开启远程调试的 Chrome 抖音创作者页，自动上传 publish 图片并填写标题、描述、封面与自主声明，默认停在待人工发布状态。",
     )
     parser.add_argument(
         "output_dir",
@@ -173,6 +174,11 @@ def parse_args() -> argparse.Namespace:
         help=f"打开自主声明下拉框后额外等待时长，默认 {DEFAULT_AFTER_DECLARATION_OPEN_WAIT_MS}ms",
     )
     parser.add_argument(
+        "--auto-submit-publish",
+        action="store_true",
+        help="显式开启后，脚本才会自动点击最终发布按钮；默认保留给人工审核后手动发布。",
+    )
+    parser.add_argument(
         "--debug-screenshot",
         default=str(DEFAULT_DEBUG_SCREENSHOT),
         help=f"运行失败时保存页面截图的位置，默认 {DEFAULT_DEBUG_SCREENSHOT}",
@@ -226,6 +232,7 @@ def resolve_settings(args: argparse.Namespace) -> PublishSettings:
         after_open_cover_wait_ms=parse_non_negative_int(args.after_open_cover_wait_ms, field_name="after-open-cover-wait-ms", default=DEFAULT_AFTER_OPEN_COVER_WAIT_MS),
         after_cover_confirm_wait_ms=parse_non_negative_int(args.after_cover_confirm_wait_ms, field_name="after-cover-confirm-wait-ms", default=DEFAULT_AFTER_COVER_CONFIRM_WAIT_MS),
         after_declaration_open_wait_ms=parse_non_negative_int(args.after_declaration_open_wait_ms, field_name="after-declaration-open-wait-ms", default=DEFAULT_AFTER_DECLARATION_OPEN_WAIT_MS),
+        auto_submit_publish=bool(args.auto_submit_publish),
         debug_screenshot=resolve_path(args.debug_screenshot),
         dry_run=bool(args.dry_run),
     )
@@ -270,6 +277,22 @@ def collect_publish_images(publish_dir: Path) -> tuple[Path, ...]:
     return tuple(image_paths)
 
 
+def merge_publish_topic_tags(topic_tags: Sequence[str]) -> tuple[str, ...]:
+    merged_tags: list[str] = []
+    seen: set[str] = set()
+
+    for topic in [*get_required_publish_topics(), *topic_tags]:
+        normalized_topic = str(topic or "").strip()
+        if not normalized_topic or normalized_topic in seen:
+            continue
+        seen.add(normalized_topic)
+        merged_tags.append(normalized_topic)
+        if len(merged_tags) >= 5:
+            break
+
+    return tuple(merged_tags)
+
+
 def resolve_publish_assets(settings: PublishSettings) -> PublishAssets:
     publish_dir = settings.output_dir / DEFAULT_PUBLISH_DIR_NAME
     if not publish_dir.exists() or not publish_dir.is_dir():
@@ -280,13 +303,19 @@ def resolve_publish_assets(settings: PublishSettings) -> PublishAssets:
     title_text = read_utf8_text(title_file)
     description_text = read_utf8_text(description_file)
     description_body, topic_tags = split_description_body_and_tags(description_text)
+    merged_topic_tags = merge_publish_topic_tags(topic_tags)
 
     if not title_text:
         raise RuntimeError(f"抖音图文标题为空：{title_file}")
     if not description_body:
         raise RuntimeError(f"抖音图文描述正文为空：{description_file}")
-    if len(topic_tags) != 5:
-        raise RuntimeError(f"抖音图文描述最后一行必须正好有 5 个话题，当前为 {len(topic_tags)} 个：{description_file}")
+    if len(merged_topic_tags) != 5:
+        raise RuntimeError(f"抖音图文描述最后一行必须正好有 5 个话题，当前为 {len(merged_topic_tags)} 个：{description_file}")
+
+    if tuple(topic_tags) != merged_topic_tags:
+        normalized_description_text = f"{description_body}\n{' '.join(merged_topic_tags)}".strip()
+        description_file.write_text(normalized_description_text, encoding="utf-8")
+        print(f"已按当前 config 同步描述文件话题：{description_file}")
 
     return PublishAssets(
         output_dir=settings.output_dir,
@@ -295,7 +324,7 @@ def resolve_publish_assets(settings: PublishSettings) -> PublishAssets:
         cover_path=resolve_cover_path(publish_dir),
         title_text=title_text,
         description_body=description_body,
-        topic_tags=tuple(topic_tags),
+        topic_tags=merged_topic_tags,
         title_file=title_file,
         description_file=description_file,
     )
@@ -454,9 +483,29 @@ def find_optional_locator(
         return None
 
 
-def click_locator(page: Page, locators: Sequence[Locator], *, description: str, timeout_ms: int = 30_000) -> Locator:
+def click_locator(
+    page: Page,
+    locators: Sequence[Locator],
+    *,
+    description: str,
+    timeout_ms: int = 30_000,
+    force: bool = False,
+) -> Locator:
     locator = wait_for_locator(page, locators, description=description, timeout_ms=timeout_ms)
-    locator.click()
+    locator.click(force=force)
+    print(f"已点击：{description}")
+    return locator
+
+
+def click_locator_via_dom(
+    page: Page,
+    locators: Sequence[Locator],
+    *,
+    description: str,
+    timeout_ms: int = 30_000,
+) -> Locator:
+    locator = wait_for_locator(page, locators, description=description, timeout_ms=timeout_ms)
+    locator.evaluate("el => el.click()")
     print(f"已点击：{description}")
     return locator
 
@@ -486,8 +535,9 @@ def title_input_locators(page: Page) -> tuple[Locator, ...]:
 
 def description_editor_locators(page: Page) -> tuple[Locator, ...]:
     return (
-        page.locator("[contenteditable='true'][data-placeholder='添加作品描述']"),
-        page.locator("div[contenteditable='true'][data-placeholder='添加作品描述']"),
+        page.locator("[contenteditable='true'][data-placeholder*='添加作品描述']"),
+        page.locator("div[contenteditable='true'][data-placeholder*='添加作品描述']"),
+        page.locator("[contenteditable][data-placeholder*='添加作品描述']"),
     )
 
 
@@ -537,9 +587,59 @@ def upload_cover_tab_locators(page: Page) -> tuple[Locator, ...]:
     )
 
 
+def select_cover_tab_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.get_by_role("tab", name="选择封面"),
+        page.locator("div[role='tab']").filter(has_text="选择封面"),
+    )
+
+
 def cover_upload_input_locators(page: Page) -> tuple[Locator, ...]:
     return (
         page.locator("input[type='file']:not([multiple])"),
+    )
+
+
+def cover_crop_confirm_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.locator("button.dialog-b5CBy1").filter(has_text="确定"),
+        page.locator("div[role='dialog'] button").filter(has_text="确定"),
+    )
+
+
+def cover_crop_modal_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.locator("div[role='modal']").filter(has_text="裁剪封面"),
+        page.locator("div[role='dialog']").filter(has_text="裁剪封面"),
+    )
+
+
+def cover_save_confirm_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.locator("button.submit-wycsGi").filter(has_text="确定"),
+        page.locator("div.operation-faNu0S button").filter(has_text="确定"),
+    )
+
+
+def cover_apply_confirm_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.locator("button.submit-eXWVUP").filter(has_text="确定"),
+        page.locator("div.operation-zqnRB8 button").filter(has_text="确定"),
+    )
+
+
+def final_publish_button_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.get_by_role("button", name="发布", exact=True),
+        page.locator("button.fixed-J9O8Yw").filter(has_text="发布"),
+        page.locator("button.primary-cECiOJ.fixed-J9O8Yw").filter(has_text="发布"),
+    )
+
+
+def publish_success_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.get_by_text("审核中", exact=False),
+        page.get_by_text("作品管理", exact=False),
     )
 
 
@@ -562,14 +662,24 @@ def declaration_select_locators(page: Page) -> tuple[Locator, ...]:
 
 def personal_view_radio_locators(page: Page) -> tuple[Locator, ...]:
     return (
+        page.locator("label").filter(has_text="内容为个人观点或见解"),
+        page.get_by_text("内容为个人观点或见解", exact=False),
         page.locator("label").filter(has_text="内容为个人观点或臆测"),
         page.get_by_text("内容为个人观点或臆测", exact=False),
     )
 
 
+def publish_editor_resume_locators(page: Page) -> tuple[Locator, ...]:
+    return declaration_select_locators(page) + title_input_locators(page)
+
+
 def ensure_publish_editor_ready(page: Page) -> None:
     if find_optional_locator(page, title_input_locators(page), timeout_ms=2_000):
         print("当前已在抖音图文发布页。")
+        return
+
+    if find_optional_locator(page, main_upload_input_locators(page), state="attached", timeout_ms=2_000):
+        print("当前已在图文上传页，已检测到多图上传控件。")
         return
 
     click_locator(page, publish_button_locators(page), description="顶部发布按钮")
@@ -580,23 +690,30 @@ def ensure_publish_editor_ready(page: Page) -> None:
         print("已进入图文发布页。")
         return
 
-    upload_entry = find_optional_locator(page, upload_graphic_entry_locators(page), timeout_ms=8_000)
-    if upload_entry is not None:
-        upload_entry.click()
-        print("已点击：上传图文入口")
+    if find_optional_locator(page, main_upload_input_locators(page), state="attached", timeout_ms=5_000):
+        print("已进入图文上传页，已检测到多图上传控件。")
+        return
 
-    wait_for_locator(page, title_input_locators(page), description="图文标题输入框", timeout_ms=30_000)
-    print("图文发布页已就绪。")
+    # 这里不要再点击“上传图文”入口，否则会弹出 Windows 原生文件对话框，
+    # 直接阻塞后续的 set_input_files 自动上传链路。
+
+    wait_for_locator(page, main_upload_input_locators(page), description="图文上传 input", state="attached", timeout_ms=30_000)
+    print("图文上传页已就绪。")
 
 
 def upload_publish_images(page: Page, assets: PublishAssets, settings: PublishSettings) -> None:
-    upload_input = wait_for_locator(
+    upload_input = find_optional_locator(
         page,
         main_upload_input_locators(page),
-        description="图文上传 input",
         state="attached",
-        timeout_ms=30_000,
+        timeout_ms=5_000,
     )
+    if upload_input is None:
+        if find_optional_locator(page, title_input_locators(page), timeout_ms=2_000):
+            print("当前页面已存在标题输入框，视为图片已经上传到编辑页，跳过重复投喂。")
+            return
+        raise RuntimeError("等待 图文上传 input 超时。")
+
     upload_input.set_input_files([str(path) for path in assets.image_paths])
     print(f"已投喂图文图片，共 {len(assets.image_paths)} 张。")
     page.wait_for_timeout(settings.after_upload_wait_ms)
@@ -648,9 +765,50 @@ def upload_cover(page: Page, assets: PublishAssets, settings: PublishSettings) -
     cover_input.set_input_files(str(assets.cover_path))
     print("已上传封面图。")
 
-    click_locator(page, confirm_button_locators(page), description="封面裁剪确定按钮", timeout_ms=30_000)
-    page.wait_for_timeout(800)
-    click_locator(page, confirm_button_locators(page), description="封面保存确认按钮", timeout_ms=30_000)
+    wait_for_locator(page, cover_crop_modal_locators(page), description="封面裁剪弹窗", timeout_ms=30_000)
+    crop_modal_closed = False
+    for attempt_index in range(3):
+        click_locator(
+            page,
+            cover_crop_confirm_locators(page),
+            description="封面裁剪确定按钮",
+            timeout_ms=30_000,
+            force=True,
+        )
+        try:
+            wait_for_locator(
+                page,
+                cover_crop_modal_locators(page),
+                description="封面裁剪弹窗关闭",
+                state="hidden",
+                timeout_ms=4_000,
+            )
+            crop_modal_closed = True
+            break
+        except RuntimeError:
+            if attempt_index == 2:
+                break
+            page.wait_for_timeout(1_500)
+
+    if not crop_modal_closed:
+        raise RuntimeError("封面裁剪弹窗确认后仍未关闭。")
+
+    click_locator_via_dom(page, select_cover_tab_locators(page), description="选择封面标签", timeout_ms=30_000)
+    page.wait_for_timeout(1_000)
+
+    editor_resumed = False
+    for attempt_index in range(3):
+        click_locator_via_dom(page, cover_apply_confirm_locators(page), description="封面应用确认按钮", timeout_ms=30_000)
+        if find_optional_locator(page, publish_editor_resume_locators(page), timeout_ms=4_000):
+            editor_resumed = True
+            break
+        if attempt_index == 2:
+            break
+        page.wait_for_timeout(1_500)
+
+    if not editor_resumed:
+        raise RuntimeError("封面应用确认后，主编辑区仍未恢复。")
+
     page.wait_for_timeout(settings.after_cover_confirm_wait_ms)
 
 
@@ -659,6 +817,20 @@ def submit_declaration(page: Page, settings: PublishSettings) -> None:
     page.wait_for_timeout(settings.after_declaration_open_wait_ms)
     click_locator(page, personal_view_radio_locators(page), description="个人观点声明选项", timeout_ms=10_000)
     click_locator(page, confirm_button_locators(page), description="自主声明确认按钮", timeout_ms=30_000)
+
+
+def submit_final_publish(page: Page) -> None:
+    click_locator(page, final_publish_button_locators(page), description="最终发布按钮", timeout_ms=30_000)
+    try:
+        page.wait_for_url("**/content/manage**", timeout=30_000)
+    except PlaywrightTimeoutError:
+        wait_for_locator(page, publish_success_locators(page), description="发布完成结果", timeout_ms=30_000)
+    print("已进入作品管理页，发布流程已提交。")
+
+
+def wait_for_manual_publish_ready(page: Page) -> None:
+    wait_for_locator(page, final_publish_button_locators(page), description="最终发布按钮", timeout_ms=30_000)
+    print("已完成自动填充与声明处理，当前停在待人工发布状态，请人工审核后手动点击发布。")
 
 
 def run_publish(settings: PublishSettings, assets: PublishAssets) -> None:
@@ -696,6 +868,10 @@ def run_publish(settings: PublishSettings, assets: PublishAssets) -> None:
             input_publish_description(page, assets, settings)
             upload_cover(page, assets, settings)
             submit_declaration(page, settings)
+            if settings.auto_submit_publish:
+                submit_final_publish(page)
+            else:
+                wait_for_manual_publish_ready(page)
         except Exception:
             settings.debug_screenshot.parent.mkdir(parents=True, exist_ok=True)
             try:
