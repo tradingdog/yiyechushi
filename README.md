@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-v0.55
+v0.57
 
 ## 使用方式
 
@@ -19,6 +19,7 @@ v0.55
 9. 主流程和文本模式现在都会额外生成“抖音图文标题”和“抖音图文描述”，描述最后会自动带 5 个更贴近菜谱的潜力话题标签。
 10. 如需单独只刷新 dish_name.txt 而不继续生成 prompt 或图片，直接运行 tools/generate_auto_dish_idea.py。
 11. 如需从某个 output 子目录里的多版本图片中自动筛出更适合发布的版本，运行 tools/select_publish_images.py；它会按页面分组让豆包逐页打分，再把胜出图移入 publish 文件夹。
+12. 默认情况下，主流程在整套图片和 Photoshop 合成都完成后，也会自动执行一次 publish 筛图并输出报告；若只想关掉这一步，把 config.env 里的 PUBLISH_AUTO_SELECT 改成 2。
 
 ## 当前状态
 
@@ -83,6 +84,10 @@ v0.55
 59. 图片评审工具对“品牌污染”的判定已收紧为只检查实体物体上的品牌、logo、包装、瓶身、锅具印字和食材标签；页面自带的菜名、标题、页尾关注文案与账号名不会再被误判为硬伤。
 60. 图解01 page01 prompt 的本地回退链路已改为优先从正式菜谱文本反解析字段，不再从粗略 notes 猜主料、香料、调味料、成败关键和步骤；因此即使文本阶段回退，也不会再把主料写成菜名或把步骤退成通用模板。
 61. 当前规则已收紧为：只要发生代码、脚本、配置或文档改动，任务收尾前必须完成版本更新、git 提交和 GitHub 推送；若远端阻塞，需要明确记录原因，避免版本长期只停留在本地工作区。
+62. 图解01 首图与图解02到图解06的标题居中现在是 publish 评审硬门槛。tools/select_publish_images.py 会同时把原图和带中心参考线的辅助图交给豆包，再叠加本地像素偏移估算决定是否通过；当前 page01 的容忍度更严。
+63. 若某个标题页当前候选全部未通过居中硬门槛，正式模式会按该页已经落盘的文生图 prompt 单张补生新图，再把新图并回候选复评；dry-run 只会在报告里写出“需要补生”，不会真的调图片接口。
+64. 若当前目录里的成图已经是 Photoshop 合成后的 JPG，标题补生出来的新图会自动只对这一张补跑一次 PSD 模板再参与复评；如果补生阶段被图片接口 403 阻塞，该页不会进入 publish，但整轮仍会继续处理其它页面，并把阻塞原因写进报告。
+65. 主流程现在支持自动 publish 收尾：当 config.env 中 PUBLISH_AUTO_SELECT=1 时，main.py 会在所有图片与 Photoshop 完成后自动创建 publish，并打印 publish_selection_report.json 与 publish_selection_report.txt 路径。
 
 ## 仓库地址
 
@@ -176,14 +181,16 @@ run_photoshop_template_batch.cmd output\某个目录
 python tools/select_publish_images.py output\某个目录 --dry-run
 python tools/select_publish_images.py output\某个目录
 python tools/select_publish_images.py output\某个目录 --copy
+python tools/select_publish_images.py output\某个目录 --title-retry-limit 5
 ```
 
 说明：
-1. 该工具会自动按页面分组某个 output 子目录中的图片：图解01 首图、图解02到图解06、多版本封面会分别比较；若某页只有 1 张图，则直接入选，不调用 AI 分析。
-2. 首图重点看标题中轴与居中、主菜真实感、食欲、排版和文案逻辑；图解02到图解06重点看标题居中、无品牌和无可读标签、阅读顺序、信息图是否有效；封面重点看菜品是否更居中、更有食欲。
-3. 工具会把每页胜出图移动到 output/日期时间戳_菜品名/publish；若传 --copy，则保留原图并复制一份到 publish。
-4. 工具会在 publish 目录下额外生成 publish_selection_report.json 和 publish_selection_report.txt 两份评分报告。
-5. 默认优先读取 DOUBAO_REVIEW_MODEL；若未配置，则回退到 DOUBAO_TEXT_MODEL。
+1. 该工具会自动按页面分组某个 output 子目录中的图片：图解01 首图、图解02到图解06、多版本封面会分别比较；封面仍按普通多版本评审逻辑处理。
+2. 图解01 首图与图解02到图解06的标题居中是硬门槛。工具会把原图和带中心参考线的辅助图一起交给豆包，再叠加本地像素偏移估算；若当前候选全部未通过，正式模式会按该页原 prompt 单张补生后复评，dry-run 只会在报告里写出“需要补生”。
+3. 若目录里的图片已经是 Photoshop 合成后的 JPG，补生出来的新图会自动只对这一张补跑 PSD 模板，再参与复评，避免 JPG 和原始 PNG 混评。
+4. 工具会把每页胜出图移动到 output/日期时间戳_菜品名/publish；若传 --copy，则保留原图并复制一份到 publish。
+5. 工具会在 publish 目录下额外生成 publish_selection_report.json 和 publish_selection_report.txt 两份评分报告；若补生阶段被图片接口阻塞，对应页面会被标记为“未入 publish”，阻塞原因会直接写进报告。
+6. 默认优先读取 DOUBAO_REVIEW_MODEL；若未配置，则回退到 DOUBAO_TEXT_MODEL。标题补生上限默认读取 PUBLISH_TITLE_CENTER_RETRY_LIMIT。
 
 ## 回归检查
 

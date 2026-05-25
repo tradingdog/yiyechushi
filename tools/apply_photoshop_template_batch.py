@@ -394,6 +394,49 @@ def process_single_image_local(image_file: Path, index: int, total: int, setting
     return final_output_path
 
 
+def apply_photoshop_template_to_image(
+    image_file: str | Path,
+    *,
+    template_file: str | Path | None = None,
+    smart_object_layer: str | None = None,
+    local_photoshop_exe: str | Path | None = None,
+    job_timeout_seconds: int | None = None,
+    jpeg_quality: int | None = None,
+) -> str:
+    resolved_image_file = resolve_path(image_file)
+    if not resolved_image_file.exists() or not resolved_image_file.is_file():
+        raise RuntimeError(f"图片文件不存在：{resolved_image_file}")
+    if resolved_image_file.suffix.lower() not in SUPPORTED_INPUT_SUFFIXES:
+        raise RuntimeError(f"暂不支持该图片类型：{resolved_image_file.suffix}")
+
+    settings = resolve_local_photoshop_settings(
+        input_dir=resolved_image_file.parent,
+        template_file=template_file,
+        smart_object_layer=smart_object_layer,
+        local_photoshop_exe=local_photoshop_exe,
+        job_timeout_seconds=job_timeout_seconds,
+        jpeg_quality=jpeg_quality,
+        dry_run=False,
+    )
+
+    print(f"开始单图 Photoshop 模板合成：{resolved_image_file.name}")
+    validate_local_photoshop_setup(
+        template_file=settings.template_file,
+        smart_object_layer=settings.smart_object_layer,
+        local_photoshop_exe=settings.local_photoshop_exe,
+        job_timeout_seconds=settings.job_timeout_seconds,
+        jpeg_quality=settings.jpeg_quality,
+    )
+
+    output_path = process_single_image_local(
+        image_file=resolved_image_file,
+        index=1,
+        total=1,
+        settings=settings,
+    )
+    return str(output_path.resolve())
+
+
 def apply_photoshop_template_batch_to_dir(
     input_dir: str | Path,
     *,

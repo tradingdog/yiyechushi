@@ -16,6 +16,10 @@ def main() -> None:
     print(f"输出根目录：{result['output_root']}")
     print(f"抖音图文标题文件：{result['publish_title_file']}")
     print(f"抖音图文描述文件：{result['publish_description_file']}")
+    if result.get("publish_selection_report_file"):
+        print(f"publish 评分报告：{result['publish_selection_report_file']}")
+    if result.get("publish_selection_summary_file"):
+        print(f"publish 摘要报告：{result['publish_selection_summary_file']}")
     for page in result["guide_pages"]:
         print(f"图解{page['page_number']:02d}：{page['page_name']}")
         print(f"图解文案文件：{page['text_file']}")
@@ -25,6 +29,8 @@ def main() -> None:
     print(f"封面 prompt 文件：{result['cover_prompt_file']}")
     for saved_file in result["cover_saved_files"]:
         print(f"已保存封面：{saved_file}")
+    for selected_file in result.get("publish_selected_files", []):
+        print(f"已选入 publish：{selected_file}")
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ DEFAULT_OPENAI_IMAGE_MODEL = "gpt-image-2-2026-04-21"
 DEFAULT_AUTO_DISH_GENERATION_ENABLED = True
 DEFAULT_AUTO_DISH_REGION_CODE = "0"
 DEFAULT_PHOTOSHOP_AUTO_COMPOSITE_ENABLED = True
+DEFAULT_PUBLISH_AUTO_SELECT_ENABLED = True
 AUTO_DISH_GENERATION_RETRY_COUNT = 4
 PUBLISH_ACTIVITY_TOPICS: tuple[str, ...] = (
     "抖音美食推荐官",
@@ -688,6 +689,16 @@ def is_photoshop_auto_composite_enabled() -> bool:
     return parse_dual_switch_env_value(
         env_name="PHOTOSHOP_AUTO_COMPOSITE",
         raw_value=os.getenv("PHOTOSHOP_AUTO_COMPOSITE"),
+        enabled_value="1",
+        disabled_value="2",
+    )
+
+
+def is_publish_auto_select_enabled() -> bool:
+    ensure_runtime_config_loaded()
+    return parse_dual_switch_env_value(
+        env_name="PUBLISH_AUTO_SELECT",
+        raw_value=os.getenv("PUBLISH_AUTO_SELECT"),
         enabled_value="1",
         disabled_value="2",
     )
@@ -3209,6 +3220,12 @@ def apply_photoshop_postprocess_to_output_dir(output_dir: Path) -> dict[str, str
     return apply_photoshop_template_batch_to_dir(input_dir=output_dir)
 
 
+def auto_select_publish_images_for_output_dir(output_dir: Path) -> dict[str, Any]:
+    from tools.select_publish_images import select_publish_images
+
+    return select_publish_images(input_dir=output_dir)
+
+
 def remap_processed_image_paths(saved_files: Sequence[str], processed_file_map: dict[str, str]) -> list[str]:
     remapped_paths: list[str] = []
     for file_path in saved_files:
@@ -3525,6 +3542,7 @@ def generate_recipe_assets_from_idea_file(
 ) -> dict[str, Any]:
     result = generate_recipe_text_assets_from_idea_file(idea_file_name=idea_file_name)
     photoshop_auto_composite_enabled = is_photoshop_auto_composite_enabled()
+    publish_auto_select_enabled = is_publish_auto_select_enabled()
 
     if photoshop_auto_composite_enabled:
         print("主流程已开启 Photoshop 自动合成，先校验本地 Photoshop 和 PSD 模板...")
@@ -3580,6 +3598,11 @@ def generate_recipe_assets_from_idea_file(
     result["cover_saved_files"] = cover_image_result["saved_files"]
     result["photoshop_auto_composite"] = "1" if photoshop_auto_composite_enabled else "2"
     result["photoshop_processed_files"] = []
+    result["publish_auto_select"] = "1" if publish_auto_select_enabled else "2"
+    result["publish_selection"] = {}
+    result["publish_selection_report_file"] = ""
+    result["publish_selection_summary_file"] = ""
+    result["publish_selected_files"] = []
 
     if photoshop_auto_composite_enabled:
         print("所有图片已生成完成，开始执行 Photoshop 模板合成并覆盖导出 JPG...")
@@ -3590,6 +3613,18 @@ def generate_recipe_assets_from_idea_file(
         result["saved_files"] = remap_processed_image_paths(result["saved_files"], processed_file_map)
         result["cover_saved_files"] = remap_processed_image_paths(result["cover_saved_files"], processed_file_map)
         result["photoshop_processed_files"] = list(processed_file_map.values())
+
+    if publish_auto_select_enabled:
+        print("所有图片与 Photoshop 处理已完成，开始自动评审发布图并生成 publish 报告...")
+        publish_selection_result = auto_select_publish_images_for_output_dir(Path(result["output_root"]))
+        result["publish_selection"] = publish_selection_result
+        result["publish_selection_report_file"] = str(publish_selection_result.get("report_file", ""))
+        result["publish_selection_summary_file"] = str(publish_selection_result.get("summary_file", ""))
+        result["publish_selected_files"] = [
+            str(group_result.get("selected_output_path", ""))
+            for group_result in publish_selection_result.get("groups", [])
+            if str(group_result.get("selected_output_path", "")).strip()
+        ]
 
     return result
 
