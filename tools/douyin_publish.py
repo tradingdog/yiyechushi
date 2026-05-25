@@ -602,15 +602,16 @@ def cover_upload_input_locators(page: Page) -> tuple[Locator, ...]:
 
 def cover_crop_confirm_locators(page: Page) -> tuple[Locator, ...]:
     return (
-        page.locator("button.dialog-b5CBy1").filter(has_text="确定"),
-        page.locator("div[role='dialog'] button").filter(has_text="确定"),
+        page.locator("div.semi-modal-wrap[role='modal']:visible button.primary-cECiOJ.dialog-b5CBy1").filter(has_text="确定"),
+        page.locator("div[role='modal']:visible button.dialog-b5CBy1").filter(has_text="确定"),
+        page.locator("div.semi-modal-wrap[role='modal']:visible button").filter(has_text="确定"),
     )
 
 
 def cover_crop_modal_locators(page: Page) -> tuple[Locator, ...]:
     return (
-        page.locator("div[role='modal']").filter(has_text="裁剪封面"),
-        page.locator("div[role='dialog']").filter(has_text="裁剪封面"),
+        page.locator("div.semi-modal-wrap[role='modal']:visible").filter(has_text="裁剪封面"),
+        page.locator("div[role='modal']:visible").filter(has_text="裁剪封面"),
     )
 
 
@@ -766,14 +767,14 @@ def upload_cover(page: Page, assets: PublishAssets, settings: PublishSettings) -
     print("已上传封面图。")
 
     wait_for_locator(page, cover_crop_modal_locators(page), description="封面裁剪弹窗", timeout_ms=30_000)
+    page.wait_for_timeout(1_500)
     crop_modal_closed = False
     for attempt_index in range(3):
-        click_locator(
+        click_locator_via_dom(
             page,
             cover_crop_confirm_locators(page),
             description="封面裁剪确定按钮",
             timeout_ms=30_000,
-            force=True,
         )
         try:
             wait_for_locator(
@@ -792,6 +793,9 @@ def upload_cover(page: Page, assets: PublishAssets, settings: PublishSettings) -
 
     if not crop_modal_closed:
         raise RuntimeError("封面裁剪弹窗确认后仍未关闭。")
+
+    click_locator_via_dom(page, cover_save_confirm_locators(page), description="上传封面确认按钮", timeout_ms=30_000)
+    page.wait_for_timeout(1_500)
 
     click_locator_via_dom(page, select_cover_tab_locators(page), description="选择封面标签", timeout_ms=30_000)
     page.wait_for_timeout(1_000)
