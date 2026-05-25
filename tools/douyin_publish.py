@@ -535,9 +535,12 @@ def title_input_locators(page: Page) -> tuple[Locator, ...]:
 
 def description_editor_locators(page: Page) -> tuple[Locator, ...]:
     return (
+        page.locator("div.zone-container.editor-kit-container.editor.editor-comp-publish[contenteditable='true']"),
+        page.locator("div.editor-comp-publish[contenteditable='true']"),
         page.locator("[contenteditable='true'][data-placeholder*='添加作品描述']"),
         page.locator("div[contenteditable='true'][data-placeholder*='添加作品描述']"),
         page.locator("[contenteditable][data-placeholder*='添加作品描述']"),
+        page.locator("div[contenteditable='true']"),
     )
 
 
@@ -619,6 +622,13 @@ def cover_save_confirm_locators(page: Page) -> tuple[Locator, ...]:
     return (
         page.locator("button.submit-wycsGi").filter(has_text="确定"),
         page.locator("div.operation-faNu0S button").filter(has_text="确定"),
+    )
+
+
+def upload_cover_ready_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.get_by_text("上下滑动图片选择封面区域", exact=False),
+        page.get_by_text("重新上传", exact=False),
     )
 
 
@@ -794,15 +804,11 @@ def upload_cover(page: Page, assets: PublishAssets, settings: PublishSettings) -
     if not crop_modal_closed:
         raise RuntimeError("封面裁剪弹窗确认后仍未关闭。")
 
-    click_locator_via_dom(page, cover_save_confirm_locators(page), description="上传封面确认按钮", timeout_ms=30_000)
-    page.wait_for_timeout(1_500)
-
-    click_locator_via_dom(page, select_cover_tab_locators(page), description="选择封面标签", timeout_ms=30_000)
-    page.wait_for_timeout(1_000)
+    wait_for_locator(page, upload_cover_ready_locators(page), description="上传封面就绪状态", timeout_ms=30_000)
 
     editor_resumed = False
     for attempt_index in range(3):
-        click_locator_via_dom(page, cover_apply_confirm_locators(page), description="封面应用确认按钮", timeout_ms=30_000)
+        click_locator(page, cover_save_confirm_locators(page), description="上传封面确认按钮", timeout_ms=30_000)
         if find_optional_locator(page, publish_editor_resume_locators(page), timeout_ms=4_000):
             editor_resumed = True
             break
@@ -811,7 +817,7 @@ def upload_cover(page: Page, assets: PublishAssets, settings: PublishSettings) -
         page.wait_for_timeout(1_500)
 
     if not editor_resumed:
-        raise RuntimeError("封面应用确认后，主编辑区仍未恢复。")
+        raise RuntimeError("上传封面确认后，主编辑区仍未恢复。")
 
     page.wait_for_timeout(settings.after_cover_confirm_wait_ms)
 
