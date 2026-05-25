@@ -1,33 +1,427 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
+import random
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from openai import OpenAI
 
+from guide_generator import generate_guide_pages
+from guide_pages import cover_page, page01_recipe
+from guide_pages.shared import GUIDE_PAGE_MACHINE_LABELS
+
 
 ROOT_DIR = Path(__file__).resolve().parent
+DEFAULT_CONFIG_FILE = ROOT_DIR / "config.env"
 DEFAULT_PROMPT_FILE = ROOT_DIR / "临时调试prompt.txt"
 DEFAULT_IDEA_FILE = ROOT_DIR / "dish_name.txt"
+DEFAULT_TRADITIONAL_DISH_FILE = ROOT_DIR / "chuantongcaipu.txt"
+DEFAULT_AUTO_DISH_MEMORY_FILE = ROOT_DIR / "dish_idea_memory.jsonl"
 OUTPUT_ROOT_DIR = ROOT_DIR / "output"
-CREATIVE_OUTPUT_DIR = OUTPUT_ROOT_DIR / "chuangyi"
-PROMPT_OUTPUT_DIR = OUTPUT_ROOT_DIR / "prompt"
-IMAGE_OUTPUT_DIR = OUTPUT_ROOT_DIR / "image"
-DEFAULT_OUTPUT_DIR = IMAGE_OUTPUT_DIR
+DEFAULT_OUTPUT_DIR = OUTPUT_ROOT_DIR
 DEFAULT_AD_COPY_FILE = ROOT_DIR / "guanggaoyu.txt"
 DEFAULT_COLLECTION_HINT = "先收藏，想做时直接照着买照着做"
 DEFAULT_COLLECTION_COPY = "这张先收藏 原创新菜照着做更稳"
 DEFAULT_DYNAMIC_ACTION = "一双木筷从画面侧上方夹起一块主菜悬在半空 带轻微挂汁与热气"
 DEFAULT_REQUEST_RETRY_COUNT = 2
+DEFAULT_TEXT_PROVIDER = "doubao"
+DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-mini-260428"
+DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+DEFAULT_OPENAI_IMAGE_MODEL = "gpt-image-2-2026-04-21"
+DEFAULT_AUTO_DISH_GENERATION_ENABLED = True
+DEFAULT_AUTO_DISH_REGION_CODE = "0"
+DEFAULT_PHOTOSHOP_AUTO_COMPOSITE_ENABLED = True
+AUTO_DISH_GENERATION_RETRY_COUNT = 4
+PUBLISH_ACTIVITY_TOPICS: tuple[str, ...] = (
+    "抖音美食推荐官",
+    "跟着抖音学做菜",
+    "我的厨房日记",
+)
+PUBLISH_GENERAL_TOPICS: tuple[str, ...] = (
+    "家常菜谱",
+    "晚饭吃什么",
+    "下饭菜",
+    "美食教程",
+    "厨房日常",
+    "原创菜谱",
+    "快手家常菜",
+    "跟着做不翻车",
+    "小白学做菜",
+)
+PUBLISH_BANNED_TOPIC_TOKENS: tuple[str, ...] = (
+    "阿叶造新菜",
+)
+GUIDE_LINE_STALE_KEYWORDS = (
+    "周末请客",
+    "家宴",
+    "请客就做",
+    "今天就做这盘",
+    "米饭党就做这盘",
+    "就馋这口热乎",
+    "就馋这口焦香",
+    "超有面子",
+    "有面子",
+)
+AUTO_DISH_BANNED_NAME_TOKENS = (
+    "玉珠",
+    "金汤",
+    "翡翠",
+    "云朵",
+    "星空",
+    "火焰",
+    "雪顶",
+    "琥珀",
+    "神仙",
+    "灵感",
+)
+AUTO_DISH_NAME_ACTION_TOKENS = (
+    "夹饼",
+    "夹馍",
+    "火烧",
+    "盖饭",
+    "拌饭",
+    "炒饭",
+    "烩饭",
+    "焗饭",
+    "汤面",
+    "拌面",
+    "炒面",
+    "焖面",
+    "米线",
+    "河粉",
+    "年糕塔",
+    "清蒸",
+    "慢煮",
+    "酱焖",
+    "红烧",
+    "香煎",
+    "干煸",
+    "煲",
+    "锅",
+    "汤",
+    "卷",
+    "塔",
+    "蒸",
+    "焗",
+    "煎",
+    "烧",
+    "焖",
+    "拌",
+    "炒",
+    "炸",
+    "烤",
+    "卤",
+    "炖",
+    "煮",
+    "酿",
+    "夹",
+    "浇",
+)
+AUTO_DISH_STRUCTURE_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("夹饼夹馍类", ("肉夹馍", "夹馍", "夹饼", "火烧", "烧饼", "馍夹", "饼夹", "口袋饼", "荷叶饼", "汉堡", "三明治", "贝果", "法棍", "塔可")),
+    ("盖饭拌饭类", ("盖饭", "拌饭", "炒饭", "烩饭", "鸡饭", "丼", "抓饭", "焗饭", "饭团")),
+    ("面粉主食类", ("拉面", "汤面", "拌面", "炒面", "焖面", "面条", "米线", "河粉", "乌冬", "意面", "米粉", "炒粉", "粉丝")),
+    ("汤煲锅类", ("火锅", "锅仔", "砂锅", "陶煲", "煲", "羹", "浓汤", "清汤", "炖汤", "炖")),
+    ("包卷点心类", ("春卷", "卷饼", "肠粉", "可丽饼", "馄饨", "抄手", "锅贴", "烧麦", "饺")),
+    ("串烤铁板类", ("烤串", "肉串", "串烧", "烧烤", "铁板")),
+    ("披萨派塔类", ("披萨", "馅饼", "派", "塔")),
+)
+AUTO_DISH_MAIN_INGREDIENT_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("驴", ("驴腿", "驴腱", "驴肉", "驴")),
+    ("牛", ("牛腩", "牛肋", "牛舌", "牛排", "肥牛", "牛肉", "牛")),
+    ("羊", ("羊排", "羊腿", "羊蝎子", "羊肉", "羊")),
+    ("猪", ("五花肉", "排骨", "里脊", "猪蹄", "猪脚", "猪肉", "猪")),
+    ("鸡", ("鸡腿", "鸡翅", "鸡胸", "鸡柳", "鸡杂", "鸡肉", "鸡")),
+    ("鸭", ("鸭腿", "鸭胸", "鸭肉", "鸭")),
+    ("鹅", ("鹅肉", "鹅")),
+    ("鱼", ("鱼头", "鱼片", "鱼柳", "鱼肉", "鱼")),
+    ("虾", ("虾仁", "虾滑", "大虾", "鲜虾", "虾")),
+    ("蟹", ("蟹肉", "蟹柳", "蟹")),
+    ("贝", ("扇贝", "生蚝", "蛤蜊", "贝肉", "贝")),
+    ("鱿墨章", ("鱿鱼", "墨鱼", "章鱼")),
+    ("蛙", ("牛蛙", "田鸡", "蛙")),
+    ("豆腐", ("豆腐", "豆干", "豆皮", "腐竹")),
+    ("蛋", ("鸡蛋", "鹌鹑蛋", "蛋")),
+    ("土豆", ("土豆", "马铃薯")),
+    ("茄子", ("茄子",)),
+    ("菌菇", ("菌菇", "蘑菇", "香菇", "杏鲍菇", "金针菇", "口蘑")),
+)
+AUTO_DISH_REGION_PROFILES: dict[str, dict[str, Any]] = {
+    "0": {
+        "label": "全球随机",
+        "sections": ("中餐", "国外"),
+        "keywords": (),
+        "aliases": (),
+    },
+    "1": {
+        "label": "中华料理",
+        "sections": ("中餐",),
+        "keywords": (),
+        "aliases": (),
+    },
+    "2": {
+        "label": "新马泰与东南亚料理",
+        "sections": ("国外",),
+        "keywords": ("泰", "新加坡", "马来", "娘惹", "印尼", "菲律宾", "越南"),
+        "aliases": (
+            "冬阴功汤",
+            "肉骨茶",
+            "海南鸡饭",
+            "咖喱叻沙",
+            "亚参叻沙",
+            "槟城虾面",
+            "福建虾面",
+            "炒粿条",
+            "泰式船面",
+            "泰式金边粉",
+            "越南河粉",
+            "越南顺化牛肉粉",
+            "越南烤肉米线",
+            "沙嗲鸡肉串",
+            "沙嗲牛肉串",
+            "泰式椰浆鸡",
+            "泰式绿咖喱鸡",
+            "泰式红咖喱鸡",
+            "马沙文咖喱牛肉",
+            "马来椰浆饭",
+            "摩摩喳喳",
+            "娘惹九层糕",
+        ),
+    },
+    "3": {
+        "label": "日韩料理",
+        "sections": ("国外",),
+        "keywords": ("韩式", "日式", "日本", "韩国"),
+        "aliases": (
+            "寿喜烧",
+            "日式涮涮锅",
+            "相扑火锅",
+            "牛丼",
+            "亲子丼",
+            "鳗鱼饭",
+            "天丼",
+            "味噌汤",
+            "豚汁",
+            "日式拉面",
+            "豚骨拉面",
+            "味噌拉面",
+            "乌冬面",
+            "荞麦面",
+            "大阪烧",
+            "广岛烧",
+            "天妇罗",
+            "唐扬炸鸡",
+            "可乐饼",
+            "日式煎饺",
+            "日式茶碗蒸",
+            "韩式蒸蛋",
+            "韩式拌饭",
+            "石锅拌饭",
+            "韩式烤牛肉",
+            "韩式烤五花肉",
+            "韩式炸酱面",
+            "韩式大酱汤",
+            "韩式参鸡汤",
+            "韩式泡菜汤",
+            "韩式泡菜",
+            "韩式腌萝卜",
+            "韩式杂菜",
+            "韩式辣炒年糕",
+            "韩式炖排骨",
+            "鲷鱼烧",
+            "日式大福",
+            "日式羊羹",
+            "日式铜锣烧",
+        ),
+    },
+    "4": {
+        "label": "西餐与欧洲经典料理",
+        "sections": ("国外",),
+        "keywords": ("法式", "意大利", "意式", "西班牙", "英国", "德国", "爱尔兰", "瑞士", "希腊", "葡式"),
+        "aliases": (
+            "凯撒沙拉",
+            "尼斯沙拉",
+            "卡普雷塞沙拉",
+            "惠灵顿牛排",
+            "玛格丽特披萨",
+            "那不勒斯披萨",
+            "法式洋葱汤",
+            "马赛鱼汤",
+            "意大利蔬菜汤",
+            "西班牙冷汤",
+            "德国土豆汤",
+            "新英格兰蛤蜊浓汤",
+            "奶油蘑菇汤",
+            "维也纳炸牛排",
+            "西西里炸饭团",
+            "炸鱼薯条",
+            "西班牙海鲜饭",
+            "意大利烩饭",
+            "希腊焗通心粉",
+            "德式奶酪面疙瘩",
+            "法式可丽饼",
+            "意大利佛卡夏",
+            "法式马卡龙",
+            "法式可丽露",
+            "法式舒芙蕾",
+            "提拉米苏",
+            "意式奶冻",
+            "葡式蛋挞",
+            "意式冰淇淋",
+        ),
+    },
+    "5": {
+        "label": "中东北非料理",
+        "sections": ("国外",),
+        "keywords": ("土耳其", "黎巴嫩", "伊朗", "以色列", "埃及", "摩洛哥", "突尼斯", "阿尔及利亚", "中东"),
+        "aliases": (
+            "塔布勒沙拉",
+            "鹰嘴豆泥",
+            "巴巴加努什",
+            "穆哈马拉",
+            "法图什沙拉",
+            "拉布内",
+            "酸奶黄瓜酱",
+            "恰齐克",
+            "雪克舒卡",
+            "胡恩卡尔贝延迪",
+            "法拉费",
+            "基贝",
+            "布里克",
+            "中东科夫塔烤肉串",
+            "摩洛哥塔吉锅",
+            "哈里拉汤",
+            "科沙里",
+            "曼萨夫",
+            "巴克拉瓦",
+            "库纳法",
+            "玛阿穆尔",
+            "巴斯布萨",
+            "乌姆阿里",
+            "土耳其软糖",
+            "土耳其米布丁",
+        ),
+    },
+    "6": {
+        "label": "东欧料理",
+        "sections": ("国外",),
+        "keywords": ("俄罗斯", "乌克兰", "波兰", "匈牙利", "捷克", "罗马尼亚", "格鲁吉亚", "亚美尼亚", "阿塞拜疆"),
+        "aliases": (
+            "奥利维耶沙拉",
+            "俄式甜菜沙拉",
+            "皮毛大衣沙拉",
+            "罗宋汤",
+            "匈牙利牛肉汤",
+            "俄式土豆饼",
+            "波兰土豆饼",
+            "捷克炸奶酪",
+            "俄罗斯鱼汤",
+            "波兰酸黑麦汤",
+            "波兰酸菜汤",
+            "捷克蒜汤",
+            "罗马尼亚牛肚汤",
+            "罗马尼亚肉丸酸汤",
+            "格鲁吉亚哈乔汤",
+            "亚美尼亚酸奶大麦汤",
+            "俄罗斯荞麦粥",
+            "乌克兰荞麦粥",
+            "波兰蘑菇荞麦饭",
+            "罗马尼亚抓饭",
+            "俄罗斯饺子",
+            "波兰饺子",
+            "格鲁吉亚饺子",
+            "乌克兰樱桃饺",
+            "波兰奶酪饺",
+            "俄罗斯布林饼",
+            "波兰薄饼",
+            "匈牙利兰戈斯",
+            "罗马尼亚奶酪馅饼",
+            "俄罗斯蜂蜜蛋糕",
+            "捷克烟囱卷",
+            "罗马尼亚奶酪甜甜圈",
+            "俄罗斯拿破仑蛋糕",
+            "格鲁吉亚果仁糖串",
+            "亚美尼亚加塔饼",
+        ),
+    },
+    "7": {
+        "label": "拉美料理",
+        "sections": ("国外",),
+        "keywords": ("墨西哥", "秘鲁", "巴西", "阿根廷", "智利", "古巴", "哥伦比亚", "委内瑞拉", "厄瓜多尔", "玻利维亚", "波多黎各", "巴拉圭", "萨尔瓦多"),
+        "aliases": (
+            "酸橘汁腌鱼",
+            "墨西哥法士达",
+            "墨西哥牧场蛋",
+            "古巴碎牛肉",
+            "巴西法罗法",
+            "墨西哥鼹酱鸡",
+            "墨西哥辣椒炖牛肉",
+            "秘鲁黄椒鸡",
+            "巴西黑豆炖肉",
+            "巴西海鲜炖锅",
+            "阿根廷玉米炖肉",
+            "智利玉米派",
+            "古巴旧衣服牛肉",
+            "厄瓜多尔椰奶炖鱼",
+            "墨西哥玉米粽",
+            "秘鲁塔马尔",
+            "委内瑞拉哈亚卡",
+            "哥伦比亚塔马尔",
+            "智利玉米蒸包",
+            "墨西哥炸玉米卷",
+            "阿根廷米兰萨炸牛排",
+            "古巴炸青蕉",
+            "波多黎各莫丰戈",
+            "墨西哥烤玉米",
+            "秘鲁炭烤鸡",
+            "阿根廷青酱牛排",
+            "古巴烤乳猪",
+            "巴西烤香肠",
+            "哥伦比亚烤牛肉串",
+            "墨西哥玉米饼汤",
+            "墨西哥波索莱汤",
+            "秘鲁鸡肉香菜汤",
+            "哥伦比亚鸡肉土豆汤",
+            "巴西黑豆汤",
+            "玻利维亚花生汤",
+            "智利海鲜汤",
+            "古巴黑豆汤",
+            "委内瑞拉牛肚汤",
+            "古巴莫罗斯饭",
+            "秘鲁香菜鸡饭",
+            "哥伦比亚椰子饭",
+            "委内瑞拉鸡肉饭",
+            "秘鲁青酱面",
+            "秘鲁塔亚林萨尔塔多",
+            "墨西哥干面",
+            "萨尔瓦多普普萨",
+            "委内瑞拉阿雷帕",
+            "哥伦比亚阿雷帕",
+            "阿根廷恩潘纳达",
+            "智利恩潘纳达",
+            "墨西哥克萨迪亚",
+            "巴拉圭玉米面包",
+            "墨西哥吉拿棒",
+            "墨西哥三奶蛋糕",
+            "墨西哥焦糖布丁",
+            "巴西布里加德罗",
+            "阿根廷焦糖牛奶夹心饼",
+            "秘鲁紫玉米布丁",
+        ),
+    },
+}
+
+_RUNTIME_CONFIG_LOADED = False
 
 
 def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
     return f"""
-你是一页厨账号的原创融合新菜研发编辑，负责把用户给出的菜名想法或口味灵感，扩写成一张竖版一页菜谱海报所需的完整中文文案。
+你是阿叶造新菜账号的原创融合新菜研发编辑，负责把用户给出的菜名想法或口味灵感，扩写成一张竖版一页菜谱海报所需的完整中文文案。
 
 你的目标不是复述常见菜谱，而是做出“原创融合新菜研发”风格的新菜：
 1. 成品必须像市面上少见但逻辑成立、家庭和小店都能复刻的原创菜。
@@ -54,6 +448,8 @@ def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
 
 【主画面说明】
 器皿与摆盘：...
+桌面与环境：...
+背景陪衬：...
 主画面食材：...
 汤汁或酱体：...
 质感重点：...
@@ -98,12 +494,18 @@ def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
 
 额外要求：
 1. 标题要有明显带动性句式，但主标题菜名必须直接使用用户输入的固定菜名，不能改字，不能另起新名。
-2. 引导句必须像“周末请客就做这锅”这种成熟爆款写法，短 6 到 10 个汉字，最多不超过 12 个汉字，不要标点，不要长句，不要解释型语气，不要把菜名再重复一遍。
-3. 副标题必须像“高压锅1小时出软糯蹄花 酸辣鲜香 一锅超有面子”这种黄条卖点写法，压缩成 2 到 3 个短卖点，总长度控制在 24 个汉字以内，优先用空格隔开，不要写成长句。
-4. 主画面说明要足够具体，让后续文生图阶段知道器皿、主体食材、汤汁或酱体状态、画面颜色重点，还要明确筷子夹起主菜的动作镜头。
-4. 食材分组要清楚，数量要合理，不能互相打架。
-5. 5 步必须前后顺序清晰，适合普通人照做。
-6. 文字整体要像成熟抖音爆款图文海报，而不是教程论文或餐厅菜单。
+2. 引导句必须写成高变化的抖音美食短钩子，允许自由发挥成场景钩子、情绪钩子、结果钩子、反差钩子或口感钩子，语感要像平台上容易被点开和收藏的活文案，而不是模板句。
+3. 引导句短 6 到 10 个汉字，最多不超过 12 个汉字，不要标点，不要长句，不要解释型语气，不要把菜名再重复一遍；默认不要总写“周末请客”“家宴”“请客就做”“今天就做”“有面子”这类过度常见的老套词，除非用户补充说明里明确要求这种场景。
+4. 副标题必须像成熟黄条卖点写法，压缩成 2 到 3 个短卖点，总长度控制在 24 个汉字以内，优先用空格隔开，不要写成长句。
+5. 引导句和副标题整体都要更像抖音美食平台会用的轻口语短句，可以更鲜活、更俏皮、更有反应感，但不要油腻，不要为了押韵硬凑词。
+6. 引导句和副标题不能复用同一组词，不能只是上下换行、加减空格或多减一个字。引导句负责提供钩子点，副标题负责提炼 2 到 3 个卖点词，两者语义必须明显分工。
+7. 主画面说明要足够具体，让后续文生图阶段知道器皿、桌面、背景陪衬、主体食材、汤汁或酱体状态、画面颜色重点，还要明确筷子夹起主菜的动作镜头。
+8. 器皿与摆盘、桌面与环境、背景陪衬必须跟这道菜本身的烹饪方式、上桌逻辑、菜系气质和主料结构相匹配，不要默认每道菜都写成暖色陶盘、木托、木桌和几只小碗的同一套模板。
+9. 如果这道菜更适合砂锅、深口汤碗、长鱼盘、铸铁盘、搪瓷盘、石面台、水磨石台面、亚麻餐垫或简洁厨房台面，就直接写清楚，不要偷懒回到同一种木桌陶盘。
+10. 不同出餐结构的菜必须主动拉开场景，不要只是把同一套浅灰石面、水磨石、小圆碟、玻璃油壶模板换成黑盘或白盘后重复使用。煎鱼挂汁类、炸卷类、锅物类、冷盘类、铁板类的桌面材质、器皿逻辑和后景陪衬都应该明显不同。
+11. 食材分组要清楚，数量要合理，不能互相打架。
+12. 5 步必须前后顺序清晰，适合普通人照做。
+13. 文字整体要像成熟抖音爆款图文海报，而不是教程论文或餐厅菜单。
 """.strip()
 
 
@@ -115,60 +517,102 @@ def build_recipe_user_prompt(dish_idea: str, notes: str) -> str:
 
 请你基于这两部分信息，写出一整张一页菜谱海报所需的完整文案。
 如果输入看起来像现有家常菜，也要把卖点、做法重点和画面表现提炼得更有记忆点，但最终菜名必须保持“{dish_idea}”完全不变。
+顶部引导句请用抖音美食平台常见的高点击短钩子语感自由发挥，不要总落回“周末请客”“家宴”这类固定老词。
+引导句和副标题不能复用同一组词，不能只是把同一串卖点放到菜名上方再重复一遍；引导句要像钩子，副标题要像拆开的卖点词。
+主画面的器皿、桌面和背景陪衬必须跟菜本身匹配，不要默认写成木桌、暖色陶盘、木托和几只失焦小碗。
+不同结构的菜请主动拉开场景，不要只是把同一套浅灰石面、水磨石和小圆碟背景换个盘色再复用。
 """.strip()
 
 
-def build_prompt_system_prompt(style_reference: str, fixed_dish_name: str) -> str:
+def build_auto_dish_generation_system_prompt(region_label: str) -> str:
     return f"""
-你是一页厨账号的海报 prompt 导演。你的任务是把一份已经完成的中文菜谱文案，转换成一条给 gpt-image-2 使用的完整中文文生图 prompt。
+你是专业菜品研发师，擅长把传统菜的风味逻辑重构成真实可落地的新菜。
 
-你必须锁定以下 VI 与版式，不要自由发挥成别的风格：
-1. 竖版 2:3 中文抖音美食图文海报。
-2. 整体是成熟爆款菜谱海报风，不是极简风，不是杂志风，不要大面积留白。
-3. 顶部是“引导句小于菜名”的双层标题结构，菜名是最大主标题，橙红或朱红手写刷字质感，带明显白边或高对比描边。
-4. 标题下方要有一条高转化卖点副标题黄条，再下一条较细的收藏提醒条。
-5. 中间偏左是主菜成品大图，必须是写实热门美食封面效果。
-6. 左侧是“2人份食材”卡片，右侧是“成败关键”卡片。
-7. 下半部分是“5步出锅”步骤条，5 个步骤卡横向排开，信息密度高但仍清楚。
-8. 底部是一整条收藏与关注 CTA 横条，颜色醒目，像成熟爆款海报。
-9. 主配色固定为暖奶白、橙红、金黄、焦糖棕，背景允许木桌、香料、小食材、暖色虚化氛围。
-10. 所有中文必须自然工整，不要英文，不要乱码，不要错字。
-11. 主标题必须直接使用“{fixed_dish_name}”这 1 个菜名，不能改字，不能扩写，不能另起新名。
-12. 主画面必须出现一双筷子从画面边缘夹起一块主菜悬在半空，形成明显动作感和食欲点。
-13. 主标题上方的引导句必须很短，控制在 12 个汉字以内。
-14. 主标题下方黄条卖点必须精简成 2 到 3 个短卖点，总长度控制在 24 个汉字以内。
+程序已经先读取本地传统菜库和历史生成记录，并会自动拦截以下问题：
+1. 与传统菜库重名或近似名。
+2. 与历史已生成新菜重名或近似名。
+3. 与参考菜或传统菜在“主料 + 成菜结构”上过近，例如仍然是同类夹饼、盖饭、汤面、锅物、卷物，只换一个口味词。
+4. 再次使用已经用过的传统参考菜。
 
-请优先继承下面这份当前满意版本的参考 prompt 的风格取向，但不要照抄其中具体菜名和配方，只复用它的版式、密度、配色、语气、卡片结构和负面约束：
+你只需要专注做一件事：基于本轮给定的参考菜和菜系范围，创造一道写实、可执行、不会像网红噱头的原创新菜。
 
----参考 prompt 开始---
-{style_reference}
----参考 prompt 结束---
-
-输出要求：
-1. 只输出一条可直接用于 gpt-image-2 的完整中文 prompt，不要加解释。
-2. 必须把用户菜谱中的标题、副标题、食材、成败关键、5 步内容和底部文案全部吸收到 prompt 里。
-3. 主画面必须以菜谱中的器皿与摆盘说明为准。
-4. 强调整张图是“信息很多但一眼就想收藏”的成熟爆款海报。
-5. 保留清晰的负面约束，避免极简、错误结构、食材畸形、塑料感、贴边、乱码和过度装饰。
-6. 明确写出筷子夹起主菜的镜头，并说明不要人物脸部，不要手部特写，只保留筷子和主菜动作。
+强制约束：
+1. 只输出两行，不要标题，不要解释，不要代码块。
+2. 第一行只能输出全新原创菜品名，必须是 4 到 7 个汉字，优先 4 到 6 个字；只有在读起来仍然顺口自然时才允许 7 个字。只能使用写实名，不要象征词、比喻词、玄学词，例如“玉珠”“金汤”“翡翠”“云朵”“星空”。
+3. 菜名是给人点单、记忆和复述的，不是把配方压缩成一句话。第一行最多保留 2 到 3 个记忆点，优先结构是“风味/状态 + 主料 + 做法或载体”或“主料 + 做法或载体”。
+4. 辅料、塞馅方式、次要配菜、调味细节和工艺补充都放到第二行，不要堆进第一行。像“鲜笋鸡丝蒸酿腐皮”这种把辅料、主料、工艺和载体全塞进一行的名字不合格，应压缩成更顺口、更像人会叫的名字。
+5. 第二行只能输出一个连续段落，必须以第一行菜名开头，不能分点，不能换段，不能出现“参考菜”“灵感来源”“改良自”“像某某菜”这类表述。
+6. 第二行必须完整写出主料和关键辅料的预处理、核心酱汁的用料与比例、完整烹饪流程、火候时间、装盘方式、成品口感和上桌体验。
+7. 新菜必须保持“{region_label}”范围内可成立的调味与技法逻辑，但结构上必须是新组合，不得照抄传统菜。
+8. 新菜至少要同时改掉下面四项里的两项：承载主食或出餐结构、核心酱汁体系、关键技法终点、主料搭配关系；不能只在原菜上换一个口味词或改一个工序词。
+9. 如果参考菜本身已经是固定经典结构，例如夹饼、夹馍、火烧、盖饭、面、汤、锅、卷、串、披萨、汉堡，新菜必须换掉这个结构，不能继续沿用同类吃法。
 """.strip()
 
 
-def build_prompt_user_prompt(recipe_text: str, fixed_dish_name: str) -> str:
+def build_auto_dish_generation_user_prompt(
+    region_label: str,
+    reference_dish: str,
+    region_samples: list[str],
+    used_reference_dishes: list[str],
+    used_generated_dishes: list[str],
+    retry_feedback: str = "",
+) -> str:
+    sample_text = "、".join(region_samples) if region_samples else "无"
+    used_reference_text = "、".join(used_reference_dishes[-8:]) if used_reference_dishes else "无"
+    used_generated_text = "、".join(used_generated_dishes[-12:]) if used_generated_dishes else "无"
+    retry_block = ""
+    if retry_feedback:
+        retry_block = f"\n上一轮被程序拦截的原因：{retry_feedback}\n这一次必须彻底避开上面的错误。"
+
     return f"""
-请根据下面这份已经定稿的菜谱文字，写出最终文生图 prompt：
+本轮菜系范围：{region_label}
+本轮传统参考菜：{reference_dish}
+同区域已有菜名样本：{sample_text}
+历史已用参考菜：{used_reference_text}
+历史已生成新菜名：{used_generated_text}
 
-主标题必须直接使用：{fixed_dish_name}
-画面里必须出现一双筷子夹起一块主菜在半空。
-引导句和副标题都要短，不要写成长句。
+生成要求：
+1. 参考菜只用于判断风味方向和工艺边界，绝不能直接改字照抄。
+2. 新菜必须适合真实厨房落地，不能写成广告标题或概念菜名。
+3. 第一行新菜名要像人会自然说出口、菜单上看着顺、用户愿意记住的短名字，不要像“主料 + 辅料 + 工艺 + 结构”的机械堆词。
+4. 如果你想表达的点太多，优先保留一个最有记忆点的风味词和一个核心主料或载体，其他信息全部放到第二行描述里。
+5. 第二行必须是一整段专业厨师视角描述，并以第一行新菜名开头。
+6. 必须先判断参考菜最核心的成菜结构，例如夹入饼、盖在饭上、浸在汤里、连锅上桌、卷进皮里、串起来烤；生成新菜时必须主动换结构，不能沿用同一吃法。
+7. 如果参考菜已经是市面上非常成熟的经典结构，新菜必须像真正研发新菜那样换承载方式、换入口形态或换最终上桌结构，不能做成同类商品再加一个新口味名。
+8. 全程不要提及参考菜名字，也不要拿任何传统菜做对比。{retry_block}
 
-{recipe_text}
+现在严格按两行格式输出结果。
 """.strip()
 
 
-def load_env_file(env_file: Path) -> None:
+def strip_inline_env_comment(raw_value: str) -> str:
+    result_chars: list[str] = []
+    quote_char = ""
+
+    for char in raw_value:
+        if quote_char:
+            if char == quote_char:
+                quote_char = ""
+            result_chars.append(char)
+            continue
+
+        if char in {'"', "'"}:
+            quote_char = char
+            result_chars.append(char)
+            continue
+
+        if char == "#":
+            break
+
+        result_chars.append(char)
+
+    return "".join(result_chars).strip()
+
+
+def parse_env_file(env_file: Path) -> dict[str, str]:
+    parsed: dict[str, str] = {}
     if not env_file.exists():
-        return
+        return parsed
 
     for raw_line in env_file.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
@@ -177,13 +621,106 @@ def load_env_file(env_file: Path) -> None:
 
         key, value = line.split("=", 1)
         key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
+        value = strip_inline_env_comment(value).strip().strip('"').strip("'")
+        if key:
+            parsed[key] = value
+
+    return parsed
+
+
+def load_env_file(env_file: Path, overwrite: bool = False) -> None:
+    for key, value in parse_env_file(env_file).items():
+        if overwrite or key not in os.environ:
             os.environ[key] = value
 
 
-def build_client() -> OpenAI:
-    load_env_file(ROOT_DIR / ".env")
+def ensure_runtime_config_loaded() -> None:
+    global _RUNTIME_CONFIG_LOADED
+    if _RUNTIME_CONFIG_LOADED:
+        return
+
+    existing_keys = set(os.environ.keys())
+    merged_values: dict[str, str] = {}
+    merged_values.update(parse_env_file(DEFAULT_CONFIG_FILE))
+    merged_values.update(parse_env_file(ROOT_DIR / ".env"))
+
+    for key, value in merged_values.items():
+        if key not in existing_keys:
+            os.environ[key] = value
+
+    _RUNTIME_CONFIG_LOADED = True
+
+
+def parse_bool_env_value(env_name: str, raw_value: str | None, default: bool) -> bool:
+    normalized = (raw_value or ("1" if default else "0")).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"{env_name} 只支持 1/0/true/false/on/off。")
+
+
+def parse_dual_switch_env_value(
+    env_name: str,
+    raw_value: str | None,
+    enabled_value: str,
+    disabled_value: str,
+) -> bool:
+    normalized = (raw_value or enabled_value).strip()
+    if normalized == enabled_value:
+        return True
+    if normalized == disabled_value:
+        return False
+    raise RuntimeError(f"{env_name} 只支持 {enabled_value} 或 {disabled_value}。")
+
+
+def is_auto_dish_generation_enabled() -> bool:
+    ensure_runtime_config_loaded()
+    return parse_bool_env_value(
+        env_name="AUTO_GENERATE_DISH_IDEA",
+        raw_value=os.getenv("AUTO_GENERATE_DISH_IDEA"),
+        default=DEFAULT_AUTO_DISH_GENERATION_ENABLED,
+    )
+
+
+def is_photoshop_auto_composite_enabled() -> bool:
+    ensure_runtime_config_loaded()
+    return parse_dual_switch_env_value(
+        env_name="PHOTOSHOP_AUTO_COMPOSITE",
+        raw_value=os.getenv("PHOTOSHOP_AUTO_COMPOSITE"),
+        enabled_value="1",
+        disabled_value="2",
+    )
+
+
+def get_auto_dish_region_code() -> str:
+    ensure_runtime_config_loaded()
+    region_code = os.getenv("AUTO_DISH_CUISINE_MODE", DEFAULT_AUTO_DISH_REGION_CODE).strip() or DEFAULT_AUTO_DISH_REGION_CODE
+    if region_code not in AUTO_DISH_REGION_PROFILES:
+        supported = ", ".join(sorted(AUTO_DISH_REGION_PROFILES.keys()))
+        raise RuntimeError(f"AUTO_DISH_CUISINE_MODE 只支持这些数字：{supported}。")
+    return region_code
+
+
+def resolve_runtime_path(env_name: str, default_path: Path) -> Path:
+    ensure_runtime_config_loaded()
+    raw_value = os.getenv(env_name, default_path.name).strip() or default_path.name
+    path = Path(raw_value)
+    if not path.is_absolute():
+        path = ROOT_DIR / path
+    return path
+
+
+def get_auto_dish_library_file() -> Path:
+    return resolve_runtime_path("AUTO_DISH_LIBRARY_FILE", DEFAULT_TRADITIONAL_DISH_FILE)
+
+
+def get_auto_dish_memory_file() -> Path:
+    return resolve_runtime_path("AUTO_DISH_MEMORY_FILE", DEFAULT_AUTO_DISH_MEMORY_FILE)
+
+
+def build_image_client() -> OpenAI:
+    ensure_runtime_config_loaded()
 
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
@@ -194,7 +731,34 @@ def build_client() -> OpenAI:
     return OpenAI(api_key=api_key, timeout=request_timeout)
 
 
+def get_text_provider() -> str:
+    ensure_runtime_config_loaded()
+    provider = os.getenv("TEXT_API_PROVIDER", DEFAULT_TEXT_PROVIDER).strip().lower()
+    if provider not in {"doubao", "openai"}:
+        raise RuntimeError("TEXT_API_PROVIDER 只支持 doubao 或 openai。")
+    return provider
+
+
+def build_text_client() -> OpenAI:
+    ensure_runtime_config_loaded()
+    request_timeout = get_text_request_timeout_seconds()
+    provider = get_text_provider()
+
+    if provider == "doubao":
+        doubao_api_key = os.getenv("DOUBAO_API_KEY", "").strip()
+        if not doubao_api_key:
+            raise RuntimeError("未找到 DOUBAO_API_KEY，请先在 .env 文件中配置。")
+        base_url = os.getenv("DOUBAO_BASE_URL", DEFAULT_DOUBAO_BASE_URL).strip() or DEFAULT_DOUBAO_BASE_URL
+        return OpenAI(api_key=doubao_api_key, base_url=base_url, timeout=request_timeout)
+
+    openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not openai_api_key:
+        raise RuntimeError("未找到 OPENAI_API_KEY，请先在 .env 文件中配置。")
+    return OpenAI(api_key=openai_api_key, timeout=request_timeout)
+
+
 def get_request_timeout_seconds() -> float:
+    ensure_runtime_config_loaded()
     timeout_text = os.getenv("OPENAI_REQUEST_TIMEOUT_SECONDS", "900").strip() or "900"
     try:
         return float(timeout_text)
@@ -206,8 +770,103 @@ def is_timeout_error(exc: Exception) -> bool:
     return "timed out" in str(exc).lower()
 
 
-def contains_any(text: str, keywords: list[str]) -> bool:
+def contains_any(text: str, keywords: Sequence[str]) -> bool:
     return any(keyword in text for keyword in keywords)
+
+
+SCENE_HINT_KEYWORDS: tuple[str, ...] = (
+    "摆盘",
+    "装盘",
+    "码放",
+    "平码",
+    "摆入",
+    "盛入",
+    "盛在",
+    "上桌",
+    "平盘",
+    "圆盘",
+    "长盘",
+    "白瓷盘",
+    "瓷盘",
+    "陶盘",
+    "鱼盘",
+    "深盘",
+    "浅盘",
+    "汤碗",
+    "面碗",
+    "饭盘",
+    "饭碗",
+    "砂锅",
+    "陶煲",
+    "锅仔",
+    "炖盅",
+    "铸铁盘",
+    "木筛盘",
+    "托盘",
+    "餐垫",
+    "桌面",
+    "台面",
+    "木桌",
+    "石面",
+    "水磨石",
+    "亚麻",
+    "背景",
+    "后景",
+    "陪衬",
+    "小碗",
+    "小碟",
+    "锅盖",
+)
+
+
+def build_scene_inference_text(dish_name: str, notes: str) -> str:
+    relevant_clauses: list[str] = []
+    for clause in re.split(r"[，。；;、\n]+", notes):
+        normalized_clause = " ".join(clause.split()).strip()
+        if not normalized_clause:
+            continue
+        if contains_any(normalized_clause, SCENE_HINT_KEYWORDS) and normalized_clause not in relevant_clauses:
+            relevant_clauses.append(normalized_clause)
+    scene_notes = " ".join(relevant_clauses)
+    return f"{dish_name} {scene_notes}".strip()
+
+
+def should_infer_scene_field(field_value: str) -> bool:
+    normalized_value = " ".join(field_value.split())
+    if not normalized_value:
+        return True
+    if re.fullmatch(r"[.。…·、/／_\-\s]+", normalized_value):
+        return True
+    if normalized_value in {"待补", "待定", "同上", "略"}:
+        return True
+    return looks_like_placeholder_output(normalized_value)
+
+
+def looks_like_template_scene_field(field_name: str, field_value: str) -> bool:
+    normalized_value = " ".join(field_value.split())
+    if not normalized_value:
+        return False
+
+    if field_name == "桌面与环境":
+        if re.search(r"(浅灰|灰白|米白|暖白).{0,8}(水磨石|石面|石台面)", normalized_value) and re.search(
+            r"(简洁|干净|克制|无杂物|不抢主菜)", normalized_value
+        ):
+            return True
+        if normalized_value in {
+            "浅灰色水磨石台面，简洁干净",
+            "浅灰色水磨石台面，干净无杂物",
+            "浅灰石面台面，干净克制，不抢主菜",
+            "米白水磨石台面，保留生活化纹理",
+        }:
+            return True
+
+    if field_name == "背景陪衬":
+        if contains_any(normalized_value, ["无多余杂物", "干净无杂物", "简洁无杂物"]):
+            return True
+        if re.search(r"(一小碟|小味碟|半瓶).*(旁置|盘后|后景|虚化|失焦)", normalized_value):
+            return True
+
+    return False
 
 
 def dedupe_items(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -236,47 +895,724 @@ def join_selling_points(points: list[str], max_chars: int = 24) -> str:
     return " ".join(chosen).strip()
 
 
+TOFU_FAMILY_KEYWORDS: tuple[str, ...] = (
+    "豆腐",
+    "豆干",
+    "豆皮",
+    "腐竹",
+    "千页豆腐",
+    "豆泡",
+    "豆腐泡",
+    "冻豆腐",
+)
+
+PEA_FAMILY_KEYWORDS: tuple[str, ...] = (
+    "黄豌豆",
+    "耙豌豆",
+)
+
+SEARED_KEYWORDS: tuple[str, ...] = (
+    "煎",
+    "煎香",
+    "焦香",
+    "焦色",
+    "焦边",
+    "金黄",
+    "金棕",
+)
+
+AROMA_PROFILE_KEYWORDS: tuple[str, ...] = (
+    "黄油",
+    "焦葱",
+    "葱香",
+    "蒜香",
+    "椒麻",
+    "青花椒",
+    "花椒香",
+    "孜然",
+    "酱香",
+    "豉香",
+    "鲜香",
+    "奶香",
+)
+
+SAUCE_PROFILE_KEYWORDS: tuple[str, ...] = (
+    "酱",
+    "汁",
+    "挂汁",
+    "裹汁",
+    "收汁",
+    "浓汁",
+)
+
+SEAFOOD_PROFILE_KEYWORDS: tuple[str, ...] = (
+    "帆立贝",
+    "带子",
+    "扇贝",
+    "贝",
+    "虾",
+    "鱿鱼",
+    "蛤",
+    "海鲜",
+)
+
+
+def pick_stable_variant(options: list[str], seed_text: str) -> str:
+    if not options:
+        return "这口鲜香太顶了"
+    seed_value = sum((index + 1) * ord(char) for index, char in enumerate(seed_text))
+    return options[seed_value % len(options)]
+
+
+def sanitize_guide_line(text: str) -> str:
+    cleaned = re.sub(r"[，。！？、；：,.!?:\s]+", "", text).strip()
+    return cleaned[:12]
+
+
+def normalize_marketing_text_for_comparison(text: str) -> str:
+    return re.sub(r"[，。！？、；：,.!?:\s]+", "", text).strip()
+
+
+def marketing_lines_too_similar(first_text: str, second_text: str) -> bool:
+    normalized_first = normalize_marketing_text_for_comparison(first_text)
+    normalized_second = normalize_marketing_text_for_comparison(second_text)
+
+    if not normalized_first or not normalized_second:
+        return False
+    if normalized_first == normalized_second:
+        return True
+
+    shorter_text, longer_text = sorted((normalized_first, normalized_second), key=len)
+    if len(shorter_text) >= 4 and shorter_text in longer_text and len(longer_text) - len(shorter_text) <= 2:
+        return True
+
+    return False
+
+
+def looks_like_stale_guide_line(text: str) -> bool:
+    normalized = sanitize_guide_line(text)
+    if not normalized:
+        return True
+    return any(keyword in normalized for keyword in GUIDE_LINE_STALE_KEYWORDS)
+
+
 def infer_guide_line(dish_name: str, notes: str) -> str:
     combined_text = f"{dish_name} {notes}"
-    if contains_any(combined_text, ["下饭", "拌饭", "配饭"]):
-        return "米饭党就做这盘"
-    if contains_any(combined_text, ["请客", "宴客", "待客"]):
-        return "请客就做这盘"
-    if contains_any(combined_text, ["汤", "锅", "煲"]):
-        return "就馋这口热乎"
-    if contains_any(combined_text, ["脆", "焦", "煎"]):
-        return "就馋这口焦香"
-    return "今天就做这盘"
+    candidate_lines: list[str] = []
+
+    if contains_any(combined_text, ["下饭", "拌饭", "配饭", "酱", "汁"]):
+        candidate_lines.extend([
+            "这盘太费米饭了",
+            "米饭要先多煮点",
+            "这一口太下饭了",
+            "不配饭真的亏了",
+        ])
+
+    if contains_any(combined_text, ["汤", "锅", "煲", "炖"]):
+        candidate_lines.extend([
+            "这一锅热乎上头",
+            "热气一冒就饿了",
+            "天冷就馋这锅",
+            "这一口暖到胃里",
+        ])
+
+    if contains_any(combined_text, ["脆", "焦", "煎", "炸"]):
+        candidate_lines.extend([
+            "这口脆香太勾人",
+            "焦香一上来就馋",
+            "这层焦香太会了",
+            "一咬就知道会香",
+        ])
+
+    if contains_any(combined_text, ["麻", "辣", "椒", "鲜香", "香辣"]):
+        candidate_lines.extend([
+            "这口鲜麻太会了",
+            "麻香一上来就馋",
+            "这口香辣太上头",
+            "闻着就想先夹块",
+        ])
+
+    if contains_any(combined_text, ["酸", "青柠", "梅子", "番茄", "清爽"]):
+        candidate_lines.extend([
+            "酸香一冒就饿了",
+            "这口清爽太会了",
+            "一入口就醒胃了",
+            "越吃越想来一口",
+        ])
+
+    if contains_any(combined_text, ["牛", "羊", "鸡", "鸭", "虾", "海鲜", "排骨", "牛舌", "肘"]):
+        candidate_lines.extend([
+            "这盘硬菜太会了",
+            "一上桌就先被夸",
+            "这盘端上真镇场",
+            "客人先问这啥菜",
+        ])
+
+    if not candidate_lines:
+        candidate_lines.extend([
+            "这口鲜香太顶了",
+            "刚上桌就先空盘",
+            "闻着就想先夹块",
+            "这盘真的太会了",
+            "一上桌就被夸了",
+            "这盘端上就抢光",
+        ])
+
+    unique_candidates = list(dict.fromkeys(sanitize_guide_line(item) for item in candidate_lines if item.strip()))
+    return pick_stable_variant(unique_candidates, seed_text=combined_text)
+
+
+def extract_recipe_field_value(recipe_text: str, field_name: str) -> str:
+    match = re.search(rf"^{re.escape(field_name)}：(.+)$", recipe_text, flags=re.M)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def replace_recipe_field_value(recipe_text: str, field_name: str, new_value: str) -> str:
+    pattern = rf"^{re.escape(field_name)}：.*$"
+    return re.sub(pattern, f"{field_name}：{new_value}", recipe_text, count=1, flags=re.M)
+
+
+def extract_main_ingredient_evidence(recipe_text: str) -> str:
+    match = re.search(r"【2人份食材】\s*主料\s*(.*?)\n\s*香料", recipe_text, flags=re.S)
+    if not match:
+        return ""
+
+    lines: list[str] = []
+    for raw_line in match.group(1).splitlines():
+        line = raw_line.strip()
+        if not line.startswith("-"):
+            continue
+        lines.append(line.lstrip("-").strip())
+    return " ".join(lines)
+
+
+def extract_recipe_named_block(recipe_text: str, block_name: str) -> str:
+    pattern = rf"【{re.escape(block_name)}】\s*(.*?)(?=\n【|\Z)"
+    match = re.search(pattern, recipe_text, flags=re.S)
+    return match.group(1).strip() if match else ""
+
+
+def parse_recipe_item_line(raw_line: str) -> tuple[str, str] | None:
+    line = raw_line.strip().lstrip("-").strip()
+    if not line:
+        return None
+
+    parts = line.rsplit(None, 1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    return line, ""
+
+
+def extract_recipe_ingredient_groups(recipe_text: str) -> dict[str, list[tuple[str, str]]]:
+    ingredients_block = extract_recipe_named_block(recipe_text, "2人份食材")
+    grouped_lines: dict[str, list[str]] = {
+        "主料": [],
+        "香料": [],
+        "调味料": [],
+    }
+
+    current_group = ""
+    for raw_line in ingredients_block.splitlines():
+        line = raw_line.strip()
+        if line in grouped_lines:
+            current_group = line
+            continue
+        if not current_group or not line:
+            continue
+        grouped_lines[current_group].append(line)
+
+    parsed_groups: dict[str, list[tuple[str, str]]] = {}
+    for group_name, lines in grouped_lines.items():
+        items: list[tuple[str, str]] = []
+        for line in lines:
+            parsed_item = parse_recipe_item_line(line)
+            if not parsed_item:
+                continue
+            items.append(parsed_item)
+        parsed_groups[group_name] = dedupe_items(items)
+
+    return parsed_groups
+
+
+def extract_recipe_numbered_items(block_text: str) -> list[str]:
+    items: list[str] = []
+    for raw_line in block_text.splitlines():
+        line = raw_line.strip()
+        match = re.match(r"^\d+\.\s*(.+)$", line)
+        if match:
+            items.append(match.group(1).strip())
+    return items
+
+
+def extract_recipe_steps(recipe_text: str) -> list[dict[str, str]]:
+    step_block = extract_recipe_named_block(recipe_text, "5步出锅")
+    steps: list[dict[str, str]] = []
+    current_step: dict[str, str] | None = None
+
+    for raw_line in step_block.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        title_match = re.match(r"^\d+\.\s*标题：(.+)$", line)
+        if title_match:
+            if current_step:
+                steps.append(current_step)
+            current_step = {
+                "title": title_match.group(1).strip(),
+                "content": "",
+            }
+            continue
+
+        if current_step is None:
+            continue
+
+        if line.startswith("内容："):
+            current_step["content"] = line.split("：", 1)[1].strip()
+        elif current_step["content"]:
+            current_step["content"] = f"{current_step['content']} {line}".strip()
+
+    if current_step:
+        steps.append(current_step)
+
+    return steps
+
+
+def build_recipe_bundle_from_recipe_text(recipe_text: str, fixed_dish_name: str, ad_copy: str) -> dict[str, Any]:
+    normalized_recipe_text = recipe_text.strip()
+    base_bundle = build_local_recipe_bundle(
+        dish_name=fixed_dish_name,
+        notes=normalized_recipe_text,
+        ad_copy=ad_copy,
+    )
+    ingredient_groups = extract_recipe_ingredient_groups(normalized_recipe_text)
+    parsed_tips = extract_recipe_numbered_items(extract_recipe_named_block(normalized_recipe_text, "成败关键"))
+    parsed_steps = extract_recipe_steps(normalized_recipe_text)
+
+    return {
+        **base_bundle,
+        "dish_name": extract_recipe_field_value(normalized_recipe_text, "最终菜名") or fixed_dish_name,
+        "guide_line": extract_recipe_field_value(normalized_recipe_text, "引导句") or base_bundle["guide_line"],
+        "subtitle": extract_recipe_field_value(normalized_recipe_text, "副标题") or base_bundle["subtitle"],
+        "collection_hint": extract_recipe_field_value(normalized_recipe_text, "收藏提示") or base_bundle["collection_hint"],
+        "collection_copy": extract_recipe_field_value(normalized_recipe_text, "收藏文案") or base_bundle["collection_copy"],
+        "ad_copy": extract_recipe_field_value(normalized_recipe_text, "关注文案") or ad_copy,
+        "plate": extract_recipe_field_value(normalized_recipe_text, "器皿与摆盘") or base_bundle["plate"],
+        "table_setting": extract_recipe_field_value(normalized_recipe_text, "桌面与环境") or base_bundle["table_setting"],
+        "background_props": extract_recipe_field_value(normalized_recipe_text, "背景陪衬") or base_bundle["background_props"],
+        "main_food": extract_recipe_field_value(normalized_recipe_text, "主画面食材") or base_bundle["main_food"],
+        "sauce": extract_recipe_field_value(normalized_recipe_text, "汤汁或酱体") or base_bundle["sauce"],
+        "texture": extract_recipe_field_value(normalized_recipe_text, "质感重点") or base_bundle["texture"],
+        "dynamic_action": extract_recipe_field_value(normalized_recipe_text, "动态动作") or base_bundle["dynamic_action"],
+        "colors": extract_recipe_field_value(normalized_recipe_text, "色彩点缀") or base_bundle["colors"],
+        "main_ingredients": ingredient_groups.get("主料") or base_bundle["main_ingredients"],
+        "spices": ingredient_groups.get("香料") or base_bundle["spices"],
+        "seasonings": ingredient_groups.get("调味料") or base_bundle["seasonings"],
+        "tips": parsed_tips or base_bundle["tips"],
+        "steps": parsed_steps or base_bundle["steps"],
+        "notes": " ".join(normalized_recipe_text.split()),
+    }
+
+
+def build_subtitle_inference_text(recipe_text: str, fixed_dish_name: str) -> str:
+    evidence_parts = [fixed_dish_name]
+    for field_name in ("主画面食材", "汤汁或酱体", "质感重点"):
+        field_value = extract_recipe_field_value(recipe_text, field_name)
+        if field_value:
+            evidence_parts.append(field_value)
+
+    main_ingredient_text = extract_main_ingredient_evidence(recipe_text)
+    if main_ingredient_text:
+        evidence_parts.append(main_ingredient_text)
+
+    return " ".join(part for part in evidence_parts if part).strip()
+
+
+def normalize_generated_guide_line(recipe_text: str, fixed_dish_name: str) -> str:
+    current_guide_line = extract_recipe_field_value(recipe_text, "引导句")
+    if not current_guide_line:
+        return recipe_text
+
+    current_subtitle = extract_recipe_field_value(recipe_text, "副标题")
+    cleaned_guide_line = sanitize_guide_line(current_guide_line)
+    should_replace = (
+        len(cleaned_guide_line) < 6
+        or len(cleaned_guide_line) > 12
+        or fixed_dish_name in cleaned_guide_line
+        or looks_like_stale_guide_line(cleaned_guide_line)
+        or marketing_lines_too_similar(cleaned_guide_line, current_subtitle)
+    )
+
+    replacement_line = infer_guide_line(fixed_dish_name, recipe_text) if should_replace else cleaned_guide_line
+    return replace_recipe_field_value(recipe_text, "引导句", replacement_line)
+
+
+def normalize_generated_subtitle(recipe_text: str, fixed_dish_name: str) -> str:
+    current_subtitle = extract_recipe_field_value(recipe_text, "副标题")
+    if not current_subtitle:
+        return recipe_text
+
+    combined_text = build_subtitle_inference_text(recipe_text, fixed_dish_name)
+    has_wrong_tofu_point = (
+        "豆腐两面煎焦香" in current_subtitle
+        and not contains_any(combined_text, TOFU_FAMILY_KEYWORDS)
+    )
+    has_wrong_pea_point = (
+        "黄豌豆压到软糯" in current_subtitle
+        and not contains_any(combined_text, PEA_FAMILY_KEYWORDS)
+    )
+    if not has_wrong_tofu_point and not has_wrong_pea_point:
+        return recipe_text
+
+    replacement_subtitle = infer_subtitle(fixed_dish_name, combined_text)
+    return replace_recipe_field_value(recipe_text, "副标题", replacement_subtitle)
 
 
 def infer_subtitle(dish_name: str, notes: str) -> str:
     combined_text = f"{dish_name} {notes}"
     selling_points: list[str] = []
 
-    if contains_any(combined_text, ["黄豌豆", "耙豌豆", "软糯", "高压锅"]):
+    has_pea_family = contains_any(combined_text, PEA_FAMILY_KEYWORDS)
+    has_tofu_family = contains_any(combined_text, TOFU_FAMILY_KEYWORDS)
+    has_seared_texture = contains_any(combined_text, SEARED_KEYWORDS)
+    has_rich_aroma = contains_any(combined_text, AROMA_PROFILE_KEYWORDS)
+    has_sauce_profile = contains_any(combined_text, SAUCE_PROFILE_KEYWORDS)
+
+    if has_pea_family:
         selling_points.append("黄豌豆压到软糯")
-    if contains_any(combined_text, ["豆腐", "金黄", "焦色", "煎"]):
+    if has_tofu_family and has_seared_texture:
         selling_points.append("豆腐两面煎焦香")
+    elif has_seared_texture:
+        selling_points.append(
+            pick_stable_variant(
+                ["表面煎到焦香", "边缘煎到金黄", "煎香一口就记住"],
+                combined_text,
+            )
+        )
     if contains_any(combined_text, ["肉沫", "猪肉"]):
         selling_points.append("肉香裹汁更有层次")
     if contains_any(combined_text, ["下饭", "拌饭", "配饭"]):
         selling_points.append("一盘超下饭")
-    if contains_any(combined_text, ["酸", "梅子", "青柠"]):
+    if contains_any(combined_text, ["酸", "梅子", "青柠", "柠檬", "柚香"]):
         selling_points.append("酸香提味更开胃")
-    if contains_any(combined_text, ["黄油", "焦葱", "香"]):
+    if has_rich_aroma:
         selling_points.append("咸香浓郁有记忆点")
+    elif has_sauce_profile:
+        selling_points.append("挂汁到位更入味")
+    elif contains_any(combined_text, SEAFOOD_PROFILE_KEYWORDS):
+        selling_points.append("鲜味越嚼越上头")
 
     return join_selling_points(selling_points)
 
 
-def infer_plate_description(notes: str) -> str:
-    if "木筛盘" in notes:
-        return "木筛盘加一层食物纸铺垫"
-    if "黑陶锅" in notes:
-        return "浅口黑陶锅配木托"
-    if "木托" in notes:
-        return "暖色陶盘配木托"
-    return "暖色陶盘配木纹桌面"
+def infer_plate_description(dish_name: str, notes: str) -> str:
+    scene_text = build_scene_inference_text(dish_name, notes)
+    combined_text = scene_text or dish_name
+
+    if contains_any(scene_text, ["木筛盘", "食物纸"]):
+        return "木筛盘加吸油食物纸，适合盛住焦香或干爽主料"
+    if contains_any(scene_text, ["砂锅", "陶煲", "煲仔", "锅仔", "黑陶锅", "炖盅"]):
+        return pick_stable_variant(
+            [
+                "厚壁砂锅或陶煲直接上桌，保留锅沿与热气",
+                "深口陶煲直接出餐，锅边允许有轻微汁痕",
+                "粗陶锅仔直接摆上桌面，器皿本身带真实使用感",
+            ],
+            combined_text,
+        )
+    if contains_any(scene_text, ["铁板", "铸铁", "煎盘"]):
+        return pick_stable_variant(
+            [
+                "黑色铸铁盘直接上桌，边缘带一点真实煎痕",
+                "厚重铁板或铸铁煎盘出餐，保留热盘质感",
+                "深色煎盘承托主菜，边缘允许有少量酱汁痕迹",
+            ],
+            combined_text,
+        )
+    if contains_any(combined_text, ["鲈鱼", "鱼片"]) and contains_any(combined_text, ["酸", "酸汤", "木姜子", "娃娃菜"]):
+        return pick_stable_variant(
+            [
+                "浅口长形白瓷鱼盘，盘底先垫蔬菜丝再平码鱼片",
+                "奶白窄边长盘承托鱼片和垫菜，酸酱沿盘底自然铺开",
+                "暖白椭圆长盘盛放煎鱼片，盘中留出明显酱汁流线",
+            ],
+            combined_text,
+        )
+    if contains_any(combined_text, ["里脊", "春卷皮"]) and contains_any(combined_text, ["卷"]) and contains_any(combined_text, ["炸", "煎", "黑椒", "脆"]):
+        return pick_stable_variant(
+            [
+                "黑色长方煎盘或铁板，卷身平行摆放，盘底留少量黑椒酱",
+                "深炭灰窄边长盘承托脆卷，卷与卷之间留出酥脆呼吸感",
+                "磨砂黑釉长方盘盛放里脊卷，盘底只留薄薄一层椒香酱汁",
+            ],
+            combined_text,
+        )
+    if contains_any(combined_text, ["拉面", "乌冬", "米线", "河粉", "意面", "炒面", "拌面", "面条", "汤面", "焖面", "凉面", "面食"]):
+        if contains_any(combined_text, ["汤面", "拉面", "汤粉", "羹", "汤米线", "汤河粉"]):
+            return pick_stable_variant(
+                [
+                    "深口汤碗或拉面碗，碗沿留足汤面空间",
+                    "厚边深碗承托汤面和配料层次，碗口不要太小",
+                    "暖白深口大碗，让汤头、面条和浇头同时清楚可见",
+                ],
+                combined_text,
+            )
+        return pick_stable_variant(
+            [
+                "宽口浅碗或低矮大盘，让面条自然卷起堆高",
+                "大号浅盘承托拌面主体，方便把浇头铺开",
+                "宽口石瓷盘装面，主料和酱汁能完整展开",
+            ],
+            combined_text,
+        )
+    if contains_any(combined_text, ["饭", "烩饭", "炒饭", "丼", "抓饭", "科沙里", "曼萨夫"]):
+        return pick_stable_variant(
+            [
+                "宽口浅碗或石瓷饭盘，让饭粒和主料层次清楚",
+                "低矮饭碗配宽边盘，主料盖在米饭上方更集中",
+                "深口饭盘承托米饭和主菜，边缘留有自然空区",
+            ],
+            combined_text,
+        )
+    if contains_any(combined_text, ["鱼", "鮰鱼", "鲈鱼", "鳕鱼", "石斑", "鲳", "鱼头", "加吉鱼"]) and not contains_any(combined_text, ["鱼丸", "鱼面", "鱼香"]):
+        if contains_any(combined_text, ["整条", "清蒸", "蒸鱼", "武昌鱼", "鲳鱼", "石斑"]):
+            return pick_stable_variant(
+                [
+                    "长椭圆鱼盘，鱼身顺着盘势自然舒展开",
+                    "白瓷长鱼盘承托整鱼，主鱼完整占满盘面主体",
+                    "浅口椭圆鱼盘，鱼身和配料沿长边铺开",
+                ],
+                combined_text,
+            )
+        return pick_stable_variant(
+            [
+                "深口宽边陶盘，让鱼块和配料堆出明显层次",
+                "浅口汤盘承住酱汁、鱼块和辅料，不要平铺过散",
+                "厚边石瓷深盘盛放块状鱼肉，边缘保留少量汁痕",
+            ],
+            combined_text,
+        )
+    if contains_any(combined_text, ["沙拉", "凉拌", "冷盘", "腌鱼"]):
+        return pick_stable_variant(
+            [
+                "浅口白瓷盘，留出清爽边距，结构利落",
+                "磨砂玻璃盘或冷白瓷盘，冷菜铺展但不散乱",
+                "低矮浅盘承托冷菜主体，边缘干净简洁",
+            ],
+            combined_text,
+        )
+    if (
+        contains_any(combined_text, ["腐皮", "豆皮", "酿"])
+        or (contains_any(combined_text, ["卷"]) and contains_any(combined_text, ["蒸", "平盘", "白瓷盘", "上桌"]))
+    ) and not contains_any(combined_text, ["春卷", "炸卷", "蛋卷", "炸", "煎", "脆", "黑椒", "里脊"]):
+        return pick_stable_variant(
+            [
+                "白瓷平盘或浅口长盘盛放蒸卷，卷身平码但不呆板",
+                "暖白浅盘承托腐皮卷，盘心保留少量蒸汁光泽",
+                "简洁浅口圆盘承托酿卷主菜，边缘留出真实盘边空间",
+            ],
+            combined_text,
+        )
+    if contains_any(combined_text, ["炸", "酥炸", "脆皮", "春卷", "天妇罗", "炸鸡", "锅包肉", "虾球", "丸子"]):
+        return pick_stable_variant(
+            [
+                "浅色搪瓷盘或金属托盘，底下垫吸油纸",
+                "宽口圆盘盛放炸物，主菜堆高但边缘留白",
+                "金属网托配浅盘，突出刚出锅的脆感和轻油感",
+            ],
+            combined_text,
+        )
+    if contains_any(combined_text, ["烤", "串", "牛排", "羊排", "猪排", "菲力", "披萨"]):
+        return pick_stable_variant(
+            [
+                "厚边石瓷餐盘，保留烤后焦边和堆叠高度",
+                "黑色铸铁盘或深色烤盘直接上桌，突出热感",
+                "大号圆盘让主菜居中堆叠，边缘保留自然空区",
+            ],
+            combined_text,
+        )
+    if contains_any(combined_text, ["汤", "羹", "煲", "炖", "锅"]):
+        return pick_stable_variant(
+            [
+                "深口陶碗或锅仔直接上桌，汤面有明显热气",
+                "厚壁汤碗稳住汤汁和配料层次，碗沿不过厚",
+                "锅仔或深口炖盅直接出餐，保留沸感与汤色层次",
+            ],
+            combined_text,
+        )
+    if contains_any(combined_text, ["丁", "块", "虾球", "丸", "豆腐", "菌菇"]):
+        return pick_stable_variant(
+            [
+                "暖白深盘承托块状主料和酱汁，中心略微堆高",
+                "宽口石瓷盘让块面主料铺开但不扁塌",
+                "低矮深盘盛放主料，边缘允许保留少量汁痕",
+            ],
+            combined_text,
+        )
+    return pick_stable_variant(
+        [
+            "暖白厚边深盘，主菜集中在盘心区域",
+            "灰釉石瓷浅盘，主料和酱汁自然铺开",
+            "低矮圆盘承托主菜主体，留出真实盘边空间",
+        ],
+        combined_text or dish_name,
+    )
+
+
+def infer_table_description(dish_name: str, notes: str, plate_description: str) -> str:
+    scene_text = build_scene_inference_text(dish_name, notes)
+    combined_text = f"{scene_text} {plate_description}".strip()
+
+    if contains_any(scene_text, ["大理石", "石面", "石桌"]):
+        return "浅灰石面台面，表面干净但保留真实细纹"
+    if contains_any(scene_text, ["不锈钢", "金属台"]):
+        return "拉丝不锈钢备餐台面，反光克制且真实"
+    if contains_any(scene_text, ["亚麻", "餐垫"]):
+        return "素色亚麻餐垫铺在克制的台面上，不做花哨装饰"
+    if contains_any(scene_text, ["木桌", "木纹", "木托"]):
+        return "深胡桃木桌面，桌面保留轻微使用痕迹，不要过度布景"
+
+    if contains_any(combined_text, ["鲈鱼", "鱼片"]) and contains_any(combined_text, ["酸", "酸汤", "木姜子", "娃娃菜"]):
+        return pick_stable_variant(
+            [
+                "奶油白石英台面或浅米色微纹餐台，衬出酸酱与鱼片亮泽",
+                "温润浅米石面台面，留出清爽餐桌气息，不落回灰色石面模板",
+                "淡奶油色复合台面，画面更亮，突出白瓷长盘和红亮酸酱",
+            ],
+            combined_text,
+        )
+    if contains_any(combined_text, ["里脊", "春卷皮"]) and contains_any(combined_text, ["卷"]) and contains_any(combined_text, ["炸", "煎", "黑椒", "脆"]):
+        return pick_stable_variant(
+            [
+                "深炭灰石板台面或磨砂黑餐台，突出脆卷金黄和黑椒酱光泽",
+                "胡桃木餐桌压一块深色耐热垫，让黑盘和酥卷更有层次",
+                "偏深色的餐厅出菜台面，保留暖光与少量油润反射，不再落回浅灰水磨石",
+            ],
+            combined_text,
+        )
+
+    if contains_any(combined_text, ["意面", "牛排", "羊排", "猪排", "菲力", "烩饭", "披萨", "焗"]):
+        return pick_stable_variant(
+            [
+                "浅灰石面或米白水磨石台面，配一块素色亚麻餐垫",
+                "哑光浅石面台面，留出简洁餐桌氛围",
+                "米白水磨石台面配窄边亚麻垫，不做多余装饰",
+            ],
+            combined_text,
+        )
+    if contains_any(combined_text, ["拉面", "乌冬", "米线", "河粉", "意面", "炒面", "拌面", "面条", "汤面", "焖面", "凉面", "米粉", "炒粉", "拌粉", "汤粉"]):
+        return pick_stable_variant(
+            [
+                "暖灰石面台面，干净克制，突出碗面主体",
+                "浅色复古瓷砖台面，生活化但不花哨",
+                "米白水磨石台面，让面碗和热气更突出",
+            ],
+            combined_text,
+        )
+    if contains_any(combined_text, ["煲", "锅仔", "陶煲", "炖", "汤", "砂锅", "火锅"]):
+        return pick_stable_variant(
+            [
+                "深色耐热餐台或胡桃木桌面，稳住锅感和热气",
+                "哑光深灰石面，衬托锅边热气和汤汁反光",
+                "复古深色餐台，表面留有真实光影和热菜氛围",
+            ],
+            combined_text,
+        )
+    if (
+        contains_any(combined_text, ["腐皮", "豆皮", "酿"])
+        or (contains_any(combined_text, ["卷"]) and contains_any(combined_text, ["蒸", "平盘", "白瓷盘", "上桌"]))
+    ) and not contains_any(combined_text, ["春卷", "炸卷", "蛋卷"]):
+        return pick_stable_variant(
+            [
+                "温润浅木餐桌或浅胡桃木台面，配素色餐垫，像热菜刚端上桌",
+                "暖米色亚麻餐垫铺在哑光餐台上，清爽但有家常热气",
+                "克制的浅木桌面，保留少量生活化光影，不做固定大理石模板",
+            ],
+            combined_text,
+        )
+    if contains_any(combined_text, ["炸", "酥炸", "脆皮"]):
+        return pick_stable_variant(
+            [
+                "暖白水磨石台面，突出炸物干爽脆感",
+                "浅灰石面台面，反差克制，不抢炸物主体",
+                "简洁厨房台面，生活化但不凌乱",
+            ],
+            combined_text,
+        )
+    if contains_any(combined_text, ["凉拌", "沙拉", "冷盘"]):
+        return pick_stable_variant(
+            [
+                "浅米色石面台面，干净清爽，冷菜更显利落",
+                "浅灰水磨石台面，克制地托住冷盘轮廓",
+                "暖白复合台面，画面轻快但不空",
+            ],
+            combined_text,
+        )
+    return pick_stable_variant(
+        [
+            "浅灰石面台面，干净克制，不抢主菜",
+            "温润浅木餐桌，保留真实生活化纹理",
+            "素色亚麻餐垫铺在哑光台面上，氛围克制但不空",
+        ],
+        combined_text or dish_name,
+    )
+
+
+def infer_background_prop_description(dish_name: str, notes: str) -> str:
+    combined_text = f"{dish_name} {notes}".strip()
+    props: list[str] = []
+
+    def add_prop(prop: str) -> None:
+        if prop not in props:
+            props.append(prop)
+
+    if contains_any(combined_text, ["鲈鱼", "鱼片"]) and contains_any(combined_text, ["酸", "酸汤", "木姜子", "娃娃菜"]):
+        add_prop("一只装青蒜碎的浅白小碟轻微失焦")
+        add_prop("半瓶无字木姜子油或细口量油玻璃瓶放在后侧")
+    if contains_any(combined_text, ["里脊", "春卷皮"]) and contains_any(combined_text, ["卷"]) and contains_any(combined_text, ["炸", "煎", "黑椒", "脆"]):
+        add_prop("一只小浅碟装黑胡椒碎或黑椒酱轻微失焦")
+        add_prop("少量鲜笋丝或控油网架边缘退到后景")
+
+    if contains_any(combined_text, ["葱", "葱花", "小葱", "葱白", "葱绿"]):
+        add_prop("一小碟切段小葱或葱花失焦放在后景")
+    if contains_any(combined_text, ["仔姜", "生姜", "姜丝", "姜片"]):
+        add_prop("少量姜丝或姜片放在小味碟里做后景")
+    if contains_any(combined_text, ["蒜", "蒜片", "蒜末"]):
+        add_prop("一只小碟蒜片或蒜末轻微失焦")
+    if contains_any(combined_text, ["辣", "小米辣", "辣椒", "干辣椒"]):
+        add_prop("少量切圈红椒或辣椒段自然散在后景")
+    if contains_any(combined_text, ["花椒", "青花椒", "藤椒"]):
+        add_prop("一只浅味碟里的花椒粒轻微失焦")
+    if contains_any(combined_text, ["菌菇", "香菇", "杏鲍菇", "蘑菇"]):
+        add_prop("一只装着切片菌菇的小浅碗虚化放在后侧")
+    if contains_any(combined_text, ["青柠", "柠檬", "酸橙"]):
+        add_prop("半个切开的青柠或柠檬作为少量酸香陪衬")
+    if contains_any(combined_text, ["鱼", "虾", "海鲜", "蛤蜊"]):
+        add_prop("锅盖、小酱碟或少量海鲜辅料虚化放在远处")
+    if contains_any(combined_text, ["拉面", "乌冬", "米线", "河粉", "意面", "炒面", "拌面", "面条", "汤面", "焖面", "凉面", "粉"]):
+        add_prop("一只面碗边、筷架或少量原料小碗虚化出现在后景")
+    if contains_any(combined_text, ["汤", "煲", "锅仔", "陶煲", "炖", "砂锅", "火锅"]):
+        add_prop("锅盖、汤勺或小汤碗只保留一两件失焦存在")
+    if contains_any(combined_text, ["炸", "酥", "脆"]):
+        add_prop("一小碟蘸料或半片柠檬做轻量陪衬")
+    if contains_any(combined_text, ["牛排", "意面", "烩饭", "披萨"]):
+        add_prop("素色餐巾折角或烤盘边缘轻微出现在后景")
+
+    if not props:
+        if contains_any(combined_text, ["汤", "煲", "锅仔", "陶煲", "砂锅", "火锅"]):
+            props.append("后景只留一只锅盖或小汤勺失焦点缀")
+        elif contains_any(combined_text, ["拉面", "乌冬", "米线", "河粉", "意面", "炒面", "拌面", "面条", "汤面", "焖面", "凉面", "粉"]):
+            props.append("后景只留一只原料小碗或筷架轻微失焦")
+        else:
+            props.append("后景只留与本菜直接相关的一两样原料小碗轻微失焦")
+
+    selected_props = props[:3]
+    return (
+        f"后景只保留少量与本菜直接相关的失焦陪衬，例如{'、'.join(selected_props)}，"
+        "不要默认摆整排干辣椒、整头蒜、木勺、香料碗和无关摆件"
+    )
 
 
 def infer_main_food_description(dish_name: str, notes: str) -> str:
@@ -373,14 +1709,21 @@ def infer_seasoning_ingredients(notes: str) -> list[tuple[str, str]]:
 
 
 def infer_key_tips(dish_name: str, notes: str) -> list[str]:
+    combined_text = f"{dish_name} {notes}"
     tips: list[str] = []
-    if contains_any(notes, ["黄豌豆", "耙豌豆", "高压锅", "软糯"]):
+    has_pea_family = contains_any(combined_text, PEA_FAMILY_KEYWORDS)
+    has_tofu_family = contains_any(combined_text, TOFU_FAMILY_KEYWORDS)
+    has_seared_texture = contains_any(combined_text, SEARED_KEYWORDS)
+
+    if has_pea_family:
         tips.append("黄豌豆一定先压到软糯")
-    if contains_any(notes, ["豆腐", "煎", "金黄", "焦色"]):
+    if has_tofu_family and has_seared_texture:
         tips.append("豆腐先煎出焦边再合炒")
+    elif has_seared_texture:
+        tips.append("先把表面煎出焦香再合味")
     if contains_any(notes, ["肉沫", "猪肉"]):
         tips.append("肉沫先炒香再并入主菜")
-    if contains_any(notes, ["水到豆腐的一半", "加水到豆腐的一半", "加水"]):
+    if has_tofu_family and contains_any(notes, ["水到豆腐的一半", "加水到豆腐的一半"]):
         tips.append("加水别没过豆腐")
     if contains_any(notes, ["勾芡", "浓稠"]):
         tips.append("最后勾芡把汁收到位")
@@ -427,9 +1770,11 @@ def infer_steps(dish_name: str, notes: str) -> list[dict[str, str]]:
         {"title": "出锅装盘", "content": "最后补香并装盘，保留热气、亮泽和最强食欲感"},
     ]
 
-
 def build_local_recipe_bundle(dish_name: str, notes: str, ad_copy: str) -> dict[str, Any]:
     normalized_notes = " ".join(notes.split())
+    plate_description = infer_plate_description(dish_name, normalized_notes)
+    table_description = infer_table_description(dish_name, normalized_notes, plate_description)
+    background_prop_description = infer_background_prop_description(dish_name, normalized_notes)
     return {
         "dish_name": dish_name,
         "guide_line": infer_guide_line(dish_name, normalized_notes),
@@ -437,7 +1782,9 @@ def build_local_recipe_bundle(dish_name: str, notes: str, ad_copy: str) -> dict[
         "collection_hint": DEFAULT_COLLECTION_HINT,
         "collection_copy": DEFAULT_COLLECTION_COPY,
         "ad_copy": ad_copy,
-        "plate": infer_plate_description(normalized_notes),
+        "plate": plate_description,
+        "table_setting": table_description,
+        "background_props": background_prop_description,
         "main_food": infer_main_food_description(dish_name, normalized_notes),
         "sauce": infer_sauce_description(normalized_notes),
         "texture": infer_texture_description(normalized_notes),
@@ -472,6 +1819,8 @@ def render_recipe_bundle_text(bundle: dict[str, Any]) -> str:
 
 【主画面说明】
 器皿与摆盘：{bundle['plate']}
+桌面与环境：{bundle['table_setting']}
+背景陪衬：{bundle['background_props']}
 主画面食材：{bundle['main_food']}
 汤汁或酱体：{bundle['sauce']}
 质感重点：{bundle['texture']}
@@ -501,79 +1850,11 @@ def render_recipe_bundle_text(bundle: dict[str, Any]) -> str:
 
 
 def build_local_image_prompt(bundle: dict[str, Any]) -> str:
-    main_ingredients = "\n".join(f"{name} {amount}" for name, amount in bundle["main_ingredients"])
-    spices = "\n".join(f"{name} {amount}" for name, amount in bundle["spices"])
-    seasonings = "\n".join(f"{name} {amount}" for name, amount in bundle["seasonings"])
-    tips = "\n".join(bundle["tips"])
-    steps = []
-    for index, step in enumerate(bundle["steps"], start=1):
-        steps.append(f"{index} {step['title']}\n{step['content']}")
+    return page01_recipe.build_local_page01_prompt(bundle)
 
-    return f"""
-请生成一张竖版 2:3 的中文抖音美食图文海报，主题是：{bundle['dish_name']}。
 
-整体设计模板必须采用成熟爆款菜谱海报风，版式和气质沿用当前满意版本：顶部双层标题区，中间主菜成品图，左侧“2人份食材”卡，右侧“成败关键”卡，下半部分“5步出锅”步骤条，底部是一整条收藏与关注横条。不要极简，不要杂志风，不要大面积留白，必须是信息很多但一眼就想收藏的高密度爆款图文模板。
-
-标题要求：
-上方引导句必须是：{bundle['guide_line']}
-主标题必须直接使用：{bundle['dish_name']}
-主标题下方黄条卖点必须是：{bundle['subtitle']}
-收藏提示细条内容必须是：{bundle['collection_hint']}
-
-主菜成品图要求：
-器皿与摆盘必须是：{bundle['plate']}
-主画面主体必须是：{bundle['main_food']}
-酱汁或汤汁状态必须是：{bundle['sauce']}
-质感重点必须是：{bundle['texture']}
-色彩点缀必须是：{bundle['colors']}
-画面中必须出现一双木筷从画面侧上方夹起一块主菜悬在半空，带轻微挂汁与热气，只保留筷子和主菜动作，不要人物脸部，不要手部特写。
-整体必须像 iPhone 17 Pro Max 拍摄的真实热门美食封面，有热气、亮泽、挂汁和食欲感，不要塑料假食物，不要静止僵硬摆盘。
-
-左侧“2人份食材”卡内容必须清楚排版：
-2人份食材
-
-主料
-{main_ingredients}
-
-香料
-{spices}
-
-调味料
-{seasonings}
-
-右侧“成败关键”卡内容必须是 5 条无标点短句：
-成败关键
-{tips}
-
-下半部分“5步出锅”步骤条内容必须是：
-5步出锅
-{'\n'.join(steps)}
-
-底部收藏关注横条内容必须是：
-{bundle['collection_copy']}
-{bundle['ad_copy']}
-
-整体配色固定为暖奶白、橙红、金黄、焦糖棕，背景可有木桌、香料、小食材和暖色虚化氛围。所有中文必须正确、自然、工整、无乱码、无错字。
-
-强负面要求：
-不要极简风
-不要杂志留白风
-不要清淡排版
-不要设计练习稿感
-不要英文
-不要乱码
-不要错字
-不要人物脸部
-不要手部特写
-不要黑金厚重风
-不要模块贴边
-不要塑料食物质感
-不要静止无动作的摆盘
-不要没有筷子夹菜动作
-不要过度饱和
-不要无意义装饰
-""".strip()
-
+def build_local_cover_prompt(bundle: dict[str, Any]) -> str:
+    return cover_page.build_local_cover_prompt(bundle)
 
 def load_prompt(prompt_file: Path) -> str:
     if not prompt_file.exists():
@@ -605,6 +1886,395 @@ def load_dish_idea(idea_file: Path) -> dict[str, str]:
     }
 
 
+def save_dish_idea(idea_file: Path, dish_name: str, notes: str) -> None:
+    idea_file.write_text(f"{dish_name.strip()}\n{notes.strip()}\n", encoding="utf-8")
+
+
+def is_top_level_section_line(line: str) -> bool:
+    return bool(re.fullmatch(r"\[[^\[\]]+\]", line))
+
+
+def is_second_level_section_line(line: str) -> bool:
+    return bool(re.fullmatch(r"\[\[[^\]]+\]\]", line))
+
+
+def load_traditional_dish_library(library_file: Path) -> dict[str, dict[str, list[str]]]:
+    if not library_file.exists():
+        raise FileNotFoundError(f"未找到传统菜库文件：{library_file}")
+
+    library: dict[str, dict[str, list[str]]] = {}
+    current_top_level = ""
+    current_second_level = ""
+
+    for raw_line in library_file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if is_top_level_section_line(line):
+            current_top_level = line[1:-1].strip()
+            current_second_level = ""
+            library.setdefault(current_top_level, {})
+            continue
+
+        if is_second_level_section_line(line):
+            if not current_top_level:
+                raise ValueError(f"传统菜库格式异常，二级分类缺少顶层分类：{line}")
+            current_second_level = line[2:-2].strip()
+            library[current_top_level].setdefault(current_second_level, [])
+            continue
+
+        if not current_top_level or not current_second_level:
+            raise ValueError(f"传统菜库格式异常，菜名未落在有效分类下：{line}")
+
+        library[current_top_level][current_second_level].append(line)
+
+    if not library:
+        raise ValueError(f"传统菜库为空：{library_file}")
+
+    return library
+
+
+def flatten_library_dishes(
+    library: dict[str, dict[str, list[str]]],
+    top_sections: tuple[str, ...] | None = None,
+) -> list[str]:
+    dishes: list[str] = []
+    for top_level, category_map in library.items():
+        if top_sections and top_level not in top_sections:
+            continue
+        for items in category_map.values():
+            dishes.extend(items)
+    return dishes
+
+
+def build_region_candidate_dishes(
+    library: dict[str, dict[str, list[str]]],
+    region_code: str,
+) -> list[str]:
+    profile = AUTO_DISH_REGION_PROFILES[region_code]
+    candidate_dishes = flatten_library_dishes(library, top_sections=profile["sections"])
+    keywords = tuple(profile["keywords"])
+    aliases = set(profile["aliases"])
+
+    if not keywords and not aliases:
+        return candidate_dishes
+
+    filtered: list[str] = []
+    for dish_name in candidate_dishes:
+        if any(keyword in dish_name for keyword in keywords) or dish_name in aliases:
+            filtered.append(dish_name)
+
+    if filtered:
+        return filtered
+
+    raise RuntimeError(f"当前 AUTO_DISH_CUISINE_MODE={region_code} 没有匹配到可用参考菜。")
+
+
+def normalize_dish_name_key(name: str) -> str:
+    return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", name).strip().lower()
+
+
+def find_conflicting_dish_name(candidate_name: str, existing_names: list[str]) -> str:
+    candidate_key = normalize_dish_name_key(candidate_name)
+    if not candidate_key:
+        return ""
+
+    for existing_name in existing_names:
+        existing_key = normalize_dish_name_key(existing_name)
+        if not existing_key:
+            continue
+        if candidate_key == existing_key:
+            return existing_name
+
+        shorter, longer = (candidate_key, existing_key)
+        if len(shorter) > len(longer):
+            shorter, longer = longer, shorter
+        if len(shorter) >= 3 and shorter in longer and len(longer) - len(shorter) <= 2:
+            return existing_name
+
+    return ""
+
+
+def extract_non_overlapping_auto_dish_name_tokens(text: str, tokens: tuple[str, ...]) -> list[tuple[int, str]]:
+    matches: list[tuple[int, str]] = []
+    occupied = [False] * len(text)
+
+    for token in sorted(set(tokens), key=len, reverse=True):
+        search_start = 0
+        while True:
+            match_index = text.find(token, search_start)
+            if match_index < 0:
+                break
+
+            match_end = match_index + len(token)
+            if not any(occupied[match_index:match_end]):
+                matches.append((match_index, token))
+                for index in range(match_index, match_end):
+                    occupied[index] = True
+
+            search_start = match_index + 1
+
+    return sorted(matches, key=lambda item: item[0])
+
+
+def find_mechanical_auto_dish_name_reason(dish_name: str) -> str:
+    if len(dish_name) > 7:
+        return "自动生成的新菜名太长，像把主料、辅料、做法和载体一起塞进了标题。请压缩到 4 到 7 个字，只保留最有记忆点的 2 到 3 段信息。"
+
+    action_matches = extract_non_overlapping_auto_dish_name_tokens(dish_name, AUTO_DISH_NAME_ACTION_TOKENS)
+    if len(action_matches) >= 3:
+        return f"自动生成的新菜名工艺和结构词堆得太多，读起来不顺口：{dish_name}。请压缩成更像人会说出口的短名字。"
+
+    if len(dish_name) >= 7 and len(action_matches) >= 2 and action_matches[0][0] >= 4:
+        return (
+            f"自动生成的新菜名信息塞得过满，读起来像配方摘要，不像人会点单的菜名：{dish_name}。"
+            "请按‘风味/状态 + 主料 + 做法或载体’重写，辅料和细节全部放到第二行。"
+        )
+
+    return ""
+
+
+def extract_auto_dish_structure_families(text: str) -> set[str]:
+    normalized = normalize_dish_name_key(text)
+    matches: set[str] = set()
+
+    for family_name, keywords in AUTO_DISH_STRUCTURE_FAMILIES:
+        if any(normalize_dish_name_key(keyword) in normalized for keyword in keywords):
+            matches.add(family_name)
+
+    if re.search(r"夹.{0,3}(饼|馍|烧饼|火烧)", text):
+        matches.add("夹饼夹馍类")
+    if re.search(r"(盖|拌|炒|烩).{0,2}饭", text):
+        matches.add("盖饭拌饭类")
+    if re.search(r"(汤|拌|炒|焖).{0,2}(面|粉)", text):
+        matches.add("面粉主食类")
+
+    return matches
+
+
+def extract_auto_dish_main_ingredient_families(text: str) -> set[str]:
+    normalized = normalize_dish_name_key(text)
+    matches: set[str] = set()
+
+    for family_name, keywords in AUTO_DISH_MAIN_INGREDIENT_FAMILIES:
+        if any(normalize_dish_name_key(keyword) in normalized for keyword in keywords):
+            matches.add(family_name)
+
+    return matches
+
+
+def find_structural_dish_conflict(
+    candidate_name: str,
+    candidate_text: str,
+    existing_names: list[str],
+) -> str:
+    candidate_structures = extract_auto_dish_structure_families(candidate_text)
+    candidate_ingredients = extract_auto_dish_main_ingredient_families(candidate_text)
+    if not candidate_structures or not candidate_ingredients:
+        return ""
+
+    for existing_name in existing_names:
+        existing_structures = extract_auto_dish_structure_families(existing_name)
+        if not candidate_structures.intersection(existing_structures):
+            continue
+
+        existing_ingredients = extract_auto_dish_main_ingredient_families(existing_name)
+        if candidate_ingredients.intersection(existing_ingredients):
+            return existing_name
+
+    return ""
+
+
+def load_auto_dish_memory(memory_file: Path) -> list[dict[str, Any]]:
+    if not memory_file.exists():
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for raw_line in memory_file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            entries.append(payload)
+    return entries
+
+
+def append_auto_dish_memory(memory_file: Path, entry: dict[str, Any]) -> None:
+    memory_file.parent.mkdir(parents=True, exist_ok=True)
+    with memory_file.open("a", encoding="utf-8") as memory_handle:
+        memory_handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def pick_unused_reference_dish(candidate_dishes: list[str], used_reference_dishes: set[str]) -> str:
+    available_dishes = [dish_name for dish_name in candidate_dishes if dish_name not in used_reference_dishes]
+    if not available_dishes:
+        raise RuntimeError("当前区域内可用的传统参考菜已经全部使用过，请清空记忆文件或切换 AUTO_DISH_CUISINE_MODE。")
+    return random.choice(available_dishes)
+
+
+def parse_auto_generated_dish_idea(raw_text: str) -> dict[str, str]:
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        raise ValueError("自动造菜输出行数不足，必须至少有两行。")
+
+    dish_name = re.sub(r"^(?:第一行|菜名|新菜名|原创菜名)[:：]\s*", "", lines[0]).strip()
+    description = "".join(lines[1:]).strip()
+    description = re.sub(r"^(?:第二行|菜品描述|描述|说明)[:：]\s*", "", description).strip()
+
+    return {
+        "dish_idea": dish_name,
+        "notes": description,
+    }
+
+
+def validate_auto_generated_dish_idea(
+    idea_payload: dict[str, str],
+    reference_dish: str,
+    traditional_dish_names: list[str],
+    historical_generated_dish_names: list[str],
+) -> dict[str, str]:
+    dish_name = idea_payload["dish_idea"].strip()
+    notes = re.sub(r"\s+", "", idea_payload["notes"]).strip()
+    combined_text = f"{dish_name}{notes}"
+
+    if not re.fullmatch(r"[\u4e00-\u9fff]{4,7}", dish_name):
+        raise ValueError("自动生成的新菜名必须是 4 到 7 个纯中文汉字，优先 4 到 6 个字。")
+
+    if any(token in dish_name for token in AUTO_DISH_BANNED_NAME_TOKENS):
+        raise ValueError("自动生成的新菜名仍带有比喻或概念化词汇。")
+
+    mechanical_name_reason = find_mechanical_auto_dish_name_reason(dish_name)
+    if mechanical_name_reason:
+        raise ValueError(mechanical_name_reason)
+
+    traditional_conflict = find_conflicting_dish_name(dish_name, traditional_dish_names)
+    if traditional_conflict:
+        raise ValueError(f"自动生成的新菜名与传统菜库冲突：{traditional_conflict}")
+
+    historical_conflict = find_conflicting_dish_name(dish_name, historical_generated_dish_names)
+    if historical_conflict:
+        raise ValueError(f"自动生成的新菜名与历史新菜重复：{historical_conflict}")
+
+    reference_structure_conflict = find_structural_dish_conflict(
+        candidate_name=dish_name,
+        candidate_text=combined_text,
+        existing_names=[reference_dish],
+    )
+    if reference_structure_conflict:
+        raise ValueError(
+            f"自动生成的新菜仍沿用了参考菜的同主料同结构框架：{reference_structure_conflict}。必须换掉承载主食或最终上桌结构，不能只是换口味词。"
+        )
+
+    traditional_structure_conflict = find_structural_dish_conflict(
+        candidate_name=dish_name,
+        candidate_text=combined_text,
+        existing_names=traditional_dish_names,
+    )
+    if traditional_structure_conflict:
+        raise ValueError(
+            f"自动生成的新菜与传统菜库中的现有菜过于接近：{traditional_structure_conflict}。请换掉主料承载方式或成菜结构后再生成。"
+        )
+
+    if not notes.startswith(dish_name):
+        raise ValueError("自动生成的菜品描述必须以新菜名开头。")
+
+    if reference_dish in notes:
+        raise ValueError("自动生成的菜品描述不允许直接提到参考传统菜名。")
+
+    if any(keyword in notes for keyword in ("参考菜", "灵感来源", "改良自", "像", "复刻")):
+        raise ValueError("自动生成的菜品描述仍在对比或引用传统菜。")
+
+    if len(notes) < 140:
+        raise ValueError("自动生成的菜品描述过短，未覆盖完整制作逻辑。")
+
+    return {
+        "dish_idea": dish_name,
+        "notes": notes,
+    }
+
+
+def generate_auto_dish_idea(
+    idea_file: Path,
+    client: OpenAI,
+) -> dict[str, str]:
+    library_file = get_auto_dish_library_file()
+    memory_file = get_auto_dish_memory_file()
+    library = load_traditional_dish_library(library_file)
+    memory_entries = load_auto_dish_memory(memory_file)
+    region_code = get_auto_dish_region_code()
+    region_profile = AUTO_DISH_REGION_PROFILES[region_code]
+
+    region_candidate_dishes = build_region_candidate_dishes(library, region_code)
+    used_reference_dishes = [str(entry.get("reference_dish", "")).strip() for entry in memory_entries if str(entry.get("reference_dish", "")).strip()]
+    used_generated_dishes = [str(entry.get("generated_dish_name", "")).strip() for entry in memory_entries if str(entry.get("generated_dish_name", "")).strip()]
+    reference_dish = pick_unused_reference_dish(region_candidate_dishes, set(used_reference_dishes))
+
+    sample_pool = [dish_name for dish_name in region_candidate_dishes if dish_name != reference_dish]
+    sample_size = min(18, len(sample_pool))
+    region_samples = random.sample(sample_pool, sample_size) if sample_size else []
+    traditional_dish_names = flatten_library_dishes(library)
+
+    last_error = ""
+    last_model = ""
+    for _ in range(AUTO_DISH_GENERATION_RETRY_COUNT):
+        generation_result = request_text_generation(
+            client=client,
+            system_prompt=build_auto_dish_generation_system_prompt(region_label=region_profile["label"]),
+            user_prompt=build_auto_dish_generation_user_prompt(
+                region_label=region_profile["label"],
+                reference_dish=reference_dish,
+                region_samples=region_samples,
+                used_reference_dishes=used_reference_dishes,
+                used_generated_dishes=used_generated_dishes,
+                retry_feedback=last_error,
+            ),
+            stage_name="自动造菜",
+        )
+        last_model = generation_result["model"]
+        parsed_payload = parse_auto_generated_dish_idea(generation_result["content"])
+        try:
+            validated_payload = validate_auto_generated_dish_idea(
+                idea_payload=parsed_payload,
+                reference_dish=reference_dish,
+                traditional_dish_names=traditional_dish_names,
+                historical_generated_dish_names=used_generated_dishes,
+            )
+        except ValueError as exc:
+            last_error = str(exc)
+            continue
+
+        save_dish_idea(idea_file, validated_payload["dish_idea"], validated_payload["notes"])
+        append_auto_dish_memory(
+            memory_file,
+            {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "region_code": region_code,
+                "region_label": region_profile["label"],
+                "reference_dish": reference_dish,
+                "generated_dish_name": validated_payload["dish_idea"],
+                "model": last_model,
+            },
+        )
+
+        return {
+            **validated_payload,
+            "auto_generated": "1",
+            "region_code": region_code,
+            "region_label": region_profile["label"],
+            "reference_dish": reference_dish,
+            "memory_file": str(memory_file),
+            "library_file": str(library_file),
+            "generation_model": last_model,
+        }
+
+    raise RuntimeError(f"自动造菜连续失败：{last_error or '模型多次输出不合规。'}")
+
+
 def load_text_variable(text_file: Path, variable_name: str) -> str:
     if not text_file.exists():
         raise FileNotFoundError(f"未找到变量文件 {variable_name}：{text_file}")
@@ -626,21 +2296,55 @@ def sanitize_file_name(name: str) -> str:
     return sanitized or "生成图片"
 
 
+def build_run_output_dir(timestamp: str, dish_name: str) -> Path:
+    return OUTPUT_ROOT_DIR / f"{timestamp}_{sanitize_file_name(dish_name)}"
+
+
 def get_text_model() -> str:
+    ensure_runtime_config_loaded()
+    provider = get_text_provider()
+    if provider == "doubao":
+        return os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
     return os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
 
 
 def get_text_fallback_model() -> str:
+    ensure_runtime_config_loaded()
+    provider = get_text_provider()
+    if provider == "doubao":
+        default_model = get_text_model()
+        return os.getenv("DOUBAO_TEXT_FALLBACK_MODEL", default_model).strip() or default_model
     return os.getenv("OPENAI_TEXT_FALLBACK_MODEL", "gpt-4.1-nano").strip() or "gpt-4.1-nano"
 
 
+def get_text_temperature() -> float:
+    ensure_runtime_config_loaded()
+    provider = get_text_provider()
+    if provider == "doubao":
+        text = os.getenv("DOUBAO_TEXT_TEMPERATURE", "0.2").strip() or "0.2"
+    else:
+        text = os.getenv("OPENAI_TEXT_TEMPERATURE", "0.2").strip() or "0.2"
+
+    try:
+        return float(text)
+    except ValueError as exc:
+        raise RuntimeError("文本温度参数必须是数字。") from exc
+
+
 def get_text_max_output_tokens(stage_name: str) -> int:
+    if stage_name == "自动造菜":
+        return 1200
     if stage_name == "创意菜谱":
         return 1400
+    if stage_name == "封面prompt":
+        return 1600
+    if stage_name == "抖音发布文案":
+        return 1200
     return 2600
 
 
 def get_text_request_timeout_seconds() -> float:
+    ensure_runtime_config_loaded()
     timeout_text = os.getenv("OPENAI_TEXT_REQUEST_TIMEOUT_SECONDS", "120").strip() or "120"
     try:
         return float(timeout_text)
@@ -649,6 +2353,7 @@ def get_text_request_timeout_seconds() -> float:
 
 
 def get_image_request_timeout_seconds() -> float:
+    ensure_runtime_config_loaded()
     timeout_text = os.getenv("OPENAI_IMAGE_REQUEST_TIMEOUT_SECONDS", "900").strip() or "900"
     try:
         return float(timeout_text)
@@ -656,13 +2361,79 @@ def get_image_request_timeout_seconds() -> float:
         raise RuntimeError("OPENAI_IMAGE_REQUEST_TIMEOUT_SECONDS 必须是数字。") from exc
 
 
+def validate_gpt_image_size(size_text: str, env_name: str) -> str:
+    normalized = size_text.strip().lower()
+    match = re.fullmatch(r"(\d+)x(\d+)", normalized)
+    if match is None:
+        raise RuntimeError(f"{env_name} 必须是 宽x高 格式，例如 1024x1536。")
+
+    width = int(match.group(1))
+    height = int(match.group(2))
+    long_edge = max(width, height)
+    short_edge = min(width, height)
+    total_pixels = width * height
+
+    if width % 16 != 0 or height % 16 != 0:
+        raise RuntimeError(f"{env_name}={normalized} 非法：宽和高都必须是 16 的倍数。")
+    if long_edge > 3840:
+        raise RuntimeError(f"{env_name}={normalized} 非法：最长边不能超过 3840 像素。")
+    if short_edge == 0 or long_edge / short_edge > 3:
+        raise RuntimeError(f"{env_name}={normalized} 非法：长边与短边比例不能超过 3:1。")
+    if total_pixels < 655360 or total_pixels > 8294400:
+        raise RuntimeError(f"{env_name}={normalized} 非法：总像素必须介于 655360 和 8294400 之间。")
+
+    return f"{width}x{height}"
+
+
 def get_image_settings() -> dict[str, Any]:
+    ensure_runtime_config_loaded()
     return {
-        "model": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2").strip() or "gpt-image-2",
-        "size": os.getenv("OPENAI_IMAGE_SIZE", "1024x1536").strip() or "1024x1536",
+        "model": os.getenv("OPENAI_IMAGE_MODEL", DEFAULT_OPENAI_IMAGE_MODEL).strip() or DEFAULT_OPENAI_IMAGE_MODEL,
+        "size": validate_gpt_image_size(
+            os.getenv("OPENAI_IMAGE_SIZE", "1024x1536").strip() or "1024x1536",
+            env_name="OPENAI_IMAGE_SIZE",
+        ),
         "quality": os.getenv("OPENAI_IMAGE_QUALITY", "high").strip() or "high",
         "image_count": int(os.getenv("OPENAI_IMAGE_COUNT", "2").strip() or "2"),
     }
+
+
+def get_tujie_image_settings() -> dict[str, Any]:
+    ensure_runtime_config_loaded()
+    default_model = os.getenv("OPENAI_IMAGE_MODEL", DEFAULT_OPENAI_IMAGE_MODEL).strip() or DEFAULT_OPENAI_IMAGE_MODEL
+    default_size = validate_gpt_image_size(
+        os.getenv("OPENAI_IMAGE_SIZE", "1024x1536").strip() or "1024x1536",
+        env_name="OPENAI_IMAGE_SIZE",
+    )
+    default_quality = os.getenv("OPENAI_IMAGE_QUALITY", "high").strip() or "high"
+    return {
+        "model": os.getenv("OPENAI_TUJIE_IMAGE_MODEL", default_model).strip() or default_model,
+        "size": validate_gpt_image_size(
+            os.getenv("OPENAI_TUJIE_IMAGE_SIZE", default_size).strip() or default_size,
+            env_name="OPENAI_TUJIE_IMAGE_SIZE",
+        ),
+        "quality": os.getenv("OPENAI_TUJIE_IMAGE_QUALITY", default_quality).strip() or default_quality,
+        "image_count": int(os.getenv("OPENAI_TUJIE_IMAGE_COUNT", "1").strip() or "1"),
+    }
+
+
+def get_cover_image_settings() -> dict[str, Any]:
+    ensure_runtime_config_loaded()
+    default_model = os.getenv("OPENAI_IMAGE_MODEL", DEFAULT_OPENAI_IMAGE_MODEL).strip() or DEFAULT_OPENAI_IMAGE_MODEL
+    default_quality = os.getenv("OPENAI_IMAGE_QUALITY", "high").strip() or "high"
+    return {
+        "model": os.getenv("OPENAI_COVER_IMAGE_MODEL", default_model).strip() or default_model,
+        "size": validate_gpt_image_size(
+            os.getenv("OPENAI_COVER_IMAGE_SIZE", "2160x3840").strip() or "2160x3840",
+            env_name="OPENAI_COVER_IMAGE_SIZE",
+        ),
+        "quality": os.getenv("OPENAI_COVER_IMAGE_QUALITY", default_quality).strip() or default_quality,
+        "image_count": int(os.getenv("OPENAI_COVER_IMAGE_COUNT", "1").strip() or "1"),
+    }
+
+
+def build_client() -> OpenAI:
+    return build_image_client()
 
 
 def extract_text_output(response: Any) -> str:
@@ -719,6 +2490,7 @@ def request_text_generation(
     fallback_model = get_text_fallback_model()
     request_timeout = get_text_request_timeout_seconds()
     max_output_tokens = get_text_max_output_tokens(stage_name)
+    temperature = get_text_temperature()
     candidate_models = [text_model]
     if fallback_model != text_model:
         candidate_models.append(fallback_model)
@@ -741,6 +2513,7 @@ def request_text_generation(
                 ],
                 timeout=request_timeout,
                 max_tokens=max_output_tokens,
+                temperature=temperature,
             )
             break
         except Exception as exc:
@@ -824,9 +2597,13 @@ def save_text_output(
     base_name: str,
     suffix: str,
 ) -> str:
+    normalized_content = content.strip()
+    if not normalized_content:
+        raise ValueError(f"待保存文本为空：{suffix}")
+
     output_dir.mkdir(parents=True, exist_ok=True)
     file_path = output_dir / f"{timestamp}_{sanitize_file_name(base_name)}{suffix}.txt"
-    file_path.write_text(content.strip() + "\n", encoding="utf-8")
+    file_path.write_text(normalized_content + "\n", encoding="utf-8")
     return str(file_path)
 
 
@@ -855,6 +2632,25 @@ def replace_or_insert_prefixed_line(
 
 def normalize_recipe_text(recipe_text: str, fixed_dish_name: str, ad_copy: str, notes: str = "") -> str:
     normalized_text = recipe_text.strip()
+    normalized_notes = " ".join(notes.split())
+    inferred_plate_description = infer_plate_description(fixed_dish_name, normalized_notes)
+    existing_plate_description = extract_recipe_field_value(normalized_text, "器皿与摆盘")
+    plate_description = existing_plate_description
+    if should_infer_scene_field(plate_description):
+        plate_description = inferred_plate_description
+
+    inferred_table_description = infer_table_description(fixed_dish_name, normalized_notes, plate_description)
+    existing_table_description = extract_recipe_field_value(normalized_text, "桌面与环境")
+    table_description = existing_table_description
+    if should_infer_scene_field(table_description) or looks_like_template_scene_field("桌面与环境", table_description):
+        table_description = inferred_table_description
+
+    inferred_background_prop_description = infer_background_prop_description(fixed_dish_name, normalized_notes)
+    existing_background_prop_description = extract_recipe_field_value(normalized_text, "背景陪衬")
+    background_prop_description = existing_background_prop_description
+    if should_infer_scene_field(background_prop_description) or looks_like_template_scene_field("背景陪衬", background_prop_description):
+        background_prop_description = inferred_background_prop_description
+
     normalized_text = replace_or_insert_prefixed_line(
         text=normalized_text,
         prefix="最终菜名：",
@@ -873,13 +2669,24 @@ def normalize_recipe_text(recipe_text: str, fixed_dish_name: str, ad_copy: str, 
         replacement_line=f"动态动作：{DEFAULT_DYNAMIC_ACTION}",
         insert_after_prefix="质感重点：",
     )
-    if notes.strip():
-        normalized_text = replace_or_insert_prefixed_line(
-            text=normalized_text,
-            prefix="器皿与摆盘：",
-            replacement_line=f"器皿与摆盘：{infer_plate_description(notes)}",
-            insert_after_prefix="【主画面说明】",
-        )
+    normalized_text = replace_or_insert_prefixed_line(
+        text=normalized_text,
+        prefix="器皿与摆盘：",
+        replacement_line=f"器皿与摆盘：{plate_description}",
+        insert_after_prefix="【主画面说明】",
+    )
+    normalized_text = replace_or_insert_prefixed_line(
+        text=normalized_text,
+        prefix="桌面与环境：",
+        replacement_line=f"桌面与环境：{table_description}",
+        insert_after_prefix="器皿与摆盘：",
+    )
+    normalized_text = replace_or_insert_prefixed_line(
+        text=normalized_text,
+        prefix="背景陪衬：",
+        replacement_line=f"背景陪衬：{background_prop_description}",
+        insert_after_prefix="桌面与环境：",
+    )
     normalized_text = replace_or_insert_prefixed_line(
         text=normalized_text,
         prefix="收藏文案：",
@@ -895,19 +2702,538 @@ def normalize_recipe_text(recipe_text: str, fixed_dish_name: str, ad_copy: str, 
     return normalized_text.strip()
 
 
+def looks_like_placeholder_output(text: str) -> bool:
+    normalized = " ".join(text.split())
+    if not normalized:
+        return True
+    if re.fullmatch(r"[?？_\-\s]+", normalized):
+        return True
+    if "??" in normalized or "？？" in normalized:
+        return True
+    if len(normalized) <= 40 and re.search(r"(创意菜谱|图解\d{2}(文案|prompt)|封面prompt|文生图prompt).*(输出|output)$", normalized, flags=re.I):
+        return True
+    return False
+
+
+def ensure_non_placeholder_text(text: str, stage_name: str, min_length: int = 10) -> str:
+    normalized = text.strip()
+    if not normalized:
+        raise ValueError(f"{stage_name} 结果为空。")
+    if len(normalized) < min_length:
+        raise ValueError(f"{stage_name} 结果过短，疑似异常。")
+    if looks_like_placeholder_output(normalized):
+        raise ValueError(f"{stage_name} 返回了占位文本，疑似异常。")
+    return normalized
+
+
+def validate_recipe_text_content(recipe_text: str, fixed_dish_name: str) -> str:
+    normalized = ensure_non_placeholder_text(recipe_text, stage_name="创意菜谱", min_length=80)
+    normalized = normalize_generated_guide_line(normalized, fixed_dish_name=fixed_dish_name)
+    normalized = normalize_generated_subtitle(normalized, fixed_dish_name=fixed_dish_name)
+    required_sections = [
+        "【基础定位】",
+        f"最终菜名：{fixed_dish_name}",
+        "【主画面说明】",
+        "器皿与摆盘：",
+        "桌面与环境：",
+        "背景陪衬：",
+        "【2人份食材】",
+        "【成败关键】",
+        "【5步出锅】",
+        "【底部文案】",
+    ]
+    missing_sections = [section for section in required_sections if section not in normalized]
+    if missing_sections:
+        raise ValueError(f"创意菜谱缺少必要结构：{','.join(missing_sections)}")
+    return normalized
+
+
+def validate_image_prompt_content(prompt_text: str, fixed_dish_name: str, stage_name: str) -> str:
+    normalized = ensure_non_placeholder_text(prompt_text, stage_name=stage_name, min_length=60)
+    if fixed_dish_name not in normalized:
+        raise ValueError(f"{stage_name} 缺少菜名，疑似异常。")
+    return normalized
+
+
+def build_page01_required_prompt_fragments(bundle: dict[str, Any]) -> list[str]:
+    fragments: list[str] = [
+        bundle.get("guide_line", ""),
+        bundle.get("subtitle", ""),
+        bundle.get("collection_hint", ""),
+        bundle.get("collection_copy", ""),
+        bundle.get("ad_copy", ""),
+    ]
+
+    for group_name in ("main_ingredients", "spices", "seasonings"):
+        for name, amount in bundle.get(group_name, []):
+            fragments.append(f"{name} {amount}".strip())
+
+    fragments.extend(bundle.get("tips", []))
+
+    for step in bundle.get("steps", []):
+        title = str(step.get("title", "")).strip()
+        content = str(step.get("content", "")).strip()
+        if title:
+            fragments.append(title)
+        if content:
+            fragments.append(content)
+
+    unique_fragments: list[str] = []
+    seen_fragments: set[str] = set()
+    for fragment in fragments:
+        if not fragment or fragment in seen_fragments:
+            continue
+        seen_fragments.add(fragment)
+        unique_fragments.append(fragment)
+
+    return unique_fragments
+
+
+def validate_page01_prompt_content(prompt_text: str, fixed_dish_name: str, bundle: dict[str, Any]) -> str:
+    normalized = validate_image_prompt_content(prompt_text, fixed_dish_name=fixed_dish_name, stage_name="文生图prompt")
+    if not re.search(r"(中轴线|正中竖线|画面正中竖线)", normalized):
+        raise ValueError("文生图prompt 缺少首图标题中轴约束。")
+    if not re.search(r"(中心点|中心柱布局|居中堆叠|居中排布)", normalized):
+        raise ValueError("文生图prompt 缺少首图标题中心柱布局约束。")
+    if not re.search(r"左右留白.*对称", normalized):
+        raise ValueError("文生图prompt 缺少首图标题左右留白对称约束。")
+    if not re.search(r"(不要偏左|不能偏左|不允许.*左对齐)", normalized):
+        raise ValueError("文生图prompt 缺少首图标题禁止偏左约束。")
+
+    required_fragments = build_page01_required_prompt_fragments(bundle)
+    missing_fragments = [fragment for fragment in required_fragments if fragment not in normalized]
+    if missing_fragments:
+        raise ValueError(f"文生图prompt 缺少首图关键文案：{missing_fragments[0]}")
+
+    return normalized
+
+
+def validate_guide_page_prompt_content(prompt_text: str, fixed_dish_name: str, stage_name: str) -> str:
+    normalized = validate_image_prompt_content(prompt_text, fixed_dish_name=fixed_dish_name, stage_name=stage_name)
+    leaked_labels = [label for label in GUIDE_PAGE_MACHINE_LABELS if label in normalized]
+    if leaked_labels:
+        raise ValueError(f"{stage_name} 混入了程序化字段标签：{','.join(leaked_labels)}")
+    return normalized
+
+
+def validate_cover_prompt_content(prompt_text: str, fixed_dish_name: str, bundle: dict[str, Any]) -> str:
+    normalized = validate_image_prompt_content(prompt_text, fixed_dish_name=fixed_dish_name, stage_name="封面prompt")
+    if not re.search(r"竖版\s*9:16", normalized):
+        raise ValueError("封面prompt 缺少 9:16 画幅约束。")
+    if not re.search(r"(画布正中|中轴|正中竖轴|正中竖线).*(标题通道|单列竖排|竖向标题通道)", normalized):
+        raise ValueError("封面prompt 缺少菜名单列竖排中轴约束。")
+    if not re.search(r"(背景主菜|餐盘|背景).*(避开|退到).*(中轴|下半部|右下|左下)", normalized):
+        raise ValueError("封面prompt 缺少背景避让中轴约束。")
+
+    required_scene_values = [
+        bundle.get("plate", ""),
+        bundle.get("table_setting", ""),
+        bundle.get("background_props", ""),
+        bundle.get("main_food", ""),
+    ]
+    missing_scene_values = [value for value in required_scene_values if value and value not in normalized]
+    if missing_scene_values:
+        raise ValueError("封面prompt 缺少首图同场景锁定信息。")
+
+    return normalized
+
+
+def validate_guide_page_text_content(page_text: str, page_number: int, page_name: str) -> str:
+    normalized = ensure_non_placeholder_text(page_text, stage_name=f"图解{page_number:02d}文案", min_length=40)
+    required_sections = [
+        "【页面信息】",
+        f"页码：{page_number:02d}/06",
+        f"页面名称：{page_name}",
+        "页面标题：",
+        "页面副标题：",
+        "阅读收益：",
+        "【页尾提示】",
+    ]
+    missing_sections = [section for section in required_sections if section not in normalized]
+    if missing_sections:
+        raise ValueError(f"图解{page_number:02d}文案缺少必要结构：{','.join(missing_sections)}")
+    return normalized
+
+
+def normalize_topic_text(topic: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", topic).strip()
+    return cleaned[:18]
+
+
+def format_topic_tag(topic: str) -> str:
+    normalized = normalize_topic_text(topic).lstrip("#")
+    if not normalized:
+        return ""
+    return f"#{normalized}"
+
+
+def is_disallowed_publish_topic(topic: str, dish_name: str) -> bool:
+    normalized_topic = normalize_topic_text(topic)
+    normalized_dish_name = normalize_topic_text(dish_name)
+    if not normalized_topic:
+        return True
+    if any(token in normalized_topic for token in PUBLISH_BANNED_TOPIC_TOKENS):
+        return True
+    if normalized_dish_name and normalized_dish_name in normalized_topic:
+        return True
+    return False
+
+
+def sanitize_publish_title_highlight(highlight: str) -> str:
+    cleaned = highlight.replace("阿叶造新菜", " ")
+    cleaned = re.sub(r"[#【】\[\]（）()《》<>]", " ", cleaned)
+    cleaned = cleaned.replace("，", " ").replace(",", " ")
+    cleaned = cleaned.replace("！", " ").replace("!", " ")
+    cleaned = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff\s]+", " ", cleaned)
+    cleaned = " ".join(cleaned.split()).replace(" ", "")
+    return cleaned[:12].strip()
+
+
+def infer_publish_title_highlight(dish_name: str, source_text: str, notes: str = "") -> str:
+    combined_text = f"{dish_name} {notes} {source_text}"
+
+    if contains_any(combined_text, ["脆", "酥", "焦", "煎"]):
+        return "外脆里嫩超香"
+    if contains_any(combined_text, ["鱼", "虾", "贝", "帆立", "扇贝", "鲜", "嫩", "滑"]):
+        return "鲜嫩到一口上头"
+    if contains_any(combined_text, ["酸", "柚", "青柠", "梅子"]):
+        return "酸香开胃真上头"
+    if contains_any(combined_text, ["煲", "锅", "汤"]):
+        return "热乎鲜香太顶了"
+    if contains_any(combined_text, ["豆", "扁豆", "豆腐", "素"]):
+        return "外脆内软超香"
+    return "香到想立刻开饭"
+
+
+def normalize_publish_title(
+    dish_name: str,
+    source_text: str,
+    notes: str,
+    title: str,
+) -> str:
+    raw_title = " ".join(title.splitlines()).strip()
+    if not raw_title:
+        raw_title = infer_publish_title_highlight(dish_name=dish_name, source_text=source_text, notes=notes)
+
+    raw_title = raw_title.replace("!", "！").replace(",", "，")
+    raw_title = raw_title.replace("阿叶造新菜", " ")
+
+    highlight_source = raw_title
+    if dish_name in highlight_source:
+        highlight_source = highlight_source.split(dish_name, 1)[1]
+    if "，" in highlight_source:
+        highlight_source = highlight_source.split("，", 1)[-1]
+    highlight_source = highlight_source.strip(" ，。！？!?.、：:；; ")
+
+    highlight = sanitize_publish_title_highlight(highlight_source)
+    if not highlight:
+        highlight = infer_publish_title_highlight(dish_name=dish_name, source_text=source_text, notes=notes)
+
+    return f"{dish_name}，{highlight}！"
+
+
+def build_publish_activity_topics(source_text: str) -> list[str]:
+    topics: list[str] = []
+    if contains_any(source_text, ["原创", "创意", "新菜", "灵感"]):
+        topics.append("抖音美食推荐官")
+    else:
+        topics.append("跟着抖音学做菜")
+    topics.append("我的厨房日记")
+    return topics
+
+
+def infer_publish_topic_tags(dish_name: str, source_text: str, notes: str = "") -> list[str]:
+    combined_text = f"{dish_name} {notes} {source_text}"
+    candidate_topics: list[str] = build_publish_activity_topics(combined_text)
+
+    if contains_any(combined_text, ["煲", "锅", "汤"]):
+        candidate_topics.extend(["家常煲菜", "一锅出晚饭"])
+    if contains_any(combined_text, ["煎", "焦", "铁板"]):
+        candidate_topics.extend(["平底锅菜谱", "香煎做法"])
+    if contains_any(combined_text, ["炸", "脆", "酥"]):
+        candidate_topics.extend(["外脆里嫩", "香酥做法"])
+    if contains_any(combined_text, ["鱼", "虾", "贝", "海鲜", "鱿", "蛤"]):
+        candidate_topics.extend(["海鲜做法", "鲜味料理"])
+    if contains_any(combined_text, ["豆", "扁豆", "豆腐", "素"]):
+        candidate_topics.extend(["素食菜谱", "豆类料理"])
+    if contains_any(combined_text, ["孜然", "中东", "北非", "摩洛哥", "黎巴嫩", "异国"]):
+        candidate_topics.extend(["异国风味菜", "中东风味料理"])
+    if contains_any(combined_text, ["请客", "宴客", "待客", "聚餐"]):
+        candidate_topics.extend(["宴客菜", "聚餐菜"])
+    if contains_any(combined_text, ["下饭", "拌饭", "配饭"]):
+        candidate_topics.extend(["下饭菜", "晚饭吃什么"])
+    if contains_any(combined_text, ["懒人", "简单", "快手", "省时"]):
+        candidate_topics.extend(["快手家常菜", "懒人菜谱"])
+
+    candidate_topics.extend(PUBLISH_GENERAL_TOPICS)
+
+    tags: list[str] = []
+    seen: set[str] = set()
+    for topic in candidate_topics:
+        if is_disallowed_publish_topic(topic, dish_name=dish_name):
+            continue
+        tag = format_topic_tag(topic)
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        tags.append(tag)
+        if len(tags) >= 5:
+            break
+
+    return tags
+
+
+def build_publish_copy_system_prompt(fixed_dish_name: str) -> str:
+    return f"""
+你是阿叶造新菜账号的抖音图文运营编辑，负责把菜谱内容整理成更适合抖音发布的图文标题和图文描述。
+
+你的目标：
+1. 标题要像近期平台里更容易让人点开的图文标题，语气新鲜、亲切、有用，可以轻微玩梗，但不能油腻、不能空喊。
+2. 描述要像博主本人在认真安利这道菜，既有食欲，也有实用信息，还要让人觉得“这条存一下有用”。
+3. 标题和描述都要尽量贴近中文互联网和抖音里的流行表达，但不能过度夸张，不要低质鸡汤，不要硬凑热搜。
+4. 标题必须严格写成“菜名，卖点！”；菜名后必须用中文逗号，最后必须用中文叹号，卖点单独放在菜名后面。
+5. 描述最后必须单独放一行 5 个话题标签，每个标签都以 # 开头；不要生成菜名本身的话题，也不要生成 #阿叶造新菜。
+6. 话题优先按抖音常见美食搜索词和活动型话题的写法去想；如果你无法确认实时热榜，就选更稳的通用高频美食话题，不要编造榜单来源。
+6. 标题里必须保留菜名“{fixed_dish_name}”或非常直接地指向这道菜，不能改成别的菜。
+
+输出格式必须严格如下，不要加解释：
+
+【图文标题】
+...
+
+【图文描述】
+...
+
+补充要求：
+1. 标题控制在 22 个汉字以内，且必须严格使用“{fixed_dish_name}，卖点！”这个格式。
+2. 描述正文控制在 2 到 4 句，优先写“为什么值得做、适合谁做、做时最该注意什么”。
+3. 描述最后一行只能放 5 个话题标签，不要多，不要少，不要换成普通短语。
+4. 不要输出 emoji，不要输出英文段落，不要输出 Markdown 代码块。
+""".strip()
+
+
+def build_publish_copy_user_prompt(
+    dish_name: str,
+    source_text: str,
+    notes: str = "",
+    source_label: str = "菜谱文案",
+) -> str:
+    note_text = notes.strip() or "无额外补充说明"
+    return f"""
+当前菜名：{dish_name}
+补充说明：{note_text}
+参考内容类型：{source_label}
+
+请基于下面这份内容，生成最终抖音图文标题和图文描述：
+
+{source_text}
+""".strip()
+
+
+def extract_named_text_section(text: str, section_name: str) -> str:
+    pattern = rf"【{re.escape(section_name)}】\s*(.*?)(?=\n【|\Z)"
+    match = re.search(pattern, text, flags=re.S)
+    return match.group(1).strip() if match else ""
+
+
+def split_description_body_and_tags(description: str) -> tuple[str, list[str]]:
+    lines = [line.strip() for line in description.splitlines() if line.strip()]
+    if not lines:
+        return "", []
+
+    body_lines: list[str] = []
+    tags: list[str] = []
+    for line in lines:
+        line_tags = re.findall(r"#[^\s#]+", line)
+        compact_line = line.replace(" ", "")
+        if line_tags and compact_line.startswith("#"):
+            tags.extend(line_tags)
+        else:
+            body_lines.append(line)
+
+    return "\n".join(body_lines).strip(), tags
+
+
+def build_local_publish_copy(
+    dish_name: str,
+    source_text: str,
+    notes: str = "",
+) -> dict[str, str]:
+    combined_text = f"{dish_name} {notes} {source_text}"
+    title = f"{dish_name}，{infer_publish_title_highlight(dish_name=dish_name, source_text=source_text, notes=notes)}！"
+
+    practical_tip = "先把最关键的主料状态做到位，再补最后那口香气，成菜会稳很多。"
+    if contains_any(combined_text, ["豆腐", "煎"]):
+        practical_tip = "豆腐先煎到边角有点焦香再合味，整锅会更香也更立体。"
+    elif contains_any(combined_text, ["鱼滑", "虾滑"]):
+        practical_tip = "鱼滑别久煮，状态定住就收汁，口感会更弹更嫩。"
+    elif contains_any(combined_text, ["煲", "锅", "汤"]):
+        practical_tip = "这类锅气菜更看重先后顺序，先把底味做香，再回锅合味更容易出层次。"
+
+    description_body = (
+        f"{dish_name}这种做法是真的很适合家里和小店一起抄作业，味道有记忆点，端上桌也很有存在感。"
+        f" {practical_tip} 想做的时候直接翻出来照着走，少走弯路也更不容易翻车。"
+    )
+    topic_line = " ".join(infer_publish_topic_tags(dish_name=dish_name, source_text=source_text, notes=notes))
+    description = f"{description_body}\n{topic_line}".strip()
+    return {
+        "title": title,
+        "description": description,
+    }
+
+
+def normalize_publish_copy(
+    dish_name: str,
+    source_text: str,
+    notes: str,
+    title: str,
+    description: str,
+) -> dict[str, str]:
+    normalized_title = normalize_publish_title(
+        dish_name=dish_name,
+        source_text=source_text,
+        notes=notes,
+        title=title,
+    )
+
+    description_body, parsed_tags = split_description_body_and_tags(description)
+    fallback = build_local_publish_copy(dish_name=dish_name, source_text=source_text, notes=notes)
+    normalized_body = description_body or fallback["description"].splitlines()[0]
+
+    normalized_tags: list[str] = []
+    seen: set[str] = set()
+    for topic in parsed_tags + infer_publish_topic_tags(dish_name=dish_name, source_text=source_text, notes=notes):
+        if is_disallowed_publish_topic(topic, dish_name=dish_name):
+            continue
+        tag = format_topic_tag(topic)
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        normalized_tags.append(tag)
+        if len(normalized_tags) >= 5:
+            break
+
+    if len(normalized_tags) < 5:
+        raise ValueError("图文描述缺少足够的话题标签。")
+
+    normalized_description = f"{normalized_body}\n{' '.join(normalized_tags[:5])}".strip()
+    return {
+        "title": normalized_title,
+        "description": normalized_description,
+    }
+
+
+def generate_publish_copy_assets(
+    client: OpenAI,
+    dish_name: str,
+    source_text: str,
+    timestamp: str,
+    notes: str = "",
+    output_name: str | None = None,
+    source_label: str = "菜谱文案",
+    output_dir: Path | None = None,
+) -> dict[str, Any]:
+    output_name = output_name or dish_name
+    output_dir = output_dir or build_run_output_dir(timestamp, dish_name)
+
+    try:
+        publish_result = request_text_generation(
+            client=client,
+            system_prompt=build_publish_copy_system_prompt(fixed_dish_name=dish_name),
+            user_prompt=build_publish_copy_user_prompt(
+                dish_name=dish_name,
+                source_text=source_text,
+                notes=notes,
+                source_label=source_label,
+            ),
+            stage_name="抖音发布文案",
+        )
+        title = extract_named_text_section(publish_result["content"], "图文标题")
+        description = extract_named_text_section(publish_result["content"], "图文描述")
+        normalized = normalize_publish_copy(
+            dish_name=dish_name,
+            source_text=source_text,
+            notes=notes,
+            title=title,
+            description=description,
+        )
+    except Exception as exc:
+        if not is_timeout_error(exc) and not isinstance(exc, ValueError):
+            raise
+        normalized = build_local_publish_copy(
+            dish_name=dish_name,
+            source_text=source_text,
+            notes=notes,
+        )
+        publish_result = {
+            "model": "local-timeout-fallback",
+            "content": f"【图文标题】\n{normalized['title']}\n\n【图文描述】\n{normalized['description']}",
+        }
+        print("抖音发布文案文本接口超时或格式异常，已切换为本地模板兜底。")
+
+    title_file = save_text_output(
+        content=normalized["title"],
+        output_dir=output_dir,
+        timestamp=timestamp,
+        base_name=output_name,
+        suffix="_抖音图文标题",
+    )
+    description_file = save_text_output(
+        content=normalized["description"],
+        output_dir=output_dir,
+        timestamp=timestamp,
+        base_name=output_name,
+        suffix="_抖音图文描述",
+    )
+    print(f"抖音图文标题已保存：{title_file}")
+    print(f"抖音图文描述已保存：{description_file}")
+
+    return {
+        "model": publish_result["model"],
+        "title": normalized["title"],
+        "description": normalized["description"],
+        "title_file": title_file,
+        "description_file": description_file,
+    }
+
+
+def validate_photoshop_auto_composite_setup() -> None:
+    from tools.apply_photoshop_template_batch import validate_local_photoshop_setup
+
+    validate_local_photoshop_setup()
+
+
+def apply_photoshop_postprocess_to_output_dir(output_dir: Path) -> dict[str, str]:
+    from tools.apply_photoshop_template_batch import apply_photoshop_template_batch_to_dir
+
+    return apply_photoshop_template_batch_to_dir(input_dir=output_dir)
+
+
+def remap_processed_image_paths(saved_files: Sequence[str], processed_file_map: dict[str, str]) -> list[str]:
+    remapped_paths: list[str] = []
+    for file_path in saved_files:
+        resolved_path = str(Path(file_path).resolve())
+        remapped_paths.append(processed_file_map.get(resolved_path, file_path))
+    return remapped_paths
+
+
 def generate_images_from_prompt_text(
     client: OpenAI,
     dish_name: str,
     prompt: str,
     timestamp: str,
+    image_settings: dict[str, Any] | None = None,
+    output_name: str | None = None,
+    stage_name: str = "生成",
+    output_dir: Path | None = None,
 ) -> dict[str, Any]:
-    image_settings = get_image_settings()
+    image_settings = image_settings or get_image_settings()
     request_timeout = get_image_request_timeout_seconds()
+    output_name = output_name or dish_name
+    output_dir = output_dir or build_run_output_dir(timestamp, dish_name)
 
     print(f"正在调用模型：{image_settings['model']}")
-    print(
-        f"生成尺寸：{image_settings['size']}，质量：{image_settings['quality']}，数量：{image_settings['image_count']}"
-    )
+    print(f"{stage_name}尺寸：{image_settings['size']}，质量：{image_settings['quality']}，数量：{image_settings['image_count']}")
     response = None
     for attempt in range(1, DEFAULT_REQUEST_RETRY_COUNT + 1):
         try:
@@ -923,20 +3249,20 @@ def generate_images_from_prompt_text(
         except Exception as exc:
             if attempt >= DEFAULT_REQUEST_RETRY_COUNT or not is_timeout_error(exc):
                 raise
-            print(f"图片请求超时，正在重试第 {attempt + 1}/{DEFAULT_REQUEST_RETRY_COUNT} 次...")
+            print(f"{stage_name}图片请求超时，正在重试第 {attempt + 1}/{DEFAULT_REQUEST_RETRY_COUNT} 次...")
 
     image_items = extract_image_items(response)
     if not image_items:
         raise RuntimeError("接口已返回响应，但未发现可保存的图片数据。")
 
     print("图片接口已返回，正在保存文件...")
-    prompt_stem = f"{timestamp}_{sanitize_file_name(dish_name)}"
+    prompt_stem = f"{timestamp}_{sanitize_file_name(output_name)}"
     saved_files = save_generated_images(
         image_items=image_items,
-        dish_name=dish_name,
-        output_dir=IMAGE_OUTPUT_DIR,
+        dish_name=output_name,
+        output_dir=output_dir,
         timestamp=timestamp,
-        revised_prompt_output_dir=PROMPT_OUTPUT_DIR,
+        revised_prompt_output_dir=output_dir,
         revised_prompt_stem=prompt_stem,
     )
 
@@ -945,30 +3271,41 @@ def generate_images_from_prompt_text(
         "size": image_settings["size"],
         "quality": image_settings["quality"],
         "image_count": image_settings["image_count"],
+        "output_dir": str(output_dir),
         "saved_files": saved_files,
     }
 
 
-def generate_recipe_assets_from_idea_file(
+def generate_recipe_text_assets_from_idea_file(
     idea_file_name: str = "dish_name.txt",
 ) -> dict[str, Any]:
     idea_file = ROOT_DIR / idea_file_name
-    idea_payload = load_dish_idea(idea_file)
     ad_copy = load_text_variable(DEFAULT_AD_COPY_FILE, "guanggaoyu")
     style_reference = render_prompt_template(load_prompt(DEFAULT_PROMPT_FILE))
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    text_client: OpenAI | None = None
+    if is_auto_dish_generation_enabled():
+        text_client = build_text_client()
+        idea_payload = generate_auto_dish_idea(idea_file=idea_file, client=text_client)
+        print(f"自动造菜已启用，本轮参考菜：{idea_payload['reference_dish']}")
+        print(f"自动造菜菜系范围：{idea_payload['region_label']}")
+        print(f"自动生成的新菜名已写回：{idea_file}")
+    else:
+        idea_payload = load_dish_idea(idea_file)
 
     print(f"正在读取创意文件：{idea_file}")
     print(f"本次菜品创意：{idea_payload['dish_idea']}")
     if idea_payload["notes"]:
         print(f"补充说明：{idea_payload['notes']}")
 
-    client = build_client()
+    if text_client is None:
+        text_client = build_text_client()
     fallback_bundle: dict[str, Any] | None = None
 
     try:
         recipe_result = request_text_generation(
-            client=client,
+            client=text_client,
             system_prompt=build_recipe_system_prompt(
                 ad_copy=ad_copy,
                 fixed_dish_name=idea_payload["dish_idea"],
@@ -985,8 +3322,12 @@ def generate_recipe_assets_from_idea_file(
             ad_copy=ad_copy,
             notes=idea_payload["notes"],
         )
+        recipe_text = validate_recipe_text_content(
+            recipe_text=recipe_text,
+            fixed_dish_name=idea_payload["dish_idea"],
+        )
     except Exception as exc:
-        if not is_timeout_error(exc):
+        if not is_timeout_error(exc) and not isinstance(exc, ValueError):
             raise
         fallback_bundle = build_local_recipe_bundle(
             dish_name=idea_payload["dish_idea"],
@@ -998,80 +3339,259 @@ def generate_recipe_assets_from_idea_file(
             "model": "local-timeout-fallback",
             "content": recipe_text,
         }
-        print("创意菜谱文本接口超时，已切换为本地模板兜底。")
+        print("创意菜谱文本接口超时或内容异常，已切换为本地模板兜底。")
 
     generated_dish_name = idea_payload["dish_idea"]
+    run_output_dir = build_run_output_dir(timestamp, generated_dish_name)
+    guide_bundle = build_recipe_bundle_from_recipe_text(
+        recipe_text=recipe_text,
+        fixed_dish_name=generated_dish_name,
+        ad_copy=ad_copy,
+    )
+    fallback_bundle = guide_bundle
     creative_file = save_text_output(
         content=recipe_text,
-        output_dir=CREATIVE_OUTPUT_DIR,
+        output_dir=run_output_dir,
         timestamp=timestamp,
         base_name=generated_dish_name,
-        suffix="_一页菜谱",
+        suffix=f"_{page01_recipe.FILE_LABEL}",
     )
     print(f"创意菜谱已保存：{creative_file}")
 
     try:
         prompt_result = request_text_generation(
-            client=client,
-            system_prompt=build_prompt_system_prompt(
+            client=text_client,
+            system_prompt=page01_recipe.build_page01_prompt_system_prompt(
                 style_reference=style_reference,
                 fixed_dish_name=generated_dish_name,
             ),
-            user_prompt=build_prompt_user_prompt(
+            user_prompt=page01_recipe.build_page01_prompt_user_prompt(
                 recipe_text=recipe_text,
                 fixed_dish_name=generated_dish_name,
             ),
             stage_name="文生图prompt",
         )
-        image_prompt = prompt_result["content"]
+        image_prompt = validate_page01_prompt_content(
+            prompt_text=prompt_result["content"],
+            fixed_dish_name=generated_dish_name,
+            bundle=guide_bundle,
+        )
     except Exception as exc:
-        if not is_timeout_error(exc):
+        if not is_timeout_error(exc) and not isinstance(exc, ValueError):
             raise
-        if fallback_bundle is None:
-            fallback_bundle = build_local_recipe_bundle(
-                dish_name=generated_dish_name,
-                notes=idea_payload["notes"],
-                ad_copy=ad_copy,
-            )
-        image_prompt = build_local_image_prompt(fallback_bundle)
+        image_prompt = page01_recipe.build_local_page01_prompt(fallback_bundle)
         prompt_result = {
             "model": "local-timeout-fallback",
             "content": image_prompt,
         }
-        print("文生图 prompt 文本接口超时，已切换为本地模板兜底。")
+        print("文生图 prompt 文本接口超时或内容异常，已切换为本地模板兜底。")
 
     prompt_file = save_text_output(
         content=image_prompt,
-        output_dir=PROMPT_OUTPUT_DIR,
+        output_dir=run_output_dir,
         timestamp=timestamp,
         base_name=generated_dish_name,
-        suffix="_文生图prompt",
+        suffix=f"_{page01_recipe.FILE_LABEL}_文生图prompt",
     )
     print(f"文生图 prompt 已保存：{prompt_file}")
 
-    image_result = generate_images_from_prompt_text(
-        client=client,
+    guide_page_results = generate_guide_pages(
+        text_client=text_client,
         dish_name=generated_dish_name,
-        prompt=image_prompt,
+        notes=idea_payload["notes"],
+        recipe_text=recipe_text,
+        style_reference=style_reference,
         timestamp=timestamp,
+        output_text_dir=run_output_dir,
+        output_prompt_dir=run_output_dir,
+        bundle=guide_bundle,
+        request_text_generation=request_text_generation,
+        save_text_output=save_text_output,
+        is_timeout_error=is_timeout_error,
+        validate_page_text_content=validate_guide_page_text_content,
+        validate_page_prompt_content=validate_guide_page_prompt_content,
     )
+
+    try:
+        vertical_dish_name = cover_page.format_vertical_dish_name(generated_dish_name)
+        cover_prompt_result = request_text_generation(
+            client=text_client,
+            system_prompt=cover_page.build_cover_prompt_system_prompt(
+                style_reference=style_reference,
+                fixed_dish_name=generated_dish_name,
+                vertical_dish_name=vertical_dish_name,
+                bundle=guide_bundle,
+            ),
+            user_prompt=cover_page.build_cover_prompt_user_prompt(
+                bundle=guide_bundle,
+                fixed_dish_name=generated_dish_name,
+                vertical_dish_name=vertical_dish_name,
+            ),
+            stage_name="封面prompt",
+        )
+        cover_prompt = validate_cover_prompt_content(
+            prompt_text=cover_prompt_result["content"],
+            fixed_dish_name=generated_dish_name,
+            bundle=guide_bundle,
+        )
+    except Exception as exc:
+        if not is_timeout_error(exc) and not isinstance(exc, ValueError):
+            raise
+        cover_prompt = cover_page.build_local_cover_prompt(fallback_bundle)
+        cover_prompt_result = {
+            "model": "local-timeout-fallback",
+            "content": cover_prompt,
+        }
+        print("封面 prompt 文本接口超时或内容异常，已切换为本地模板兜底。")
+
+    cover_name = cover_page.build_cover_output_name(generated_dish_name)
+    cover_prompt_file = save_text_output(
+        content=cover_prompt,
+        output_dir=run_output_dir,
+        timestamp=timestamp,
+        base_name=cover_name,
+        suffix="_文生图prompt",
+    )
+    print(f"封面 prompt 已保存：{cover_prompt_file}")
+
+    publish_copy_result = generate_publish_copy_assets(
+        client=text_client,
+        dish_name=generated_dish_name,
+        source_text=recipe_text,
+        timestamp=timestamp,
+        notes=idea_payload["notes"],
+        output_name=generated_dish_name,
+        source_label="一页菜谱定稿文案",
+        output_dir=run_output_dir,
+    )
+
+    page01_result = {
+        "page_number": 1,
+        "page_name": "一页菜谱",
+        "file_label": page01_recipe.FILE_LABEL,
+        "text_model": recipe_result["model"],
+        "prompt_model": prompt_result["model"],
+        "text_file": creative_file,
+        "prompt_file": prompt_file,
+        "prompt": image_prompt,
+        "output_name": page01_recipe.build_page01_output_name(generated_dish_name),
+    }
 
     return {
         "dish_idea": idea_payload["dish_idea"],
         "dish_name": generated_dish_name,
         "notes": idea_payload["notes"],
+        "auto_generated": idea_payload.get("auto_generated", "0"),
+        "reference_dish": idea_payload.get("reference_dish", ""),
+        "region_code": idea_payload.get("region_code", ""),
+        "region_label": idea_payload.get("region_label", ""),
+        "dish_memory_file": idea_payload.get("memory_file", ""),
         "text_model": recipe_result["model"],
         "prompt_model": prompt_result["model"],
-        "image_model": image_result["model"],
+        "cover_prompt_model": cover_prompt_result["model"],
         "creative_file": creative_file,
         "prompt_file": prompt_file,
-        "output_root": str(OUTPUT_ROOT_DIR),
-        "creative_output_dir": str(CREATIVE_OUTPUT_DIR),
-        "prompt_output_dir": str(PROMPT_OUTPUT_DIR),
-        "image_output_dir": str(IMAGE_OUTPUT_DIR),
-        "saved_files": image_result["saved_files"],
+        "cover_prompt_file": cover_prompt_file,
+        "output_root": str(run_output_dir),
+        "creative_output_dir": str(run_output_dir),
+        "prompt_output_dir": str(run_output_dir),
+        "publish_output_dir": str(run_output_dir),
+        "image_output_dir": str(run_output_dir),
+        "publish_model": publish_copy_result["model"],
+        "publish_title": publish_copy_result["title"],
+        "publish_description": publish_copy_result["description"],
+        "publish_title_file": publish_copy_result["title_file"],
+        "publish_description_file": publish_copy_result["description_file"],
+        "guide_pages": [
+            page01_result,
+            *guide_page_results,
+        ],
+        "cover_prompt": cover_prompt,
+        "cover_output_name": cover_name,
         "timestamp": timestamp,
     }
+
+
+def generate_auto_dish_idea_file(
+    idea_file_name: str = "dish_name.txt",
+) -> dict[str, str]:
+    idea_file = ROOT_DIR / idea_file_name
+    text_client = build_text_client()
+    return generate_auto_dish_idea(idea_file=idea_file, client=text_client)
+
+
+def generate_recipe_assets_from_idea_file(
+    idea_file_name: str = "dish_name.txt",
+) -> dict[str, Any]:
+    result = generate_recipe_text_assets_from_idea_file(idea_file_name=idea_file_name)
+    photoshop_auto_composite_enabled = is_photoshop_auto_composite_enabled()
+
+    if photoshop_auto_composite_enabled:
+        print("主流程已开启 Photoshop 自动合成，先校验本地 Photoshop 和 PSD 模板...")
+        validate_photoshop_auto_composite_setup()
+        print("Photoshop 自动合成校验通过，继续生成图片。")
+
+    image_client = build_image_client()
+    print(
+        "所有创意和 prompt 已完成，开始统一调用图片模型生图..."
+        f"图解模型：{get_tujie_image_settings()['model']}，封面模型：{get_cover_image_settings()['model']}"
+    )
+
+    page01_result = result["guide_pages"][0]
+    page01_image_result = generate_images_from_prompt_text(
+        client=image_client,
+        dish_name=result["dish_name"],
+        prompt=page01_result["prompt"],
+        timestamp=result["timestamp"],
+        image_settings=get_tujie_image_settings(),
+        output_name=page01_result["output_name"],
+        stage_name=f"图解01 {page01_recipe.PAGE_NAME}",
+    )
+
+    page01_result["image_model"] = page01_image_result["model"]
+    page01_result["saved_files"] = page01_image_result["saved_files"]
+
+    for page_result in result["guide_pages"][1:]:
+        page_image_result = generate_images_from_prompt_text(
+            client=image_client,
+            dish_name=result["dish_name"],
+            prompt=page_result["prompt"],
+            timestamp=result["timestamp"],
+            image_settings=get_tujie_image_settings(),
+            output_name=page_result["output_name"],
+            stage_name=page_result["page_name"],
+        )
+        page_result["image_model"] = page_image_result["model"]
+        page_result["saved_files"] = page_image_result["saved_files"]
+
+    cover_image_result = generate_images_from_prompt_text(
+        client=image_client,
+        dish_name=result["dish_name"],
+        prompt=result["cover_prompt"],
+        timestamp=result["timestamp"],
+        image_settings=get_cover_image_settings(),
+        output_name=result["cover_output_name"],
+        stage_name="封面",
+    )
+
+    result["image_model"] = page01_image_result["model"]
+    result["cover_image_model"] = cover_image_result["model"]
+    result["saved_files"] = page01_image_result["saved_files"]
+    result["cover_saved_files"] = cover_image_result["saved_files"]
+    result["photoshop_auto_composite"] = "1" if photoshop_auto_composite_enabled else "2"
+    result["photoshop_processed_files"] = []
+
+    if photoshop_auto_composite_enabled:
+        print("所有图片已生成完成，开始执行 Photoshop 模板合成并覆盖导出 JPG...")
+        processed_file_map = apply_photoshop_postprocess_to_output_dir(Path(result["output_root"]))
+        page01_result["saved_files"] = remap_processed_image_paths(page01_result["saved_files"], processed_file_map)
+        for page_result in result["guide_pages"][1:]:
+            page_result["saved_files"] = remap_processed_image_paths(page_result["saved_files"], processed_file_map)
+        result["saved_files"] = remap_processed_image_paths(result["saved_files"], processed_file_map)
+        result["cover_saved_files"] = remap_processed_image_paths(result["cover_saved_files"], processed_file_map)
+        result["photoshop_processed_files"] = list(processed_file_map.values())
+
+    return result
 
 
 def generate_images_from_prompt_file(
@@ -1082,7 +3602,7 @@ def generate_images_from_prompt_file(
     prompt_template = load_prompt(prompt_file)
     prompt = render_prompt_template(prompt_template)
 
-    client = build_client()
+    client = build_image_client()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     image_result = generate_images_from_prompt_text(
         client=client,
@@ -1091,15 +3611,16 @@ def generate_images_from_prompt_file(
         timestamp=timestamp,
     )
 
-    rendered_prompt_file = PROMPT_OUTPUT_DIR / f"{timestamp}_{sanitize_file_name(dish_name)}_原始prompt.txt"
-    PROMPT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir = build_run_output_dir(timestamp, dish_name)
+    rendered_prompt_file = output_dir / f"{timestamp}_{sanitize_file_name(dish_name)}_原始prompt.txt"
+    output_dir.mkdir(parents=True, exist_ok=True)
     rendered_prompt_file.write_text(prompt, encoding="utf-8")
 
     return {
         "model": image_result["model"],
         "size": image_result["size"],
         "quality": image_result["quality"],
-        "output_dir": str(IMAGE_OUTPUT_DIR),
+        "output_dir": str(output_dir),
         "saved_files": image_result["saved_files"],
         "rendered_prompt_file": str(rendered_prompt_file),
         "timestamp": timestamp,

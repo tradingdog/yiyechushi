@@ -14,10 +14,17 @@ def main() -> None:
     print(f"本次创意输入：{result['dish_idea']}")
     print(f"本次最终菜名：{result['dish_name']}")
     print(f"输出根目录：{result['output_root']}")
-    print(f"创意菜谱文件：{result['creative_file']}")
-    print(f"文生图 prompt 文件：{result['prompt_file']}")
-    for saved_file in result["saved_files"]:
-        print(f"已保存：{saved_file}")
+    print(f"抖音图文标题文件：{result['publish_title_file']}")
+    print(f"抖音图文描述文件：{result['publish_description_file']}")
+    for page in result["guide_pages"]:
+        print(f"图解{page['page_number']:02d}：{page['page_name']}")
+        print(f"图解文案文件：{page['text_file']}")
+        print(f"图解 prompt 文件：{page['prompt_file']}")
+        for saved_file in page["saved_files"]:
+            print(f"已保存图解：{saved_file}")
+    print(f"封面 prompt 文件：{result['cover_prompt_file']}")
+    for saved_file in result["cover_saved_files"]:
+        print(f"已保存封面：{saved_file}")
 
 
 if __name__ == "__main__":

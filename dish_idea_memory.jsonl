@@ -1,0 +1,8 @@
+{"timestamp": "2026-05-25 04:33:20", "region_code": "1", "region_label": "中华料理", "reference_dish": "葱烧海参", "generated_dish_name": "葱香海参酿", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-05-25 04:57:54", "region_code": "1", "region_label": "中华料理", "reference_dish": "凯里酸汤鱼", "generated_dish_name": "酸香煎鲈鱼", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-05-25 05:07:53", "region_code": "1", "region_label": "中华料理", "reference_dish": "锅巴肉片", "generated_dish_name": "脆煎里脊卷", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-05-25 05:46:35", "region_code": "1", "region_label": "中华料理", "reference_dish": "问政山笋", "generated_dish_name": "鲜笋酿肉卷", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-05-25 16:40:26", "region_code": "2", "region_label": "新马泰与东南亚料理", "reference_dish": "菲律宾酸汤", "generated_dish_name": "柠香烤虎虾", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-05-25 17:19:31", "region_code": "3", "region_label": "日韩料理", "reference_dish": "日式茶碗蒸", "generated_dish_name": "柚香煎帆立贝", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-05-25 17:33:17", "region_code": "4", "region_label": "西餐与欧洲经典料理", "reference_dish": "意式炖小牛膝", "generated_dish_name": "煎小牛膝排", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-05-25 19:22:21", "region_code": "5", "region_label": "中东北非料理", "reference_dish": "黎巴嫩扁豆汤", "generated_dish_name": "孜然扁豆排", "model": "doubao-seed-2-0-mini-260428"}
