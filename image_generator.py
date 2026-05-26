@@ -2543,6 +2543,11 @@ def request_text_generation(
     if not content:
         raise ValueError(f"{stage_name}阶段未获得有效文本输出。")
 
+    return {
+        "model": text_model,
+        "content": content,
+    }
+
 
 def run_text_stage_with_validation_retry(stage_name: str, operation: Callable[[], Any]) -> Any:
     request_retry_count = get_text_request_retry_count()
@@ -2558,11 +2563,6 @@ def run_text_stage_with_validation_retry(stage_name: str, operation: Callable[[]
             print(f"{stage_name}内容异常，正在重新调用第 {attempt + 1}/{request_retry_count} 次...")
 
     raise RuntimeError(f"{stage_name}连续 {request_retry_count} 次内容异常，已终止本轮流程。") from last_error
-
-    return {
-        "model": text_model,
-        "content": content,
-    }
 
 
 def extract_image_items(response: Any) -> list[dict[str, str]]:
