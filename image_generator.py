@@ -5,10 +5,12 @@ import json
 import os
 import random
 import re
+import ssl
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+import httpcore
 import httpx
 from openai import APIConnectionError, APITimeoutError, InternalServerError, OpenAI
 
@@ -786,9 +788,39 @@ def get_request_timeout_seconds() -> float:
 
 
 def is_timeout_error(exc: Exception) -> bool:
-    if isinstance(exc, (httpx.TimeoutException, APITimeoutError)):
-        return True
-    return "timed out" in str(exc).lower() or "timeout" in str(exc).lower()
+    for error in iter_exception_chain(exc):
+        if isinstance(error, (TimeoutError, httpx.TimeoutException, APITimeoutError)):
+            return True
+
+        message = str(error).lower()
+        if "timed out" in message or "timeout" in message:
+            return True
+
+    return False
+
+
+def iter_exception_chain(exc: BaseException) -> list[BaseException]:
+    pending: list[BaseException] = [exc]
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+
+    while pending:
+        current = pending.pop()
+        current_id = id(current)
+        if current_id in seen:
+            continue
+
+        seen.add(current_id)
+        chain.append(current)
+
+        cause = getattr(current, "__cause__", None)
+        context = getattr(current, "__context__", None)
+        if cause is not None:
+            pending.append(cause)
+        if context is not None and context is not cause:
+            pending.append(context)
+
+    return chain
 
 
 def close_openai_client(client: OpenAI | None) -> None:
@@ -824,22 +856,43 @@ def is_retriable_text_request_error(exc: Exception) -> bool:
     if is_timeout_error(exc):
         return True
 
-    if isinstance(exc, (httpx.TransportError, APIConnectionError, InternalServerError)):
-        return True
+    for error in iter_exception_chain(exc):
+        if isinstance(
+            error,
+            (
+                httpx.TransportError,
+                httpcore.NetworkError,
+                httpcore.ProtocolError,
+                APIConnectionError,
+                InternalServerError,
+                ssl.SSLError,
+                ConnectionError,
+                BrokenPipeError,
+                EOFError,
+            ),
+        ):
+            return True
 
-    message = str(exc).lower()
-    return any(
-        token in message
-        for token in (
-            "connection reset",
-            "connection aborted",
-            "connection refused",
-            "server disconnected",
-            "remote protocol error",
-            "unexpected eof",
-            "temporarily unavailable",
-        )
-    )
+        message = str(error).lower()
+        if any(
+            token in message
+            for token in (
+                "connection reset",
+                "connection aborted",
+                "connection refused",
+                "server disconnected",
+                "remote protocol error",
+                "unexpected eof",
+                "temporarily unavailable",
+                "eof occurred in violation of protocol",
+                "connection terminated unexpectedly",
+                "connection closed",
+                "tlsv1 alert",
+            )
+        ):
+            return True
+
+    return False
 
 
 def get_text_request_error_label(exc: Exception) -> str:
