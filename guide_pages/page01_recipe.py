@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from guide_pages.shared import (
+    build_adaptive_food_interaction_requirement,
     build_iphone_food_photo_requirement,
     build_strict_centered_title_requirement,
     build_unbranded_prop_requirement,
@@ -36,14 +37,8 @@ def build_page01_real_photo_requirement() -> str:
 """.strip()
 
 
-def build_page01_chopsticks_requirement() -> str:
-    return """
-画面中必须保留一双木筷从画面边缘自然伸入，夹起一块主菜，形成明显动作感和食欲点即可。
-夹起主菜的角度、方向、停顿瞬间和构图距离都可以按这道菜的结构自由变化，可以是侧面夹起、斜向提起、刚离盘、正要送入口边缘、轻微翻面或蘸汁前后的一瞬，不要每次都固定成同一角度、同一高度、同一构图的机械模板。
-不要求默认出现明显汤汁或酱汁滴落；只有这道菜本身确实适合带少量挂汁、拉丝或油亮反光时才允许自然出现，不能把“滴落”做成每道菜的固定镜头公式。
-允许少量真实手部自然进入画面边缘，例如手指、虎口、半个手掌或手腕的一小部分，男女都可以，年龄感控制在 12 到 25 岁之间，并按菜品气质选择更贴切的年轻手部状态；但不要人物脸部，不要完整手臂，不要手部特写抢戏。
-整体动作必须像真实吃饭前顺手夹菜的生活化抓拍，不要拍成电商主图式的夸张英雄展示，不要大片白雾蒸汽特效。
-""".strip()
+def build_page01_dish_interaction_requirement() -> str:
+    return build_adaptive_food_interaction_requirement("主画面里", require_interaction=True)
 
 
 def build_page01_title_axis_requirement() -> str:
@@ -73,7 +68,7 @@ def build_page01_prompt_system_prompt(style_reference: str, fixed_dish_name: str
 10. 主配色固定为暖奶白、橙红、金黄、焦糖棕，但器皿、桌面材质和后景陪衬必须跟随菜谱主画面说明变化，不允许所有菜都回到木桌、暖陶盘、木托这一套默认模板。
 11. 所有中文必须自然工整，不要英文，不要乱码，不要错字。
 12. 主标题必须直接使用“{fixed_dish_name}”这 1 个菜名，不能改字，不能扩写，不能另起新名。
-13. 主画面必须出现一双筷子从画面边缘夹起一块主菜，形成明显动作感和食欲点；动作角度和瞬间可随菜品自由变化，允许少量年轻手部自然入镜，但不要广告式摆拍。
+13. 主画面必须安排与这道菜匹配的真实餐具和互动动作，餐具类型、数量、是否一只手或多只手入镜都按菜品自行判断，但必须形成明确动作感和食欲点，不要回到所有菜都固定用一双木筷的模板。
 14. 主标题上方的引导句必须很短，控制在 12 个汉字以内。
 15. 主标题下方黄条卖点必须精简成 2 到 3 个短卖点，总长度控制在 24 个汉字以内。
 16. 严禁生成“上方暖奶白标题底 + 下方矩形主图”的两段式首图，也严禁用任何横向切割把标题区和主菜照片区拆开。
@@ -92,13 +87,13 @@ def build_page01_prompt_system_prompt(style_reference: str, fixed_dish_name: str
 5. 主画面必须以菜谱中的器皿与摆盘、桌面与环境、背景陪衬说明为准。
 6. 强调整张图是“信息很多但一眼就想收藏”的成熟爆款海报，整张图的版式、字体、配色、标题层级和卡片结构必须严格沿用参考 VI；但主菜图片的真实手机实拍感优先级高于氛围道具和广告大片感。
 7. 保留清晰的负面约束，避免极简、错误结构、食材畸形、塑料感、贴边、乱码和过度装饰。
-8. 明确写出筷子夹起主菜的镜头，并说明动作必须保留，但要像真实吃饭抓拍，不要人物脸部，不要手部特写。
+8. 明确写出主菜要与最合适的餐具或上桌工具产生互动，餐具类型、数量、手数和动作瞬间都按菜品自行分析，但要像真实吃饭或上桌抓拍，不要人物脸部，不要手部特写。
 9. {build_strict_centered_title_requirement('顶部引导句、主标题和黄条卖点')}
 10. {build_page01_title_axis_requirement()}
 11. {build_iphone_food_photo_requirement('主菜大图、背景里可见的食材点缀和画面中任何出现的食物内容')}
 12. {build_unbranded_prop_requirement('主菜大图、左右信息卡附近、桌面上和背景里的所有器皿、调料、瓶罐、包装与小道具')}
 13. {build_page01_real_photo_requirement()}
-14. {build_page01_chopsticks_requirement()}
+14. {build_page01_dish_interaction_requirement()}
 15. 这些真实拍摄要求只作用于食物照片层，不改变整张海报 VI。
 16. 最终输出的 prompt 末尾必须原样追加这一句，并且作为最后一行收尾：{build_page01_final_priority_sentence()}
 """.strip()
@@ -113,11 +108,11 @@ def build_page01_prompt_user_prompt(recipe_text: str, fixed_dish_name: str) -> s
 {build_page01_title_axis_requirement()}
 首图从页面顶边到步骤条上缘必须是一张连续主菜背景照片，顶部标题、黄条和左右卡片都直接压在这张照片上；不要再单独做奶白标题底，不要把主菜照片裁成带框主图。
 首图上半部不要再额外加收藏提示细条，避免和底部收藏关注横条重复。
-画面里必须出现一双筷子夹起一块主菜，动作感必须保留，但角度、方向和瞬间都可按菜品自由变化；允许少量年轻手部自然入镜，但不要广告式悬空摆拍。
+画面里必须安排与这道菜匹配的真实餐具和主菜互动，餐具类型、数量、是否一只手或多只手入镜都按菜品自行判断；动作感必须保留，但不要再固定成所有菜都用一双木筷夹起主菜的模板。
 {build_iphone_food_photo_requirement('整张海报里')}
 {build_unbranded_prop_requirement('整张海报里')}
 {build_page01_real_photo_requirement()}
-{build_page01_chopsticks_requirement()}
+{build_page01_dish_interaction_requirement()}
 不要改整张海报的 VI、排版、字体、边框、标题结构和整体配色。
 最终 prompt 的最后一行必须原样写成：{build_page01_final_priority_sentence()}
 引导句和副标题都要短，不要写成长句。
@@ -182,7 +177,7 @@ def build_local_page01_prompt(bundle: dict[str, Any]) -> str:
 酱汁或汤汁状态必须是：{bundle['sauce']}
 质感重点必须是：{bundle['texture']}
 色彩点缀必须是：{bundle['colors']}
-{build_page01_chopsticks_requirement()}
+{build_page01_dish_interaction_requirement()}
 整张图的标题、字体、边框、配色、卡片排版和海报节奏必须严格沿用当前满意版本的爆款 VI，不要因为主菜更真实就把整张图改成普通手机纪实照片。
 {build_iphone_food_photo_requirement('主菜成品图、背景里可见的小食材和桌面上的任何食物内容')}
 {build_unbranded_prop_requirement('主菜成品图、左右卡片附近、桌面上和背景里的所有器皿、调料、瓶罐、包装与辅助道具')}

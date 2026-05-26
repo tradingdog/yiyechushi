@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from guide_pages.shared import build_iphone_food_photo_requirement, build_unbranded_prop_requirement
+from guide_pages.shared import (
+    build_adaptive_food_interaction_requirement,
+    build_iphone_food_photo_requirement,
+    build_unbranded_prop_requirement,
+)
 
 
 COVER_NAME = "封面"
@@ -82,7 +86,8 @@ def build_cover_prompt_system_prompt(
 8. 必须明确禁止顶部引导句、副标题、黄条卖点、收藏提示、关注文案、星标徽章、页脚说明、任何小字和任何装饰性文字。
 9. {build_iphone_food_photo_requirement('封面背景里出现的所有菜品和食材氛围')}
 10. {build_unbranded_prop_requirement('封面背景里出现的所有器皿、调料、瓶罐、包装与辅助道具')}
-11. 保留清晰的负面约束，避免额外文字、额外模块、英文、乱码、人物、低质假光、清晰整盘主菜，以及与首图无关的固定暖陶盘木桌模板。
+11. {build_adaptive_food_interaction_requirement('封面背景的主菜内容层', require_interaction=False)}
+12. 保留清晰的负面约束，避免额外文字、额外模块、英文、乱码、人物、低质假光、清晰整盘主菜，以及与首图无关的固定暖陶盘木桌模板。
 """.strip()
 
 
@@ -104,6 +109,7 @@ def build_cover_prompt_user_prompt(
 {build_cover_scene_lock_description(bundle)}
 {build_iphone_food_photo_requirement('封面背景中的食物内容')}
 {build_unbranded_prop_requirement('封面背景中的器皿、调料、瓶罐、包装与辅助道具')}
+{build_adaptive_food_interaction_requirement('封面背景里的主菜内容层', require_interaction=False)}
 文字必须是唯一最清晰的主体，整体色调与一页菜谱 VI 统一。
 请在 prompt 里明确写出“除菜名外画面其它区域 0 文字”。
 """.strip()
@@ -130,6 +136,7 @@ def build_local_cover_prompt(bundle: dict[str, Any]) -> str:
 封面的文字设计、排版、描边字体、配色和整体 VI 必须严格沿用当前满意版本，只把背景菜品本身做得更像真实拍摄到的食物，不要把整张封面改成普通手机照片。
 {build_iphone_food_photo_requirement('背景食物')}
 {build_unbranded_prop_requirement('背景里的器皿、调料、瓶罐、包装与辅助道具')}
+{build_adaptive_food_interaction_requirement('封面背景里的主菜内容层', require_interaction=False)}
 不要生成清晰完整的整盘主菜大特写，但也不要把首图场景洗成只剩抽象暖光；文字仍是最清晰主体，背景只是退后半级的同场景主菜画面。
 
 文字要求：

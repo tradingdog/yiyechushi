@@ -39,6 +39,22 @@ def build_unbranded_prop_requirement(subject_scope: str) -> str:
     )
 
 
+def build_adaptive_food_interaction_requirement(subject_scope: str, require_interaction: bool = False) -> str:
+    lead_sentence = (
+        f"{subject_scope}必须安排至少一组与主菜真实互动的餐具或上桌工具，不能把所有菜都固定成同一双筷子夹起主菜的模板。"
+        if require_interaction
+        else f"如果{subject_scope}里出现主菜成品、主菜局部、进食瞬间或与主菜互动的镜头，餐具和动作必须按这道菜本身的吃法、上桌逻辑和食材结构自行判断。"
+    )
+    return (
+        lead_sentence
+        + "餐具类型不要写死成筷子，汤、羹、煲类可用勺子、汤匙、长柄勺或勺配筷；牛排、排类、整块肉或需要切分的菜可用刀叉；面、粉、长条食材可用筷子、叉子、夹子或卷起动作；铁板、锅物、焗烤、蒸物或共享菜可用铲勺、夹子、锅勺、分餐勺等更合理的组合。"
+        + "餐具数量不限，可以是一件、两件或多件；手部也可以是一只手或多只手，是否入镜、入镜多少和左右手如何分工，都按菜品和动作自然决定。"
+        + "互动瞬间可以是舀汤、切开、夹起、叉起、捞起、翻面、撕开、分勺、蘸汁、卷起、拨散、盛入碗中、送到口边或刚上桌整理的一瞬，不要每道菜都拍成同一种悬空夹菜模板。"
+        + "如果需要手部，允许少量真实手部自然入镜，男女都可以，以生活化抓拍为准；但不要人物脸部，不要完整手臂，不要手部特写抢戏。"
+        + "不要求默认出现明显滴汁、挂汁或大片蒸汽，只有菜本身确实适合时才允许自然出现。"
+    )
+
+
 def build_strict_centered_title_requirement(title_scope: str) -> str:
     return (
         f"{title_scope}必须严格以整张海报的中轴线做水平居中排版，"
@@ -306,11 +322,12 @@ def build_guide_page_image_system_prompt(
 4. {build_strict_centered_title_requirement('顶部标题区中的页面标题和副标题')}
 5. {build_iphone_food_photo_requirement('卡片里、页面背景里、局部插图里和工具旁边')}
 6. {build_unbranded_prop_requirement('卡片里、页面背景里、局部插图里和工具旁边')}
-7. 这些真实拍摄要求只作用于页面中的照片内容层，不改变整张延续页的 VI、版式、字体、边框和整体配色。
-8. {build_unified_follow_strip_requirement(ad_copy)}
-9. 所有中文必须自然工整，不要英文，不要乱码，不要错字。
-10. 画面里绝对不要出现“当前菜名”“当前页面”“页面名称”“页面标题”“页面副标题”“内容卡1”“内容卡2”“内容卡3”“页尾提示”这类程序化字段标签。
-11. 必须保留这些负面约束：
+7. {build_adaptive_food_interaction_requirement('这张延续页的照片内容层', require_interaction=False)}
+8. 这些真实拍摄要求只作用于页面中的照片内容层，不改变整张延续页的 VI、版式、字体、边框和整体配色。
+9. {build_unified_follow_strip_requirement(ad_copy)}
+10. 所有中文必须自然工整，不要英文，不要乱码，不要错字。
+11. 画面里绝对不要出现“当前菜名”“当前页面”“页面名称”“页面标题”“页面副标题”“内容卡1”“内容卡2”“内容卡3”“页尾提示”这类程序化字段标签。
+12. 必须保留这些负面约束：
 {negative_constraints}
 """.strip()
 
@@ -330,6 +347,7 @@ def build_guide_page_image_user_prompt(
 {build_strict_centered_title_requirement('这张图顶部的页面标题和页面副标题')}
 {build_iphone_food_photo_requirement('这张图中')}
 {build_unbranded_prop_requirement('这张图中')}
+{build_adaptive_food_interaction_requirement('这张图的照片内容层', require_interaction=False)}
 {build_unified_follow_strip_requirement(ad_copy)}
 不要把“当前菜名”“当前页面”“页面名称”“页面标题”“页面副标题”“内容卡1”“内容卡2”“内容卡3”“页尾提示”这类程序化字段标签写进画面。
 不要改整张延续页的 VI、版式、字体、边框和整体色调。
@@ -355,6 +373,7 @@ def build_local_guide_page_image_prompt(
     {build_strict_centered_title_requirement('顶部标题区中的大标题和小标题')}
 {build_iphone_food_photo_requirement('卡片中的食材近景、局部状态、工具画面和页面里任何可见食物内容')}
 {build_unbranded_prop_requirement('卡片中的食材近景、局部状态、工具画面和页面里任何可见的器皿、调料、包装与辅助道具')}
+{build_adaptive_food_interaction_requirement('这张延续页的照片内容层', require_interaction=False)}
 {build_unified_follow_strip_requirement(ad_copy)}
 但不要把整张延续页改成普通纪实照片，也不要改变原有 VI、版式、字体、边框和配色。
 如果页面里需要出现菜名，只能直接写“{fixed_dish_name}”，不要加任何说明标签或模板字段名。
