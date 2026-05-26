@@ -34,7 +34,7 @@ def build_sample_bundle() -> dict[str, object]:
         "dish_name": "青柠椒麻鸡腿年糕",
         "guide_line": "椒香酸爽配米饭",
         "subtitle": "外香里嫩 青麻酸香 层次丰富",
-        "collection_hint": "先收藏，想做时直接照着买照着做",
+        "collection_hint": "",
         "collection_copy": "这张先收藏 原创新菜照着做更稳",
         "ad_copy": "关注@阿叶造新菜，家用开店都不赖！",
         "plate": "厚边石瓷餐盘，保留烤后焦边和堆叠高度",

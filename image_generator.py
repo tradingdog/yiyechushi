@@ -26,7 +26,7 @@ DEFAULT_AUTO_DISH_MEMORY_FILE = ROOT_DIR / "dish_idea_memory.jsonl"
 OUTPUT_ROOT_DIR = ROOT_DIR / "output"
 DEFAULT_OUTPUT_DIR = OUTPUT_ROOT_DIR
 DEFAULT_AD_COPY_FILE = ROOT_DIR / "guanggaoyu.txt"
-DEFAULT_COLLECTION_HINT = "先收藏，想做时直接照着买照着做"
+DEFAULT_COLLECTION_HINT = ""
 DEFAULT_COLLECTION_COPY = "这张先收藏 原创新菜照着做更稳"
 DEFAULT_DYNAMIC_ACTION = "一双木筷从画面侧上方夹起一块主菜悬在半空 带轻微挂汁与热气"
 DEFAULT_REQUEST_RETRY_COUNT = 2
@@ -436,7 +436,7 @@ def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
 6. 成败关键固定输出 5 条短句，每条都不要使用逗号、句号、顿号等标点。
 7. 底部关注文案必须固定为：{ad_copy}
 8. 底部收藏文案必须固定为：{DEFAULT_COLLECTION_COPY}
-9. 收藏提示语必须固定为：{DEFAULT_COLLECTION_HINT}
+9. 首图上半部不要再额外设置收藏提示细条，避免和底部收藏关注横条重复。
 10. 最终菜名必须严格等于：{fixed_dish_name}
 11. 主画面必须有一双筷子夹起一块主菜悬在半空，画面要有动作感和食欲感。
 
@@ -447,7 +447,6 @@ def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
 最终菜名：{fixed_dish_name}
 引导句：...
 副标题：...
-收藏提示：{DEFAULT_COLLECTION_HINT}
 账号定位：原创融合新菜研发
 
 【主画面说明】
@@ -1876,7 +1875,6 @@ def render_recipe_bundle_text(bundle: dict[str, Any]) -> str:
 最终菜名：{bundle['dish_name']}
 引导句：{bundle['guide_line']}
 副标题：{bundle['subtitle']}
-收藏提示：{bundle['collection_hint']}
 账号定位：原创融合新菜研发
 
 【主画面说明】
@@ -2717,6 +2715,11 @@ def replace_or_insert_prefixed_line(
     return "\n".join(lines)
 
 
+def remove_prefixed_line(text: str, prefix: str) -> str:
+    lines = [line for line in text.splitlines() if not line.strip().startswith(prefix)]
+    return "\n".join(lines)
+
+
 def normalize_recipe_text(recipe_text: str, fixed_dish_name: str, ad_copy: str, notes: str = "") -> str:
     normalized_text = recipe_text.strip()
     normalized_notes = " ".join(notes.split())
@@ -2744,12 +2747,7 @@ def normalize_recipe_text(recipe_text: str, fixed_dish_name: str, ad_copy: str, 
         replacement_line=f"最终菜名：{fixed_dish_name}",
         insert_after_prefix="创意来源：",
     )
-    normalized_text = replace_or_insert_prefixed_line(
-        text=normalized_text,
-        prefix="收藏提示：",
-        replacement_line=f"收藏提示：{DEFAULT_COLLECTION_HINT}",
-        insert_after_prefix="副标题：",
-    )
+    normalized_text = remove_prefixed_line(normalized_text, prefix="收藏提示：")
     normalized_text = replace_or_insert_prefixed_line(
         text=normalized_text,
         prefix="动态动作：",
@@ -2848,7 +2846,6 @@ def build_page01_required_prompt_fragments(bundle: dict[str, Any]) -> list[str]:
     fragments: list[str] = [
         bundle.get("guide_line", ""),
         bundle.get("subtitle", ""),
-        bundle.get("collection_hint", ""),
         bundle.get("collection_copy", ""),
         bundle.get("ad_copy", ""),
     ]
@@ -2884,7 +2881,7 @@ def append_page01_hard_requirements(prompt_text: str, bundle: dict[str, Any]) ->
 
     has_strong_centerline = bool(
         re.search(
-            r"(文字块|黄条块|收藏提示条块|中心点).*(同一条.*正中竖线|画面正中竖线上|落在同一条.*正中竖线|均在同一条.*正中竖线)",
+            r"(文字块|黄条块|中心点).*(同一条.*正中竖线|画面正中竖线上|落在同一条.*正中竖线|均在同一条.*正中竖线)",
             normalized,
         )
     )
@@ -2892,9 +2889,9 @@ def append_page01_hard_requirements(prompt_text: str, bundle: dict[str, Any]) ->
     has_no_left_alignment = bool(re.search(r"(不要偏左|不能偏左|不允许.*左对齐|无左对齐短条|不要左对齐|避免偏左|不得偏左)", normalized))
 
     if not has_symmetric_margin and not has_strong_centerline:
-        additions.append("顶部引导句、主标题、黄条卖点和收藏提示条必须左右留白对称，整体视觉重量均衡，不能一边挤一边空。")
+        additions.append("顶部引导句、主标题和黄条卖点必须左右留白对称，整体视觉重量均衡，不能一边挤一边空。")
     if not has_no_left_alignment and not has_strong_centerline:
-        additions.append("顶部引导句、主标题、黄条卖点和收藏提示条任何一行都不要偏左，不要做左对齐短条，所有文字块都沿画面正中竖线居中堆叠。")
+        additions.append("顶部引导句、主标题和黄条卖点任何一行都不要偏左，不要做左对齐短条，所有文字块都沿画面正中竖线居中堆叠。")
 
     required_fragments = build_page01_required_prompt_fragments(bundle)
     compact_normalized = re.sub(r"\s+", "", normalized)
@@ -2919,7 +2916,7 @@ def validate_page01_prompt_content(prompt_text: str, fixed_dish_name: str, bundl
 
     has_strong_centerline = bool(
         re.search(
-            r"(文字块|黄条块|收藏提示条块|中心点).*(同一条.*正中竖线|画面正中竖线上|落在同一条.*正中竖线|均在同一条.*正中竖线)",
+            r"(文字块|黄条块|中心点).*(同一条.*正中竖线|画面正中竖线上|落在同一条.*正中竖线|均在同一条.*正中竖线)",
             normalized,
         )
     )
@@ -3195,7 +3192,7 @@ def build_publish_copy_system_prompt(fixed_dish_name: str) -> str:
 
 你的目标：
 1. 标题要像近期平台里更容易让人点开的图文标题，语气新鲜、亲切、有用，可以轻微玩梗，但不能油腻、不能空喊。
-2. 描述要像博主本人在认真安利这道菜，既有食欲，也有实用信息，还要让人觉得“这条存一下有用”。
+2. 描述要像抖音菜谱博主本人在发图文时的口吻，带一点俏皮、口语和网络感，但不要用力过猛，既有食欲也有实用信息。
 3. 标题和描述都要尽量贴近中文互联网和抖音里的流行表达，但不能过度夸张，不要低质鸡汤，不要硬凑热搜。
 4. 标题必须严格写成“菜名，卖点！”；菜名后必须用中文逗号，最后必须用中文叹号，卖点单独放在菜名后面。
 5. 描述最后必须单独放一行 5 个话题标签，每个标签都以 # 开头；自动补充的话题不要生成菜名本身的话题，也不要生成 #阿叶造新菜。
@@ -3213,9 +3210,11 @@ def build_publish_copy_system_prompt(fixed_dish_name: str) -> str:
 
 补充要求：
 1. 标题控制在 22 个汉字以内，且必须严格使用“{fixed_dish_name}，卖点！”这个格式。
-2. 描述正文控制在 2 到 4 句，优先写“为什么值得做、适合谁做、做时最该注意什么”。
+2. 描述正文控制在 2 到 4 句，优先写“为什么好吃、什么场景会想做、做时最该注意什么”。
 3. 描述最后一行只能放 5 个话题标签，不要多，不要少，不要换成普通短语。
 4. 不要输出 emoji，不要输出英文段落，不要输出 Markdown 代码块。
+5. 不要把描述统一写成“这道原创融合的……”“这个原创菜……”“先收藏，想做时……”“想吃时照着步骤做就稳……”这类机械模板开头或收尾。
+6. 正文允许更像真人说话，可以从口感、翻车点、适合谁吃、上桌气氛、做法反差里切入，但不要每条都像同一个模板改词。
 """.strip()
 
 
@@ -3280,10 +3279,19 @@ def build_local_publish_copy(
     elif contains_any(combined_text, ["煲", "锅", "汤"]):
         practical_tip = "这类锅气菜更看重先后顺序，先把底味做香，再回锅合味更容易出层次。"
 
-    description_body = (
-        f"{dish_name}这种做法是真的很适合家里和小店一起抄作业，味道有记忆点，端上桌也很有存在感。"
-        f" {practical_tip} 想做的时候直接翻出来照着走，少走弯路也更不容易翻车。"
-    )
+    opening = f"{dish_name}这口是真挺上头，端上桌很容易被连着夹。"
+    if contains_any(combined_text, ["脆", "锅巴", "炸"]):
+        opening = f"{dish_name}这种脆口挂汁的路子很讨喜，第一口就挺抓人。"
+    elif contains_any(combined_text, ["酸", "柠", "番茄", "梅子"]):
+        opening = f"{dish_name}这味型很会勾人，酸香一上来就特别开胃。"
+    elif contains_any(combined_text, ["辣", "椒", "麻"]):
+        opening = f"{dish_name}这口辣麻香来得很直接，越吃越想配饭。"
+
+    closing = "步骤别贪快，把关键那一下做对，成品就会比想象里稳。"
+    if contains_any(combined_text, ["请客", "宴客", "聚餐"]):
+        closing = "这类菜上桌挺有气氛，家里做也不会显得单薄。"
+
+    description_body = f"{opening} {practical_tip} {closing}"
     topic_line = " ".join(infer_publish_topic_tags(dish_name=dish_name, source_text=source_text, notes=notes))
     description = f"{description_body}\n{topic_line}".strip()
     return {
