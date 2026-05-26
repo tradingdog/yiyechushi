@@ -1,4 +1,20 @@
+from pathlib import Path
+
 from image_generator import generate_recipe_assets_from_idea_file
+
+
+def run_douyin_publish_tail_step(output_root: str) -> None:
+    from tools.douyin_publish import publish_output_dir
+
+    output_dir = Path(output_root)
+    publish_dir = output_dir / "publish"
+    if not publish_dir.exists() or not publish_dir.is_dir():
+        print("当前输出目录下没有 publish 文件夹，跳过抖音发布收尾。")
+        return
+
+    print("当前主流程最后一步已完成，开始执行抖音发布收尾...")
+    publish_output_dir(output_dir)
+    print("抖音发布收尾已执行完成。")
 
 
 def main() -> None:
@@ -31,6 +47,12 @@ def main() -> None:
         print(f"已保存封面：{saved_file}")
     for selected_file in result.get("publish_selected_files", []):
         print(f"已选入 publish：{selected_file}")
+
+    try:
+        run_douyin_publish_tail_step(result["output_root"])
+    except Exception as exc:
+        print(f"前序生成已完成，但抖音发布收尾失败：{exc}")
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

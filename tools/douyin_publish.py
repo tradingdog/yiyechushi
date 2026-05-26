@@ -892,16 +892,49 @@ def run_publish(settings: PublishSettings, assets: PublishAssets) -> None:
             raise
 
 
+def publish_with_args(args: argparse.Namespace) -> None:
+    settings = resolve_settings(args)
+    assets = resolve_publish_assets(settings)
+    log_assets(assets)
+
+    if settings.dry_run:
+        print("dry-run 校验完成，未连接 Chrome。")
+        return
+
+    run_publish(settings, assets)
+
+
+def publish_output_dir(
+    output_dir: str | Path,
+    *,
+    auto_submit_publish: bool = False,
+    dry_run: bool = False,
+) -> None:
+    publish_with_args(
+        argparse.Namespace(
+            output_dir=str(output_dir),
+            cdp_url=DEFAULT_CDP_URL,
+            url_keyword=DEFAULT_URL_KEYWORD,
+            chrome_path=None,
+            automation_profile_dir=str(DEFAULT_AUTOMATION_PROFILE_DIR),
+            creator_home_url=DEFAULT_CREATOR_HOME_URL,
+            cdp_ready_timeout_ms=DEFAULT_CDP_READY_TIMEOUT_MS,
+            no_auto_launch_browser=False,
+            typing_delay_ms=DEFAULT_TYPING_DELAY_MS,
+            after_upload_wait_ms=DEFAULT_AFTER_UPLOAD_WAIT_MS,
+            after_open_cover_wait_ms=DEFAULT_AFTER_OPEN_COVER_WAIT_MS,
+            after_cover_confirm_wait_ms=DEFAULT_AFTER_COVER_CONFIRM_WAIT_MS,
+            after_declaration_open_wait_ms=DEFAULT_AFTER_DECLARATION_OPEN_WAIT_MS,
+            auto_submit_publish=auto_submit_publish,
+            debug_screenshot=str(DEFAULT_DEBUG_SCREENSHOT),
+            dry_run=dry_run,
+        )
+    )
+
+
 def main() -> int:
     try:
-        settings = resolve_settings(parse_args())
-        assets = resolve_publish_assets(settings)
-        log_assets(assets)
-        if settings.dry_run:
-            print("dry-run 校验完成，未连接 Chrome。")
-            return 0
-
-        run_publish(settings, assets)
+        publish_with_args(parse_args())
     except Exception as exc:
         print(f"运行失败：{exc}")
         return 1
