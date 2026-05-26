@@ -2837,7 +2837,9 @@ def validate_recipe_text_content(recipe_text: str, fixed_dish_name: str) -> str:
 
 def validate_image_prompt_content(prompt_text: str, fixed_dish_name: str, stage_name: str) -> str:
     normalized = ensure_non_placeholder_text(prompt_text, stage_name=stage_name, min_length=60)
-    if fixed_dish_name not in normalized:
+    normalized_key = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", normalized)
+    dish_name_key = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", fixed_dish_name)
+    if dish_name_key not in normalized_key:
         raise ValueError(f"{stage_name} 缺少菜名，疑似异常。")
     return normalized
 
@@ -2961,7 +2963,12 @@ def validate_cover_prompt_content(prompt_text: str, fixed_dish_name: str, bundle
         bundle.get("background_props", ""),
         bundle.get("main_food", ""),
     ]
-    missing_scene_values = [value for value in required_scene_values if value and value not in normalized]
+    compact_normalized = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", normalized)
+    missing_scene_values = [
+        value
+        for value in required_scene_values
+        if value and re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", value) not in compact_normalized
+    ]
     if missing_scene_values:
         raise ValueError("封面prompt 缺少首图同场景锁定信息。")
 
