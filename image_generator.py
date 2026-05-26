@@ -2357,7 +2357,7 @@ def get_text_max_output_tokens(stage_name: str) -> int:
 
 def get_text_request_timeout_seconds() -> float:
     ensure_runtime_config_loaded()
-    timeout_text = os.getenv("OPENAI_TEXT_REQUEST_TIMEOUT_SECONDS", "300").strip() or "300"
+    timeout_text = os.getenv("OPENAI_TEXT_REQUEST_TIMEOUT_SECONDS", "120").strip() or "120"
     try:
         return float(timeout_text)
     except ValueError as exc:
@@ -2821,19 +2821,62 @@ def build_page01_required_prompt_fragments(bundle: dict[str, Any]) -> list[str]:
     return unique_fragments
 
 
+def append_page01_hard_requirements(prompt_text: str, bundle: dict[str, Any]) -> str:
+    normalized = prompt_text.strip()
+    additions: list[str] = []
+
+    has_strong_centerline = bool(
+        re.search(
+            r"(文字块|黄条块|收藏提示条块|中心点).*(同一条.*正中竖线|画面正中竖线上|落在同一条.*正中竖线|均在同一条.*正中竖线)",
+            normalized,
+        )
+    )
+    has_symmetric_margin = bool(re.search(r"(左右留白|左右边距|左右空间|左右视觉重量).*(对称|均衡)", normalized))
+    has_no_left_alignment = bool(re.search(r"(不要偏左|不能偏左|不允许.*左对齐|无左对齐短条|不要左对齐|避免偏左|不得偏左)", normalized))
+
+    if not has_symmetric_margin and not has_strong_centerline:
+        additions.append("顶部引导句、主标题、黄条卖点和收藏提示条必须左右留白对称，整体视觉重量均衡，不能一边挤一边空。")
+    if not has_no_left_alignment and not has_strong_centerline:
+        additions.append("顶部引导句、主标题、黄条卖点和收藏提示条任何一行都不要偏左，不要做左对齐短条，所有文字块都沿画面正中竖线居中堆叠。")
+
+    required_fragments = build_page01_required_prompt_fragments(bundle)
+    compact_normalized = re.sub(r"\s+", "", normalized)
+    missing_fragments = [fragment for fragment in required_fragments if re.sub(r"\s+", "", fragment) not in compact_normalized]
+    if missing_fragments:
+        additions.append("以下文案必须原样出现在首图版式中，不要改写、不换词、不省略：")
+        additions.extend(missing_fragments)
+
+    if not additions:
+        return normalized
+
+    return normalized + "\n\n硬性补充约束：\n" + "\n".join(additions)
+
+
 def validate_page01_prompt_content(prompt_text: str, fixed_dish_name: str, bundle: dict[str, Any]) -> str:
     normalized = validate_image_prompt_content(prompt_text, fixed_dish_name=fixed_dish_name, stage_name="文生图prompt")
+    normalized = append_page01_hard_requirements(normalized, bundle)
     if not re.search(r"(中轴线|正中竖线|画面正中竖线)", normalized):
         raise ValueError("文生图prompt 缺少首图标题中轴约束。")
     if not re.search(r"(中心点|中心柱布局|居中堆叠|居中排布)", normalized):
         raise ValueError("文生图prompt 缺少首图标题中心柱布局约束。")
-    if not re.search(r"左右留白.*对称", normalized):
+
+    has_strong_centerline = bool(
+        re.search(
+            r"(文字块|黄条块|收藏提示条块|中心点).*(同一条.*正中竖线|画面正中竖线上|落在同一条.*正中竖线|均在同一条.*正中竖线)",
+            normalized,
+        )
+    )
+    has_symmetric_margin = bool(re.search(r"(左右留白|左右边距|左右空间|左右视觉重量).*(对称|均衡)", normalized))
+    has_no_left_alignment = bool(re.search(r"(不要偏左|不能偏左|不允许.*左对齐|无左对齐短条|不要左对齐|避免偏左|不得偏左)", normalized))
+
+    if not has_symmetric_margin and not has_strong_centerline:
         raise ValueError("文生图prompt 缺少首图标题左右留白对称约束。")
-    if not re.search(r"(不要偏左|不能偏左|不允许.*左对齐)", normalized):
+    if not has_no_left_alignment and not has_strong_centerline:
         raise ValueError("文生图prompt 缺少首图标题禁止偏左约束。")
 
     required_fragments = build_page01_required_prompt_fragments(bundle)
-    missing_fragments = [fragment for fragment in required_fragments if fragment not in normalized]
+    compact_normalized = re.sub(r"\s+", "", normalized)
+    missing_fragments = [fragment for fragment in required_fragments if re.sub(r"\s+", "", fragment) not in compact_normalized]
     if missing_fragments:
         raise ValueError(f"文生图prompt 缺少首图关键文案：{missing_fragments[0]}")
 
