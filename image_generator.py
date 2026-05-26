@@ -2739,9 +2739,10 @@ def run_text_stage_with_validation_retry(stage_name: str, operation: Callable[[]
             last_error = exc
             if attempt >= request_retry_count:
                 break
-            print(f"{stage_name}内容异常，正在重新调用第 {attempt + 1}/{request_retry_count} 次...")
+            print(f"{stage_name}内容异常（{exc}），正在重新调用第 {attempt + 1}/{request_retry_count} 次...")
 
-    raise RuntimeError(f"{stage_name}连续 {request_retry_count} 次内容异常，已终止本轮流程。") from last_error
+    detail = f"最后一次原因：{last_error}" if last_error else "未返回可定位原因"
+    raise RuntimeError(f"{stage_name}连续 {request_retry_count} 次内容异常，已终止本轮流程。{detail}") from last_error
 
 
 def extract_image_items(response: Any) -> list[dict[str, str]]:
@@ -3064,10 +3065,24 @@ def validate_page01_prompt_content(prompt_text: str, fixed_dish_name: str, bundl
 
 
 def validate_guide_page_prompt_content(prompt_text: str, fixed_dish_name: str, stage_name: str) -> str:
-    normalized = validate_image_prompt_content(prompt_text, fixed_dish_name=fixed_dish_name, stage_name=stage_name)
-    leaked_labels = [label for label in GUIDE_PAGE_MACHINE_LABELS if label in normalized]
-    if leaked_labels:
-        raise ValueError(f"{stage_name} 混入了程序化字段标签：{','.join(leaked_labels)}")
+    normalized = ensure_non_placeholder_text(prompt_text, stage_name=stage_name, min_length=60)
+    normalized_key = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", normalized)
+    dish_name_key = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", fixed_dish_name)
+    additions: list[str] = []
+
+    if dish_name_key and dish_name_key not in normalized_key:
+        additions.append(
+            f"这张延续页围绕同一道菜“{fixed_dish_name}”展开；如果页面里需要出现菜名，只能直接写“{fixed_dish_name}”，不要改写成别名、简称或字段标签。"
+        )
+
+    if not re.search(r"(不要|禁止|绝对不要).*(当前菜名|当前页面|页面名称|页面标题|页面副标题|内容卡1|内容卡2|内容卡3|页尾提示)", normalized):
+        additions.append(
+            "画面里绝对不要出现“当前菜名”“当前页面”“页面名称”“页面标题”“页面副标题”“内容卡1”“内容卡2”“内容卡3”“页尾提示”这类程序化字段标签。"
+        )
+
+    if additions:
+        normalized += "\n\n硬性补充约束：\n" + "\n".join(additions)
+
     return normalized
 
 
