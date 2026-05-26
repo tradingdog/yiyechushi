@@ -19,7 +19,7 @@ v0.60
 9. 主流程和文本模式现在都会额外生成“抖音图文标题”和“抖音图文描述”，描述最后会自动带 5 个更贴近菜谱的潜力话题标签。
 10. 如需单独只刷新 dish_name.txt 而不继续生成 prompt 或图片，直接运行 tools/generate_auto_dish_idea.py。
 11. 如需从某个 output 子目录里的多版本图片中自动筛出更适合发布的版本，运行 tools/select_publish_images.py；它会按页面分组让豆包逐页打分，再把胜出图移入 publish 文件夹。
-12. 默认情况下，主流程在整套图片和 Photoshop 合成都完成后，也会自动执行一次 publish 筛图并输出报告；若只想关掉这一步，把 config.env 里的 PUBLISH_AUTO_SELECT 改成 2。
+12. 默认情况下，主流程会先生成图解01到图解06并先做一次 publish 筛图，再用筛中的首图重写封面 prompt、生成封面并单独筛封面；若 PHOTOSHOP_AUTO_COMPOSITE=1，则最后只对 publish 目录里的入选图片执行 Photoshop 合成。若只想关掉 publish 这一步，把 config.env 里的 PUBLISH_AUTO_SELECT 改成 2。
 13. 如需手动指定 1 个或多个必须保留在最终 5 个抖音话题里的标签，修改 config.env 里的 PUBLISH_REQUIRED_TOPICS；多个话题可用空格、逗号、分号或换行分隔，写不写 # 都可以。
 14. 如需把 publish 目录里的图和对应标题/描述自动投喂到抖音创作者页，运行 tools/douyin_publish.py；若当前没有可接管的调试浏览器，脚本会自动拉起一个独立的 Chrome 自动化窗口。
 
@@ -38,14 +38,14 @@ v0.60
 11. 文本接口超时时，多图解页面也会自动切换本地模板兜底，不让整条流程中断。
 12. 当前会额外生成 1 张竖版 9:16 的封面图，文件名会在菜名后追加“封面”。
 13. 封面图会沿用一页菜谱 VI，但构图已切到更高更窄的 9:16 长竖版，上半段为竖排菜名留出更长通道，主菜更多压在中下段。
-14. 主流程现在可在全部 gpt-image-2 图片落盘后，自动调用本地 Photoshop 套 PSD 模板，并把整轮输出目录里的成图统一覆盖导出为 JPG。
+14. 当 PUBLISH_AUTO_SELECT=1 且 PHOTOSHOP_AUTO_COMPOSITE=1 时，主流程会在 publish 图全部选定后，只对 publish 目录里的入选图片调用本地 Photoshop 套 PSD 模板，不再整轮处理所有候选图。
 15. image_generator.py 现在只保留通用素材整理、接口调用和总流程编排，图解01与封面的页面 prompt 逻辑已移动到 guide_pages 目录。
 16. 图解02到图解06的本地兜底文案已改为按 dish_name.txt 输入动态生成，不再写死豆腐肉沫类固定菜文案。
 17. 文本模型已临时切换为豆包新版本（doubao-seed-2-0-pro-260215），生图模型继续使用 gpt-image-2，不受影响。
 18. 运行流程已调整为先产出全部创意和 prompt，再统一调用 gpt-image-2 生图。
 19. 主流程已再次修正为先完成全部文案和 prompt，再统一进入所有图片的生图阶段。
 20. 图解01、图解02到图解06以及封面图里只要出现任何菜品、食材、半成品、局部状态或背景食物，都已统一强制为 iPhone 主摄 1x 默认相机直出照片感。
-21. 图解01 首图模板已单独强化为“像先用 iPhone 主摄拍好真实晚饭照片再排进海报里”，并继续保留筷子夹起主菜悬空的动作感。
+21. 图解01 首图模板已单独强化为“像先用 iPhone 主摄拍好真实晚饭照片再排进海报里”，并继续保留筷子夹起主菜的动作感；但角度、方向、停顿瞬间和构图距离现在允许按菜品自由变化，不再默认固定成滴汁镜头。
 22. 图解01 首图最终 prompt 的末尾已固定追加“请优先保证主菜图片看起来像真实手机实拍，饱和度降低20%，再完成整张海报的文字和排版。”这句收尾指令。
 23. 封面图模板和默认尺寸已改为竖版 9:16，第2张到第6张的图片 prompt 也会统一带上“关注@阿叶造新菜，家用开店都不赖！”的细长底部关注文案，不生成图标。
 24. 当前新增 config.env 作为统一可调参数文件，支持每行尾部直接写中文注释；运行时按“外部环境变量 > .env > config.env”的优先级读取。
@@ -77,7 +77,7 @@ v0.60
 50. 图解01 首图标题区现在进一步收紧为“沿同一条画面正中竖线向下堆叠的中心柱布局”；image_generator.py 已新增首图 prompt 专用中轴校验，若最终 prompt 没写出中轴、中心点、左右留白对称与禁止偏左这类硬约束，会直接拦截并切回本地首图模板。
 51. 封面图默认尺寸现已收口为 864x1536。这一尺寸继续保持竖版 9:16，且满足 OpenAI 官方当前对 gpt-image-2 的尺寸约束：最长边不超过 3840、宽高都必须是 16 的倍数、总像素不超过 8294400。当前封面像素规格已调整到与其它图接近的中等尺寸，不再单独拉到满规格；程序仍会在本地先校验图片尺寸配置。
 52. tools/apply_photoshop_template_batch.py 现已收口为本地 Photoshop 批处理工具；会把指定目录中的 .jpg/.jpeg/.png 逐张替换进 PSD 模板，再直接调用本机 Photoshop 导出高质量 JPG 覆盖原图。
-53. 主流程默认会在全部 gpt-image-2 图片生成完后自动调用这套本地 Photoshop 链路；图层混合模式、文字层、纹理层、自然饱和度等视觉处理统一由 PSD 模板自身负责。
+53. 当 PUBLISH_AUTO_SELECT=1 且 PHOTOSHOP_AUTO_COMPOSITE=1 时，主流程会在 publish 图全部选定后，只对 publish 目录里的入选图片调用这套本地 Photoshop 链路；图层混合模式、文字层、纹理层、自然饱和度等视觉处理统一由 PSD 模板自身负责。
 54. config.env 里的 Photoshop 配置已收口为 PHOTOSHOP_AUTO_COMPOSITE、PHOTOSHOP_LOCAL_EXE、PHOTOSHOP_TEMPLATE_FILE、PHOTOSHOP_TEMPLATE_SMART_OBJECT_LAYER、PHOTOSHOP_JPEG_QUALITY、PHOTOSHOP_JOB_TIMEOUT_SECONDS；不再保留 Adobe/S3 云配置。
 55. 图解01 首图本地兜底里的副标题与成败关键已收紧食材判定逻辑；非豆腐菜不再因为“煎 / 焦香 / 软糯 / 香”这类泛词被误写成“豆腐两面煎焦香”或“豆腐先煎出焦边再合炒”，创意菜谱校验阶段也会在落盘前自动纠正这类错误副标题。
 56. 抖音图文标题现在会强制规范化为“菜名，卖点！”；即使文本模型漏掉中文逗号或中文叹号，落盘前也会自动纠正到统一格式。
@@ -89,7 +89,7 @@ v0.60
 62. 图解01 首图与图解02到图解06的标题居中现在是 publish 评审硬门槛。tools/select_publish_images.py 会同时把原图和带中心参考线的辅助图交给豆包，再叠加本地像素偏移估算决定是否通过；当前 page01 的容忍度更严。
 63. 若某个标题页当前候选全部未通过居中硬门槛，正式模式会按该页已经落盘的文生图 prompt 单张补生新图，再把新图并回候选复评；dry-run 只会在报告里写出“需要补生”，不会真的调图片接口。
 64. 若当前目录里的成图已经是 Photoshop 合成后的 JPG，标题补生出来的新图会自动只对这一张补跑一次 PSD 模板再参与复评；如果补生阶段被图片接口 403 阻塞，该页不会进入 publish，但整轮仍会继续处理其它页面，并把阻塞原因写进报告。
-65. 主流程现在支持自动 publish 收尾：当 config.env 中 PUBLISH_AUTO_SELECT=1 时，main.py 会在所有图片与 Photoshop 完成后自动创建 publish，并打印 publish_selection_report.json 与 publish_selection_report.txt 路径。
+65. 主流程现在支持自动 publish 收尾：当 config.env 中 PUBLISH_AUTO_SELECT=1 时，main.py 会先筛图解01到图解06，再按筛中的首图生成并筛选封面，最终写出 publish_selection_report.json 与 publish_selection_report.txt；若同时开启 Photoshop，则只处理 publish 目录里的最终入选图片。
 66. 新增 tools/douyin_publish.py，可通过 Playwright 接管已开启远程调试的 Chrome 抖音创作者页，自动上传 publish 里的 01.jpg 到 06.jpg、填写抖音图文标题与描述、单独上传 cover.jpg，并完成“个人观点或臆测”自主声明选择。脚本默认指向 output\20260525_043309_葱香海参酿 这套测试素材，也支持传入别的 output 子目录。
 67. config.env 新增 PUBLISH_REQUIRED_TOPICS；一旦配置，抖音图文描述最后 5 个话题里会优先保留这些手动话题，剩余名额再由程序自动补齐。自动补位的话题仍默认过滤菜名标签和 #阿叶造新菜。
 

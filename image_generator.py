@@ -28,7 +28,7 @@ DEFAULT_OUTPUT_DIR = OUTPUT_ROOT_DIR
 DEFAULT_AD_COPY_FILE = ROOT_DIR / "guanggaoyu.txt"
 DEFAULT_COLLECTION_HINT = ""
 DEFAULT_COLLECTION_COPY = "这张先收藏 原创新菜照着做更稳"
-DEFAULT_DYNAMIC_ACTION = "一双木筷从画面侧上方夹起一块主菜悬在半空 带轻微挂汁与热气"
+DEFAULT_DYNAMIC_ACTION = "保留筷子夹起主菜的动作镜头即可 角度和动作瞬间按菜品自由变化 可自然带入少量年轻手部 不固定挂汁滴落"
 DEFAULT_REQUEST_RETRY_COUNT = 2
 DEFAULT_TEXT_REQUEST_RETRY_COUNT = 3
 DEFAULT_TEXT_PROVIDER = "doubao"
@@ -801,6 +801,23 @@ def close_openai_client(client: OpenAI | None) -> None:
             close_method()
         except Exception:
             pass
+
+
+def get_multimodal_review_model() -> str:
+    ensure_runtime_config_loaded()
+    return os.getenv("DOUBAO_REVIEW_MODEL", "").strip() or get_text_model()
+
+
+def build_multimodal_review_client() -> OpenAI:
+    ensure_runtime_config_loaded()
+    doubao_api_key = os.getenv("DOUBAO_API_KEY", "").strip()
+    if not doubao_api_key:
+        return build_text_client()
+
+    request_timeout = get_text_request_timeout_seconds()
+    http_timeout = build_text_http_timeout(request_timeout)
+    base_url = os.getenv("DOUBAO_BASE_URL", DEFAULT_DOUBAO_BASE_URL).strip() or DEFAULT_DOUBAO_BASE_URL
+    return OpenAI(api_key=doubao_api_key, base_url=base_url, timeout=http_timeout)
 
 
 def is_retriable_text_request_error(exc: Exception) -> bool:
@@ -2553,6 +2570,12 @@ def extract_chat_text_output(response: Any) -> str:
     return "\n".join(text_parts).strip()
 
 
+def encode_image_file_as_data_url(image_path: Path) -> str:
+    mime_type = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
+    image_b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{image_b64}"
+
+
 def request_text_generation(
     client: OpenAI,
     system_prompt: str,
@@ -2575,6 +2598,56 @@ def request_text_generation(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
+                ],
+                timeout=request_timeout,
+                max_tokens=max_output_tokens,
+                temperature=temperature,
+            )
+            break
+        except Exception as exc:
+            if not is_retriable_text_request_error(exc):
+                raise
+            error_label = get_text_request_error_label(exc)
+            if attempt >= request_retry_count:
+                raise RuntimeError(f"{stage_name}文本接口连续 {request_retry_count} 次{error_label}，已终止本轮流程。") from exc
+            print(f"{stage_name}文本接口{error_label}，正在重试第 {attempt + 1}/{request_retry_count} 次...")
+        finally:
+            if request_client is not client:
+                close_openai_client(request_client)
+
+    content = extract_chat_text_output(response)
+    if not content:
+        raise ValueError(f"{stage_name}阶段未获得有效文本输出。")
+
+    return {
+        "model": text_model,
+        "content": content,
+    }
+
+
+def request_multimodal_text_generation(
+    client: OpenAI,
+    system_prompt: str,
+    user_content: list[dict[str, Any]],
+    stage_name: str,
+    model: str | None = None,
+) -> dict[str, str]:
+    text_model = model or get_multimodal_review_model()
+    request_timeout = get_text_request_timeout_seconds()
+    request_retry_count = get_text_request_retry_count()
+    max_output_tokens = get_text_max_output_tokens(stage_name)
+    temperature = get_text_temperature()
+
+    response = None
+    print(f"正在生成{stage_name}，调用多模态模型：{text_model}")
+    for attempt in range(1, request_retry_count + 1):
+        request_client = client if attempt == 1 else build_multimodal_review_client()
+        try:
+            response = request_client.chat.completions.create(
+                model=text_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
                 ],
                 timeout=request_timeout,
                 max_tokens=max_output_tokens,
@@ -3431,10 +3504,147 @@ def apply_photoshop_postprocess_to_output_dir(output_dir: Path) -> dict[str, str
     return apply_photoshop_template_batch_to_dir(input_dir=output_dir)
 
 
-def auto_select_publish_images_for_output_dir(output_dir: Path) -> dict[str, Any]:
+def auto_select_publish_images_for_output_dir(
+    output_dir: Path,
+    *,
+    include_page_types: Sequence[str] | None = None,
+) -> dict[str, Any]:
     from tools.select_publish_images import select_publish_images
 
-    return select_publish_images(input_dir=output_dir)
+    return select_publish_images(input_dir=output_dir, include_page_types=include_page_types)
+
+
+def save_publish_selection_reports(publish_dir: Path, report_payload: dict[str, Any]) -> tuple[str, str]:
+    from tools.select_publish_images import save_review_reports
+
+    report_file, summary_file = save_review_reports(publish_dir, report_payload)
+    return str(report_file), str(summary_file)
+
+
+def merge_publish_selection_results(*selection_results: dict[str, Any]) -> dict[str, Any]:
+    merged_results = [item for item in selection_results if item]
+    if not merged_results:
+        return {}
+
+    combined_groups: list[dict[str, Any]] = []
+    for selection_result in merged_results:
+        combined_groups.extend(selection_result.get("groups", []))
+
+    merged_payload = {
+        "input_dir": merged_results[0].get("input_dir", ""),
+        "publish_dir": merged_results[0].get("publish_dir", ""),
+        "model": merged_results[0].get("model", ""),
+        "dry_run": merged_results[0].get("dry_run", False),
+        "copy_mode": merged_results[0].get("copy_mode", False),
+        "title_retry_limit": merged_results[0].get("title_retry_limit", 0),
+        "groups": combined_groups,
+    }
+    report_file, summary_file = save_publish_selection_reports(Path(merged_payload["publish_dir"]), merged_payload)
+    merged_payload["report_file"] = report_file
+    merged_payload["summary_file"] = summary_file
+    return merged_payload
+
+
+def find_selected_publish_image(selection_result: dict[str, Any], page_type: str) -> str:
+    for group_result in selection_result.get("groups", []):
+        if group_result.get("page_type") != page_type:
+            continue
+        selected_path = str(group_result.get("selected_output_path", "")).strip()
+        if selected_path:
+            return selected_path
+    return ""
+
+
+def remap_publish_selection_groups(selection_result: dict[str, Any], processed_file_map: dict[str, str]) -> None:
+    for group_result in selection_result.get("groups", []):
+        selected_output_path = str(group_result.get("selected_output_path", "")).strip()
+        if not selected_output_path:
+            continue
+        resolved_path = str(Path(selected_output_path).resolve())
+        group_result["selected_output_path"] = processed_file_map.get(resolved_path, selected_output_path)
+
+
+def build_cover_reference_prompt_user_content(
+    *,
+    selected_page01_image_path: Path,
+    draft_cover_prompt: str,
+    dish_name: str,
+) -> list[dict[str, Any]]:
+    user_text = f"""
+你现在会看到一张已经从图解01 里筛出来的首图海报，它就是这道菜当前最终选中的主菜视觉参考。
+
+请忽略海报上的引导句、标题、黄条、食材卡、成败关键、步骤卡和底部文案，只观察并吸收这些真实视觉信息：
+1. 主菜本身的形状、厚薄、大小差异、摆放关系和主体密度。
+2. 餐盘或器皿的真实类型、颜色、边缘形状、占画面比例。
+3. 桌面材质、色温、酱汁光泽、辅料点缀和景别关系。
+4. 这张图里真正让人认出“就是这道菜”的关键外观特征。
+
+你要做的是重写最终封面图 prompt，让封面背景里的主菜样式、器皿、桌面、酱汁和构图关系尽量贴近这张已筛中的首图，而不是只沿用抽象文字描述。
+
+必须继续保留这些封面硬约束：
+- 竖版 9:16。
+- 菜名单列竖排压在中轴。
+- 除菜名外画面其它区域 0 文字。
+- 背景主菜和餐盘主动避开中轴标题通道，主要退到中下段、下半部、右下或左下。
+
+下面是当前已有的封面 prompt 草稿，请在保留上述硬约束的前提下，按这张已筛中的首图把它改写得更贴近真实参考图：
+
+{draft_cover_prompt}
+
+最终只输出一条新的完整中文封面图 prompt，不要解释。菜名必须还是：{dish_name}
+""".strip()
+
+    return [
+        {"type": "text", "text": user_text},
+        {"type": "text", "text": f"参考首图文件名：{selected_page01_image_path.name}"},
+        {"type": "image_url", "image_url": {"url": encode_image_file_as_data_url(selected_page01_image_path)}},
+    ]
+
+
+def refine_cover_prompt_with_selected_page01_reference(
+    *,
+    selected_page01_image_path: Path,
+    style_reference: str,
+    existing_cover_prompt: str,
+    dish_name: str,
+    bundle: dict[str, Any],
+) -> dict[str, str]:
+    review_client = build_multimodal_review_client()
+    vertical_dish_name = cover_page.format_vertical_dish_name(dish_name)
+
+    def build_cover_prompt_result() -> tuple[dict[str, str], str]:
+        cover_prompt_result = request_multimodal_text_generation(
+            client=review_client,
+            system_prompt=cover_page.build_cover_prompt_system_prompt(
+                style_reference=style_reference,
+                fixed_dish_name=dish_name,
+                vertical_dish_name=vertical_dish_name,
+                bundle=bundle,
+            ),
+            user_content=build_cover_reference_prompt_user_content(
+                selected_page01_image_path=selected_page01_image_path,
+                draft_cover_prompt=existing_cover_prompt,
+                dish_name=dish_name,
+            ),
+            stage_name="封面prompt",
+            model=get_multimodal_review_model(),
+        )
+        cover_prompt = validate_cover_prompt_content(
+            prompt_text=cover_prompt_result["content"],
+            fixed_dish_name=dish_name,
+            bundle=bundle,
+        )
+        return cover_prompt_result, cover_prompt
+
+    try:
+        cover_prompt_result, refined_cover_prompt = run_text_stage_with_validation_retry("封面prompt", build_cover_prompt_result)
+    finally:
+        close_openai_client(review_client)
+
+    return {
+        "model": cover_prompt_result["model"],
+        "prompt": refined_cover_prompt,
+    }
 
 
 def remap_processed_image_paths(saved_files: Sequence[str], processed_file_map: dict[str, str]) -> list[str]:
@@ -3683,6 +3893,8 @@ def generate_recipe_text_assets_from_idea_file(
     return {
         "dish_idea": idea_payload["dish_idea"],
         "dish_name": generated_dish_name,
+        "guide_bundle": guide_bundle,
+        "style_reference": style_reference,
         "notes": idea_payload["notes"],
         "auto_generated": idea_payload.get("auto_generated", "0"),
         "reference_dish": idea_payload.get("reference_dish", ""),
@@ -3740,7 +3952,7 @@ def generate_recipe_assets_from_idea_file(
     tujie_image_settings = get_tujie_image_settings()
     cover_image_settings = get_cover_image_settings()
     print(
-        "所有创意和 prompt 已完成，开始统一调用图片模型生图..."
+        "所有创意和 prompt 已完成，开始先生成图解01到图解06..."
         f"首图模型：{page01_image_settings['model']}，图解模型：{tujie_image_settings['model']}，封面模型：{cover_image_settings['model']}"
     )
 
@@ -3771,20 +3983,10 @@ def generate_recipe_assets_from_idea_file(
         page_result["image_model"] = page_image_result["model"]
         page_result["saved_files"] = page_image_result["saved_files"]
 
-    cover_image_result = generate_images_from_prompt_text(
-        client=image_client,
-        dish_name=result["dish_name"],
-        prompt=result["cover_prompt"],
-        timestamp=result["timestamp"],
-        image_settings=cover_image_settings,
-        output_name=result["cover_output_name"],
-        stage_name="封面",
-    )
-
     result["image_model"] = page01_image_result["model"]
-    result["cover_image_model"] = cover_image_result["model"]
+    result["cover_image_model"] = ""
     result["saved_files"] = page01_image_result["saved_files"]
-    result["cover_saved_files"] = cover_image_result["saved_files"]
+    result["cover_saved_files"] = []
     result["photoshop_auto_composite"] = "1" if photoshop_auto_composite_enabled else "2"
     result["photoshop_processed_files"] = []
     result["publish_auto_select"] = "1" if publish_auto_select_enabled else "2"
@@ -3793,19 +3995,58 @@ def generate_recipe_assets_from_idea_file(
     result["publish_selection_summary_file"] = ""
     result["publish_selected_files"] = []
 
-    if photoshop_auto_composite_enabled:
-        print("所有图片已生成完成，开始执行 Photoshop 模板合成并覆盖导出 JPG...")
-        processed_file_map = apply_photoshop_postprocess_to_output_dir(Path(result["output_root"]))
-        page01_result["saved_files"] = remap_processed_image_paths(page01_result["saved_files"], processed_file_map)
-        for page_result in result["guide_pages"][1:]:
-            page_result["saved_files"] = remap_processed_image_paths(page_result["saved_files"], processed_file_map)
-        result["saved_files"] = remap_processed_image_paths(result["saved_files"], processed_file_map)
-        result["cover_saved_files"] = remap_processed_image_paths(result["cover_saved_files"], processed_file_map)
-        result["photoshop_processed_files"] = list(processed_file_map.values())
-
     if publish_auto_select_enabled:
-        print("所有图片与 Photoshop 处理已完成，开始自动评审发布图并生成 publish 报告...")
-        publish_selection_result = auto_select_publish_images_for_output_dir(Path(result["output_root"]))
+        print("图解01到图解06 已生成完成，开始先筛选前 6 组 publish 图片...")
+        initial_publish_selection_result = auto_select_publish_images_for_output_dir(
+            Path(result["output_root"]),
+            include_page_types=("page01", "guide_page"),
+        )
+        selected_page01_path_text = find_selected_publish_image(initial_publish_selection_result, "page01")
+        if not selected_page01_path_text:
+            raise RuntimeError("前 6 组 publish 评审完成，但没有找到已选中的图解01 首图，无法继续按选中首图生成封面。")
+
+        selected_page01_path = Path(selected_page01_path_text)
+        print(f"已找到筛中的首图参考：{selected_page01_path.name}，开始按这张首图重写封面 prompt...")
+        refined_cover_prompt_result = refine_cover_prompt_with_selected_page01_reference(
+            selected_page01_image_path=selected_page01_path,
+            style_reference=result["style_reference"],
+            existing_cover_prompt=result["cover_prompt"],
+            dish_name=result["dish_name"],
+            bundle=result["guide_bundle"],
+        )
+        result["cover_prompt_model"] = refined_cover_prompt_result["model"]
+        result["cover_prompt"] = refined_cover_prompt_result["prompt"]
+        result["cover_prompt_file"] = save_text_output(
+            content=result["cover_prompt"],
+            output_dir=Path(result["output_root"]),
+            timestamp=result["timestamp"],
+            base_name=result["cover_output_name"],
+            suffix="_文生图prompt",
+        )
+        print(f"封面 prompt 已按筛中的首图重写：{result['cover_prompt_file']}")
+
+        print("前 6 组 publish 图片已确定，开始生成封面...")
+        cover_image_result = generate_images_from_prompt_text(
+            client=image_client,
+            dish_name=result["dish_name"],
+            prompt=result["cover_prompt"],
+            timestamp=result["timestamp"],
+            image_settings=cover_image_settings,
+            output_name=result["cover_output_name"],
+            stage_name="封面",
+        )
+        result["cover_image_model"] = cover_image_result["model"]
+        result["cover_saved_files"] = cover_image_result["saved_files"]
+
+        print("封面已生成，开始单独筛选封面并合并 publish 报告...")
+        cover_publish_selection_result = auto_select_publish_images_for_output_dir(
+            Path(result["output_root"]),
+            include_page_types=("cover",),
+        )
+        publish_selection_result = merge_publish_selection_results(
+            initial_publish_selection_result,
+            cover_publish_selection_result,
+        )
         result["publish_selection"] = publish_selection_result
         result["publish_selection_report_file"] = str(publish_selection_result.get("report_file", ""))
         result["publish_selection_summary_file"] = str(publish_selection_result.get("summary_file", ""))
@@ -3814,6 +4055,40 @@ def generate_recipe_assets_from_idea_file(
             for group_result in publish_selection_result.get("groups", [])
             if str(group_result.get("selected_output_path", "")).strip()
         ]
+
+        if photoshop_auto_composite_enabled and result["publish_selected_files"]:
+            publish_dir = Path(str(publish_selection_result.get("publish_dir", "")))
+            print("publish 图片已全部选定，开始只对 publish 文件夹执行 Photoshop 模板合成...")
+            processed_file_map = apply_photoshop_postprocess_to_output_dir(publish_dir)
+            result["photoshop_processed_files"] = list(processed_file_map.values())
+            remap_publish_selection_groups(result["publish_selection"], processed_file_map)
+            result["publish_selected_files"] = remap_processed_image_paths(result["publish_selected_files"], processed_file_map)
+            report_file, summary_file = save_publish_selection_reports(publish_dir, result["publish_selection"])
+            result["publish_selection_report_file"] = report_file
+            result["publish_selection_summary_file"] = summary_file
+    else:
+        print("publish 自动筛选未开启，按原顺序继续生成封面...")
+        cover_image_result = generate_images_from_prompt_text(
+            client=image_client,
+            dish_name=result["dish_name"],
+            prompt=result["cover_prompt"],
+            timestamp=result["timestamp"],
+            image_settings=cover_image_settings,
+            output_name=result["cover_output_name"],
+            stage_name="封面",
+        )
+        result["cover_image_model"] = cover_image_result["model"]
+        result["cover_saved_files"] = cover_image_result["saved_files"]
+
+        if photoshop_auto_composite_enabled:
+            print("所有图片已生成完成，开始执行 Photoshop 模板合成并覆盖导出 JPG...")
+            processed_file_map = apply_photoshop_postprocess_to_output_dir(Path(result["output_root"]))
+            page01_result["saved_files"] = remap_processed_image_paths(page01_result["saved_files"], processed_file_map)
+            for page_result in result["guide_pages"][1:]:
+                page_result["saved_files"] = remap_processed_image_paths(page_result["saved_files"], processed_file_map)
+            result["saved_files"] = remap_processed_image_paths(result["saved_files"], processed_file_map)
+            result["cover_saved_files"] = remap_processed_image_paths(result["cover_saved_files"], processed_file_map)
+            result["photoshop_processed_files"] = list(processed_file_map.values())
 
     return result
 

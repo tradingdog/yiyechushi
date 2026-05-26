@@ -11,7 +11,7 @@ import sys
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Sequence, cast
 
 from openai import OpenAI
 
@@ -215,6 +215,12 @@ def collect_image_groups(input_dir: Path) -> list[ImageGroup]:
         )
 
     return sorted(groups, key=lambda item: item.display_name)
+
+
+def filter_image_groups_by_page_types(groups: list[ImageGroup], include_page_types: set[str] | None = None) -> list[ImageGroup]:
+    if not include_page_types:
+        return groups
+    return [group for group in groups if group.page_type in include_page_types]
 
 
 def read_text_file_if_exists(file_path: Path, max_chars: int = 2400) -> str:
@@ -1118,9 +1124,10 @@ def evaluate_group_with_regeneration(
         )
 
 
-def run_publish_selection(settings: ReviewSettings) -> dict[str, Any]:
+def run_publish_selection(settings: ReviewSettings, groups: list[ImageGroup] | None = None) -> dict[str, Any]:
     review_client = build_review_client(settings)
-    groups = collect_image_groups(settings.input_dir)
+    if groups is None:
+        groups = collect_image_groups(settings.input_dir)
     if not groups:
         raise RuntimeError("目标目录里没有找到可评审的图片文件。")
 
@@ -1184,6 +1191,7 @@ def select_publish_images(
     dry_run: bool = False,
     copy_mode: bool = False,
     title_retry_limit: int | None = None,
+    include_page_types: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     args = argparse.Namespace(
         input_dir=str(input_dir),
@@ -1194,7 +1202,11 @@ def select_publish_images(
         copy=copy_mode,
     )
     settings = resolve_review_settings(args)
-    return run_publish_selection(settings)
+    groups = filter_image_groups_by_page_types(
+        collect_image_groups(settings.input_dir),
+        include_page_types={item for item in include_page_types or ()},
+    )
+    return run_publish_selection(settings, groups=groups)
 
 
 def main() -> int:
