@@ -434,7 +434,7 @@ def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
 2. 如果用户给的是常见菜名，也要基于做法、口感、卖点、结构、器皿或场景做明显优化，但最终菜名必须保持用户输入原样。
 3. 要优先吸收用户的补充说明，例如摆盘、器皿、核心调味、关键操作和口感方向。
 4. 全部配方与步骤统一使用 g、ml、L、分钟 这类物理量单位，不要使用“适量、少许、1勺”这类模糊表达。
-5. 默认按 2 人份来写，步骤控制在 5 步，适合做成高密度、易收藏的一页菜谱海报。
+5. 默认按 2 人份来写，步骤控制在 3 到 5 步之间，按这道菜本身判断最刚好的步数，越少越好，但不能省掉关键操作，最多只能 5 步。
 6. 成败关键固定输出 5 条短句，每条都不要使用逗号、句号、顿号等标点。
 7. 底部关注文案必须固定为：{ad_copy}
 8. 底部收藏文案必须固定为：{DEFAULT_COLLECTION_COPY}
@@ -481,17 +481,15 @@ def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
 4. ...
 5. ...
 
-【5步出锅】
+【3步出锅】或【4步出锅】或【5步出锅】
+上面这个区块标题只能三选一，数字必须和实际步骤条数完全一致。
 1. 标题：...
 内容：...
 2. 标题：...
 内容：...
 3. 标题：...
 内容：...
-4. 标题：...
-内容：...
-5. 标题：...
-内容：...
+如果你判断这道菜需要第 4 步或第 5 步，再继续往下写；如果 3 步已经刚好，就不要硬凑更多步骤。
 
 【底部文案】
 收藏文案：{DEFAULT_COLLECTION_COPY}
@@ -509,7 +507,7 @@ def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
 9. 如果这道菜更适合砂锅、深口汤碗、长鱼盘、铸铁盘、搪瓷盘、石面台、水磨石台面、亚麻餐垫或简洁厨房台面，就直接写清楚，不要偷懒回到同一种木桌陶盘。
 10. 不同出餐结构的菜必须主动拉开场景，不要只是把同一套浅灰石面、水磨石、小圆碟、玻璃油壶模板换成黑盘或白盘后重复使用。煎鱼挂汁类、炸卷类、锅物类、冷盘类、铁板类的桌面材质、器皿逻辑和后景陪衬都应该明显不同。
 11. 食材分组要清楚，数量要合理，不能互相打架。
-12. 5 步必须前后顺序清晰，适合普通人照做。
+12. 3 到 5 步必须前后顺序清晰，适合普通人照做；不要为了凑数把一个动作拆成两步，也不要为了省步数漏掉决定成败的关键环节。
 13. 文字整体要像成熟抖音爆款图文海报，而不是教程论文或餐厅菜单。
 """.strip()
 
@@ -1277,8 +1275,21 @@ def extract_recipe_numbered_items(block_text: str) -> list[str]:
     return items
 
 
+def build_recipe_step_section_title(step_count: int) -> str:
+    normalized_count = max(3, min(step_count, 5))
+    return f"{normalized_count}步出锅"
+
+
+def extract_recipe_step_section_title(recipe_text: str) -> str:
+    match = re.search(r"【([3-5])步出锅】", recipe_text)
+    if not match:
+        return ""
+    return build_recipe_step_section_title(int(match.group(1)))
+
+
 def extract_recipe_steps(recipe_text: str) -> list[dict[str, str]]:
-    step_block = extract_recipe_named_block(recipe_text, "5步出锅")
+    step_block_title = extract_recipe_step_section_title(recipe_text) or build_recipe_step_section_title(5)
+    step_block = extract_recipe_named_block(recipe_text, step_block_title)
     steps: list[dict[str, str]] = []
     current_step: dict[str, str] | None = None
 
@@ -1893,12 +1904,27 @@ def infer_steps(dish_name: str, notes: str) -> list[dict[str, str]]:
             },
         ]
 
+    if contains_any(combined_text, ["凉拌", "冷拌", "沙拉", "白灼", "快手", "蘸水", "凉菜"]):
+        return [
+            {"title": "备主料", "content": "先把主料和关键配料处理干净，切到最适合入口和拌匀的状态"},
+            {"title": "调主味", "content": "把决定风味走向的底味先调好，再让主料均匀裹上或吸住味道"},
+            {"title": "收口上桌", "content": "最后补上决定香气和口感的点睛料，拌匀或装盘后立刻上桌"},
+        ]
+
+    if contains_any(combined_text, ["煲", "锅", "焖", "炖", "卤", "焗", "炸", "卷", "酿", "塔", "夹饼", "慢煮", "烧", "烤"]):
+        return [
+            {"title": "备主料", "content": "先把主料和核心配料按出菜顺序处理干净备用"},
+            {"title": "做底味", "content": "先把香味和底味炒出来，让主菜后续更容易挂味"},
+            {"title": "处理主菜", "content": "把主菜做到七八成熟，保留最关键的口感层次"},
+            {"title": "合味收汁", "content": "把主料和调味重新合在一起，让汤汁或酱汁均匀包裹主菜"},
+            {"title": "出锅装盘", "content": "最后补香并装盘，保留热气、亮泽和最强食欲感"},
+        ]
+
     return [
         {"title": "备主料", "content": "先把主料和核心配料按出菜顺序处理干净备用"},
         {"title": "做底味", "content": "先把香味和底味炒出来，让主菜后续更容易挂味"},
         {"title": "处理主菜", "content": "把主菜做到七八成熟，保留最关键的口感层次"},
-        {"title": "合味收汁", "content": "把主料和调味重新合在一起，让汤汁或酱汁均匀包裹主菜"},
-        {"title": "出锅装盘", "content": "最后补香并装盘，保留热气、亮泽和最强食欲感"},
+        {"title": "合味出锅", "content": "把主料和调味重新合在一起，收住味道和状态后立刻装盘上桌"},
     ]
 
 def build_local_recipe_bundle(dish_name: str, notes: str, ad_copy: str) -> dict[str, Any]:
@@ -1938,6 +1964,7 @@ def render_recipe_bundle_text(bundle: dict[str, Any]) -> str:
     steps = []
     for index, step in enumerate(bundle["steps"], start=1):
         steps.append(f"{index}. 标题：{step['title']}\n内容：{step['content']}")
+    step_section_title = build_recipe_step_section_title(len(bundle["steps"]))
 
     return f"""
 【基础定位】
@@ -1970,7 +1997,7 @@ def render_recipe_bundle_text(bundle: dict[str, Any]) -> str:
 【成败关键】
 {tips}
 
-【5步出锅】
+【{step_section_title}】
 {'\n'.join(steps)}
 
 【底部文案】
@@ -2942,6 +2969,7 @@ def validate_recipe_text_content(recipe_text: str, fixed_dish_name: str) -> str:
     normalized = ensure_non_placeholder_text(recipe_text, stage_name="创意菜谱", min_length=80)
     normalized = normalize_generated_guide_line(normalized, fixed_dish_name=fixed_dish_name)
     normalized = normalize_generated_subtitle(normalized, fixed_dish_name=fixed_dish_name)
+    step_section_title = extract_recipe_step_section_title(normalized)
     required_sections = [
         "【基础定位】",
         f"最终菜名：{fixed_dish_name}",
@@ -2951,12 +2979,21 @@ def validate_recipe_text_content(recipe_text: str, fixed_dish_name: str) -> str:
         "背景陪衬：",
         "【2人份食材】",
         "【成败关键】",
-        "【5步出锅】",
         "【底部文案】",
     ]
     missing_sections = [section for section in required_sections if section not in normalized]
     if missing_sections:
         raise ValueError(f"创意菜谱缺少必要结构：{','.join(missing_sections)}")
+    if not step_section_title:
+        raise ValueError("创意菜谱缺少步骤区块，必须使用【3步出锅】、【4步出锅】或【5步出锅】其中之一。")
+
+    steps = extract_recipe_steps(normalized)
+    step_count = len(steps)
+    expected_step_count = int(step_section_title[0])
+    if step_count < 3 or step_count > 5:
+        raise ValueError("创意菜谱步骤数必须在 3 到 5 步之间。")
+    if step_count != expected_step_count:
+        raise ValueError(f"创意菜谱步骤标题与实际步数不一致：标题写了 {expected_step_count} 步，实际解析到 {step_count} 步。")
     return normalized
 
 
