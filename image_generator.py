@@ -3728,9 +3728,12 @@ def generate_recipe_assets_from_idea_file(
         print("Photoshop 自动合成校验通过，继续生成图片。")
 
     image_client = build_image_client()
+    page01_image_settings = get_image_settings()
+    tujie_image_settings = get_tujie_image_settings()
+    cover_image_settings = get_cover_image_settings()
     print(
         "所有创意和 prompt 已完成，开始统一调用图片模型生图..."
-        f"图解模型：{get_tujie_image_settings()['model']}，封面模型：{get_cover_image_settings()['model']}"
+        f"首图模型：{page01_image_settings['model']}，图解模型：{tujie_image_settings['model']}，封面模型：{cover_image_settings['model']}"
     )
 
     page01_result = result["guide_pages"][0]
@@ -3739,7 +3742,7 @@ def generate_recipe_assets_from_idea_file(
         dish_name=result["dish_name"],
         prompt=page01_result["prompt"],
         timestamp=result["timestamp"],
-        image_settings=get_tujie_image_settings(),
+        image_settings=page01_image_settings,
         output_name=page01_result["output_name"],
         stage_name=f"图解01 {page01_recipe.PAGE_NAME}",
     )
@@ -3753,7 +3756,7 @@ def generate_recipe_assets_from_idea_file(
             dish_name=result["dish_name"],
             prompt=page_result["prompt"],
             timestamp=result["timestamp"],
-            image_settings=get_tujie_image_settings(),
+            image_settings=tujie_image_settings,
             output_name=page_result["output_name"],
             stage_name=page_result["page_name"],
         )
@@ -3765,7 +3768,7 @@ def generate_recipe_assets_from_idea_file(
         dish_name=result["dish_name"],
         prompt=result["cover_prompt"],
         timestamp=result["timestamp"],
-        image_settings=get_cover_image_settings(),
+        image_settings=cover_image_settings,
         output_name=result["cover_output_name"],
         stage_name="封面",
     )
