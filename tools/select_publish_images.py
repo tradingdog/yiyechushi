@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import json
 import os
@@ -470,23 +471,146 @@ def extract_chat_text_output(response: Any) -> str:
     return "\n".join(text_parts).strip()
 
 
-def parse_json_object(text: str) -> dict[str, Any]:
+def strip_json_code_fence(text: str) -> str:
     raw_text = text.strip()
-    if raw_text.startswith("```"):
-        raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
-        raw_text = re.sub(r"\s*```$", "", raw_text)
+    if not raw_text.startswith("```"):
+        return raw_text
 
-    try:
-        payload = json.loads(raw_text)
-    except json.JSONDecodeError:
-        start_index = raw_text.find("{")
-        end_index = raw_text.rfind("}")
-        if start_index < 0 or end_index < 0 or end_index <= start_index:
-            raise RuntimeError("豆包返回的评分结果不是有效 JSON。")
-        payload = json.loads(raw_text[start_index : end_index + 1])
+    raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text, flags=re.IGNORECASE)
+    raw_text = re.sub(r"\s*```$", "", raw_text)
+    return raw_text.strip()
+
+
+def extract_json_object_text(text: str) -> str:
+    raw_text = strip_json_code_fence(text)
+    start_index = raw_text.find("{")
+    end_index = raw_text.rfind("}")
+    if start_index < 0 or end_index < 0 or end_index <= start_index:
+        return raw_text
+    return raw_text[start_index : end_index + 1].strip()
+
+
+def remove_trailing_commas(text: str) -> str:
+    result: list[str] = []
+    in_string = False
+    string_quote = ""
+    is_escaped = False
+    index = 0
+    length = len(text)
+
+    while index < length:
+        char = text[index]
+        if in_string:
+            result.append(char)
+            if is_escaped:
+                is_escaped = False
+            elif char == "\\":
+                is_escaped = True
+            elif char == string_quote:
+                in_string = False
+                string_quote = ""
+            index += 1
+            continue
+
+        if char in {'"', "'"}:
+            in_string = True
+            string_quote = char
+            result.append(char)
+            index += 1
+            continue
+
+        if char == ",":
+            look_ahead = index + 1
+            while look_ahead < length and text[look_ahead].isspace():
+                look_ahead += 1
+            if look_ahead < length and text[look_ahead] in {"]", "}"}:
+                index += 1
+                continue
+
+        result.append(char)
+        index += 1
+
+    return "".join(result)
+
+
+def replace_identifiers_outside_strings(text: str, replacements: dict[str, str]) -> str:
+    result: list[str] = []
+    token: list[str] = []
+    in_string = False
+    string_quote = ""
+    is_escaped = False
+
+    def flush_token() -> None:
+        if not token:
+            return
+        token_text = "".join(token)
+        result.append(replacements.get(token_text, token_text))
+        token.clear()
+
+    for char in text:
+        if in_string:
+            flush_token()
+            result.append(char)
+            if is_escaped:
+                is_escaped = False
+            elif char == "\\":
+                is_escaped = True
+            elif char == string_quote:
+                in_string = False
+                string_quote = ""
+            continue
+
+        if char in {'"', "'"}:
+            flush_token()
+            in_string = True
+            string_quote = char
+            result.append(char)
+            continue
+
+        if char.isalpha() or char == "_":
+            token.append(char)
+            continue
+
+        flush_token()
+        result.append(char)
+
+    flush_token()
+    return "".join(result)
+
+
+def parse_json_object(text: str) -> dict[str, Any]:
+    raw_text = extract_json_object_text(text)
+    if not raw_text:
+        raise RuntimeError("豆包返回的评分结果不是有效 JSON。")
+
+    json_candidates: list[str] = [raw_text]
+    no_trailing_comma_text = remove_trailing_commas(raw_text)
+    if no_trailing_comma_text != raw_text:
+        json_candidates.append(no_trailing_comma_text)
+
+    payload: Any = None
+    last_error: Exception | None = None
+    for candidate_text in json_candidates:
+        try:
+            payload = json.loads(candidate_text)
+            break
+        except json.JSONDecodeError as exc:
+            last_error = exc
+    else:
+        python_like_text = replace_identifiers_outside_strings(
+            no_trailing_comma_text,
+            {"true": "True", "false": "False", "null": "None"},
+        )
+        try:
+            payload = ast.literal_eval(python_like_text)
+        except (SyntaxError, ValueError) as exc:
+            last_error = exc
+            snippet = raw_text[:400].replace("\n", "\\n")
+            raise RuntimeError(f"豆包返回的评分结果不是有效 JSON：{exc}；原始片段：{snippet}") from exc
 
     if not isinstance(payload, dict):
-        raise RuntimeError("豆包返回的评分结果不是 JSON 对象。")
+        detail = f"：{last_error}" if last_error else "。"
+        raise RuntimeError(f"豆包返回的评分结果不是 JSON 对象{detail}")
     return payload
 
 

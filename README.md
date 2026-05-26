@@ -75,7 +75,7 @@ v0.60
 48. 封面图的菜名竖排现在进一步收紧为“画布中轴单列竖排 + 中间整条标题通道保留”；背景主菜和餐盘必须主动避让中轴并退到下半部或左右下角，避免再出现菜名跑到左侧的封面。
 49. 主流程与单独调试生图链路现在都改为单文件夹输出：程序会在 output 下按“日期时间戳_菜品名”创建目录，并把图解文案、图解 prompt、封面 prompt、图片、revised prompt、抖音图文标题与图文描述全部放进同一个目录，便于直接交付和打包。
 50. 图解01 首图标题区现在进一步收紧为“沿同一条画面正中竖线向下堆叠的中心柱布局”；image_generator.py 已新增首图 prompt 专用中轴校验，若最终 prompt 没写出中轴、中心点、左右留白对称与禁止偏左这类硬约束，会直接拦截并切回本地首图模板。
-51. 封面图默认尺寸现已改为 2160x3840。这一尺寸保持竖版 9:16，且满足 OpenAI 官方当前对 gpt-image-2 的尺寸约束：最长边不超过 3840、宽高都必须是 16 的倍数、总像素不超过 8294400。程序现在会在本地先校验图片尺寸配置，像旧的 1080x1920 这类非法值会在请求 API 前直接报错。
+51. 封面图默认尺寸现已收口为 864x1536。这一尺寸继续保持竖版 9:16，且满足 OpenAI 官方当前对 gpt-image-2 的尺寸约束：最长边不超过 3840、宽高都必须是 16 的倍数、总像素不超过 8294400。当前封面像素规格已调整到与其它图接近的中等尺寸，不再单独拉到满规格；程序仍会在本地先校验图片尺寸配置。
 52. tools/apply_photoshop_template_batch.py 现已收口为本地 Photoshop 批处理工具；会把指定目录中的 .jpg/.jpeg/.png 逐张替换进 PSD 模板，再直接调用本机 Photoshop 导出高质量 JPG 覆盖原图。
 53. 主流程默认会在全部 gpt-image-2 图片生成完后自动调用这套本地 Photoshop 链路；图层混合模式、文字层、纹理层、自然饱和度等视觉处理统一由 PSD 模板自身负责。
 54. config.env 里的 Photoshop 配置已收口为 PHOTOSHOP_AUTO_COMPOSITE、PHOTOSHOP_LOCAL_EXE、PHOTOSHOP_TEMPLATE_FILE、PHOTOSHOP_TEMPLATE_SMART_OBJECT_LAYER、PHOTOSHOP_JPEG_QUALITY、PHOTOSHOP_JOB_TIMEOUT_SECONDS；不再保留 Adobe/S3 云配置。

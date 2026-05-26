@@ -2499,7 +2499,7 @@ def get_cover_image_settings() -> dict[str, Any]:
     return {
         "model": os.getenv("OPENAI_COVER_IMAGE_MODEL", default_model).strip() or default_model,
         "size": validate_gpt_image_size(
-            os.getenv("OPENAI_COVER_IMAGE_SIZE", "2160x3840").strip() or "2160x3840",
+            os.getenv("OPENAI_COVER_IMAGE_SIZE", "864x1536").strip() or "864x1536",
             env_name="OPENAI_COVER_IMAGE_SIZE",
         ),
         "quality": os.getenv("OPENAI_COVER_IMAGE_QUALITY", default_quality).strip() or default_quality,
