@@ -7,7 +7,7 @@ import random
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from openai import OpenAI
 
@@ -29,6 +29,7 @@ DEFAULT_COLLECTION_HINT = "先收藏，想做时直接照着买照着做"
 DEFAULT_COLLECTION_COPY = "这张先收藏 原创新菜照着做更稳"
 DEFAULT_DYNAMIC_ACTION = "一双木筷从画面侧上方夹起一块主菜悬在半空 带轻微挂汁与热气"
 DEFAULT_REQUEST_RETRY_COUNT = 2
+DEFAULT_TEXT_REQUEST_RETRY_COUNT = 3
 DEFAULT_TEXT_PROVIDER = "doubao"
 DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-mini-260428"
 DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
@@ -2356,11 +2357,24 @@ def get_text_max_output_tokens(stage_name: str) -> int:
 
 def get_text_request_timeout_seconds() -> float:
     ensure_runtime_config_loaded()
-    timeout_text = os.getenv("OPENAI_TEXT_REQUEST_TIMEOUT_SECONDS", "120").strip() or "120"
+    timeout_text = os.getenv("OPENAI_TEXT_REQUEST_TIMEOUT_SECONDS", "300").strip() or "300"
     try:
         return float(timeout_text)
     except ValueError as exc:
         raise RuntimeError("OPENAI_TEXT_REQUEST_TIMEOUT_SECONDS 必须是数字。") from exc
+
+
+def get_text_request_retry_count() -> int:
+    ensure_runtime_config_loaded()
+    retry_text = os.getenv("TEXT_REQUEST_RETRY_COUNT", str(DEFAULT_TEXT_REQUEST_RETRY_COUNT)).strip() or str(DEFAULT_TEXT_REQUEST_RETRY_COUNT)
+    try:
+        retry_count = int(retry_text)
+    except ValueError as exc:
+        raise RuntimeError("TEXT_REQUEST_RETRY_COUNT 必须是整数。") from exc
+
+    if retry_count < 1:
+        raise RuntimeError("TEXT_REQUEST_RETRY_COUNT 必须大于等于 1。")
+    return retry_count
 
 
 def get_image_request_timeout_seconds() -> float:
@@ -2498,26 +2512,17 @@ def request_text_generation(
     stage_name: str,
 ) -> dict[str, str]:
     text_model = get_text_model()
-    fallback_model = get_text_fallback_model()
     request_timeout = get_text_request_timeout_seconds()
+    request_retry_count = get_text_request_retry_count()
     max_output_tokens = get_text_max_output_tokens(stage_name)
     temperature = get_text_temperature()
-    candidate_models = [text_model]
-    if fallback_model != text_model:
-        candidate_models.append(fallback_model)
 
     response = None
-    used_model = text_model
-    for model_index, current_model in enumerate(candidate_models, start=1):
-        used_model = current_model
-        if model_index == 1:
-            print(f"正在生成{stage_name}，调用文本模型：{current_model}")
-        else:
-            print(f"{stage_name}超时后切换备用文本模型：{current_model}")
-
+    print(f"正在生成{stage_name}，调用文本模型：{text_model}")
+    for attempt in range(1, request_retry_count + 1):
         try:
             response = client.chat.completions.create(
-                model=current_model,
+                model=text_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -2530,16 +2535,32 @@ def request_text_generation(
         except Exception as exc:
             if not is_timeout_error(exc):
                 raise
-            if model_index < len(candidate_models):
-                continue
-            raise
+            if attempt >= request_retry_count:
+                raise RuntimeError(f"{stage_name}文本接口连续 {request_retry_count} 次超时，已终止本轮流程。") from exc
+            print(f"{stage_name}文本接口超时，正在重试第 {attempt + 1}/{request_retry_count} 次...")
 
     content = extract_chat_text_output(response)
     if not content:
-        raise RuntimeError(f"{stage_name}阶段未获得有效文本输出。")
+        raise ValueError(f"{stage_name}阶段未获得有效文本输出。")
+
+
+def run_text_stage_with_validation_retry(stage_name: str, operation: Callable[[], Any]) -> Any:
+    request_retry_count = get_text_request_retry_count()
+    last_error: ValueError | None = None
+
+    for attempt in range(1, request_retry_count + 1):
+        try:
+            return operation()
+        except ValueError as exc:
+            last_error = exc
+            if attempt >= request_retry_count:
+                break
+            print(f"{stage_name}内容异常，正在重新调用第 {attempt + 1}/{request_retry_count} 次...")
+
+    raise RuntimeError(f"{stage_name}连续 {request_retry_count} 次内容异常，已终止本轮流程。") from last_error
 
     return {
-        "model": used_model,
+        "model": text_model,
         "content": content,
     }
 
@@ -2948,7 +2969,7 @@ def normalize_publish_title(
 ) -> str:
     raw_title = " ".join(title.splitlines()).strip()
     if not raw_title:
-        raw_title = infer_publish_title_highlight(dish_name=dish_name, source_text=source_text, notes=notes)
+        raise ValueError("图文标题为空。")
 
     raw_title = raw_title.replace("!", "！").replace(",", "，")
     raw_title = raw_title.replace("阿叶造新菜", " ")
@@ -2962,7 +2983,7 @@ def normalize_publish_title(
 
     highlight = sanitize_publish_title_highlight(highlight_source)
     if not highlight:
-        highlight = infer_publish_title_highlight(dish_name=dish_name, source_text=source_text, notes=notes)
+        raise ValueError("图文标题卖点为空或无效。")
 
     return f"{dish_name}，{highlight}！"
 
@@ -3140,8 +3161,9 @@ def normalize_publish_copy(
     )
 
     description_body, parsed_tags = split_description_body_and_tags(description)
-    fallback = build_local_publish_copy(dish_name=dish_name, source_text=source_text, notes=notes)
-    normalized_body = description_body or fallback["description"].splitlines()[0]
+    normalized_body = description_body.strip()
+    if not normalized_body:
+        raise ValueError("图文描述正文为空。")
 
     required_topics = get_required_publish_topics()
     normalized_tags: list[str] = []
@@ -3192,7 +3214,7 @@ def generate_publish_copy_assets(
     output_name = output_name or dish_name
     output_dir = output_dir or build_run_output_dir(timestamp, dish_name)
 
-    try:
+    def build_publish_copy_result() -> tuple[dict[str, str], dict[str, str]]:
         publish_result = request_text_generation(
             client=client,
             system_prompt=build_publish_copy_system_prompt(fixed_dish_name=dish_name),
@@ -3213,19 +3235,9 @@ def generate_publish_copy_assets(
             title=title,
             description=description,
         )
-    except Exception as exc:
-        if not is_timeout_error(exc) and not isinstance(exc, ValueError):
-            raise
-        normalized = build_local_publish_copy(
-            dish_name=dish_name,
-            source_text=source_text,
-            notes=notes,
-        )
-        publish_result = {
-            "model": "local-timeout-fallback",
-            "content": f"【图文标题】\n{normalized['title']}\n\n【图文描述】\n{normalized['description']}",
-        }
-        print("抖音发布文案文本接口超时或格式异常，已切换为本地模板兜底。")
+        return publish_result, normalized
+
+    publish_result, normalized = run_text_stage_with_validation_retry("抖音发布文案", build_publish_copy_result)
 
     title_file = save_text_output(
         content=normalized["title"],
@@ -3363,9 +3375,8 @@ def generate_recipe_text_assets_from_idea_file(
 
     if text_client is None:
         text_client = build_text_client()
-    fallback_bundle: dict[str, Any] | None = None
 
-    try:
+    def build_recipe_text_result() -> tuple[dict[str, str], str]:
         recipe_result = request_text_generation(
             client=text_client,
             system_prompt=build_recipe_system_prompt(
@@ -3388,20 +3399,9 @@ def generate_recipe_text_assets_from_idea_file(
             recipe_text=recipe_text,
             fixed_dish_name=idea_payload["dish_idea"],
         )
-    except Exception as exc:
-        if not is_timeout_error(exc) and not isinstance(exc, ValueError):
-            raise
-        fallback_bundle = build_local_recipe_bundle(
-            dish_name=idea_payload["dish_idea"],
-            notes=idea_payload["notes"],
-            ad_copy=ad_copy,
-        )
-        recipe_text = render_recipe_bundle_text(fallback_bundle)
-        recipe_result = {
-            "model": "local-timeout-fallback",
-            "content": recipe_text,
-        }
-        print("创意菜谱文本接口超时或内容异常，已切换为本地模板兜底。")
+        return recipe_result, recipe_text
+
+    recipe_result, recipe_text = run_text_stage_with_validation_retry("创意菜谱", build_recipe_text_result)
 
     generated_dish_name = idea_payload["dish_idea"]
     run_output_dir = build_run_output_dir(timestamp, generated_dish_name)
@@ -3410,7 +3410,6 @@ def generate_recipe_text_assets_from_idea_file(
         fixed_dish_name=generated_dish_name,
         ad_copy=ad_copy,
     )
-    fallback_bundle = guide_bundle
     creative_file = save_text_output(
         content=recipe_text,
         output_dir=run_output_dir,
@@ -3420,7 +3419,7 @@ def generate_recipe_text_assets_from_idea_file(
     )
     print(f"创意菜谱已保存：{creative_file}")
 
-    try:
+    def build_page01_prompt_result() -> tuple[dict[str, str], str]:
         prompt_result = request_text_generation(
             client=text_client,
             system_prompt=page01_recipe.build_page01_prompt_system_prompt(
@@ -3438,15 +3437,9 @@ def generate_recipe_text_assets_from_idea_file(
             fixed_dish_name=generated_dish_name,
             bundle=guide_bundle,
         )
-    except Exception as exc:
-        if not is_timeout_error(exc) and not isinstance(exc, ValueError):
-            raise
-        image_prompt = page01_recipe.build_local_page01_prompt(fallback_bundle)
-        prompt_result = {
-            "model": "local-timeout-fallback",
-            "content": image_prompt,
-        }
-        print("文生图 prompt 文本接口超时或内容异常，已切换为本地模板兜底。")
+        return prompt_result, image_prompt
+
+    prompt_result, image_prompt = run_text_stage_with_validation_retry("文生图prompt", build_page01_prompt_result)
 
     prompt_file = save_text_output(
         content=image_prompt,
@@ -3468,13 +3461,13 @@ def generate_recipe_text_assets_from_idea_file(
         output_prompt_dir=run_output_dir,
         bundle=guide_bundle,
         request_text_generation=request_text_generation,
+        run_text_stage_with_validation_retry=run_text_stage_with_validation_retry,
         save_text_output=save_text_output,
-        is_timeout_error=is_timeout_error,
         validate_page_text_content=validate_guide_page_text_content,
         validate_page_prompt_content=validate_guide_page_prompt_content,
     )
 
-    try:
+    def build_cover_prompt_result() -> tuple[dict[str, str], str]:
         vertical_dish_name = cover_page.format_vertical_dish_name(generated_dish_name)
         cover_prompt_result = request_text_generation(
             client=text_client,
@@ -3496,15 +3489,9 @@ def generate_recipe_text_assets_from_idea_file(
             fixed_dish_name=generated_dish_name,
             bundle=guide_bundle,
         )
-    except Exception as exc:
-        if not is_timeout_error(exc) and not isinstance(exc, ValueError):
-            raise
-        cover_prompt = cover_page.build_local_cover_prompt(fallback_bundle)
-        cover_prompt_result = {
-            "model": "local-timeout-fallback",
-            "content": cover_prompt,
-        }
-        print("封面 prompt 文本接口超时或内容异常，已切换为本地模板兜底。")
+        return cover_prompt_result, cover_prompt
+
+    cover_prompt_result, cover_prompt = run_text_stage_with_validation_retry("封面prompt", build_cover_prompt_result)
 
     cover_name = cover_page.build_cover_output_name(generated_dish_name)
     cover_prompt_file = save_text_output(

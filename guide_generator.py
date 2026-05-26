@@ -9,7 +9,6 @@ from guide_pages.shared import (
     build_guide_page_image_user_prompt,
     build_guide_page_text_system_prompt,
     build_guide_page_text_user_prompt,
-    build_local_guide_page_image_prompt,
     format_page_output_name,
 )
 
@@ -25,8 +24,8 @@ def generate_guide_pages(
     output_prompt_dir: Path,
     bundle: dict[str, Any],
     request_text_generation: Callable[..., dict[str, str]],
+    run_text_stage_with_validation_retry: Callable[[str, Callable[[], Any]], Any],
     save_text_output: Callable[..., str],
-    is_timeout_error: Callable[[Exception], bool],
     validate_page_text_content: Callable[[str, int, str], str],
     validate_page_prompt_content: Callable[[str, str, str], str],
 ) -> list[dict[str, Any]]:
@@ -37,7 +36,7 @@ def generate_guide_pages(
         page_stage_prefix = f"图解{page_definition.page_number:02d}"
         page_output_name = format_page_output_name(dish_name, page_definition)
 
-        try:
+        def build_page_text_result() -> tuple[dict[str, str], str]:
             page_text_result = request_text_generation(
                 client=text_client,
                 system_prompt=build_guide_page_text_system_prompt(
@@ -56,15 +55,9 @@ def generate_guide_pages(
                 page_definition.page_number,
                 page_definition.page_name,
             )
-        except Exception as exc:
-            if not is_timeout_error(exc) and not isinstance(exc, ValueError):
-                raise
-            page_text = page_module.build_local_page_text(bundle)
-            page_text_result = {
-                "model": "local-timeout-fallback",
-                "content": page_text,
-            }
-            print(f"{page_stage_prefix}文案文本接口超时或内容异常，已切换为本地模板兜底。")
+            return page_text_result, page_text
+
+        page_text_result, page_text = run_text_stage_with_validation_retry(f"{page_stage_prefix}文案", build_page_text_result)
 
         page_text_file = save_text_output(
             content=page_text,
@@ -75,7 +68,7 @@ def generate_guide_pages(
         )
         print(f"{page_stage_prefix}文案已保存：{page_text_file}")
 
-        try:
+        def build_page_prompt_result() -> tuple[dict[str, str], str]:
             page_prompt_result = request_text_generation(
                 client=text_client,
                 system_prompt=build_guide_page_image_system_prompt(
@@ -97,20 +90,9 @@ def generate_guide_pages(
                 dish_name,
                 f"{page_stage_prefix}prompt",
             )
-        except Exception as exc:
-            if not is_timeout_error(exc) and not isinstance(exc, ValueError):
-                raise
-            page_prompt = build_local_guide_page_image_prompt(
-                page_definition=page_definition,
-                fixed_dish_name=dish_name,
-                page_text=page_text,
-                ad_copy=bundle["ad_copy"],
-            )
-            page_prompt_result = {
-                "model": "local-timeout-fallback",
-                "content": page_prompt,
-            }
-            print(f"{page_stage_prefix} prompt 文本接口超时或内容异常，已切换为本地模板兜底。")
+            return page_prompt_result, page_prompt
+
+        page_prompt_result, page_prompt = run_text_stage_with_validation_retry(f"{page_stage_prefix}prompt", build_page_prompt_result)
 
         page_prompt_file = save_text_output(
             content=page_prompt,
