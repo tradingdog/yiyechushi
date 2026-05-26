@@ -2948,8 +2948,46 @@ def validate_guide_page_prompt_content(prompt_text: str, fixed_dish_name: str, s
     return normalized
 
 
+def append_cover_hard_requirements(prompt_text: str, fixed_dish_name: str, bundle: dict[str, Any]) -> str:
+    normalized = prompt_text.strip()
+    additions: list[str] = []
+    vertical_dish_name = cover_page.format_vertical_dish_name(fixed_dish_name)
+
+    if not re.search(r"竖版\s*9:16", normalized):
+        additions.append("整张图必须是竖版9:16短视频封面图，不是2:3，也不是其它比例。")
+    if not re.search(r"(画布正中|中轴|正中竖轴|正中竖线).*(标题通道|单列竖排|竖向标题通道)", normalized):
+        additions.append(cover_page.build_cover_centered_vertical_title_requirement(fixed_dish_name, vertical_dish_name))
+    if not re.search(r"(背景主菜|餐盘|背景).*(避开|退到).*(中轴|下半部|右下|左下)", normalized):
+        additions.append("背景主菜和餐盘必须主动避开中轴标题通道，主要退到中下段、下半部、右下或左下，不能把竖排菜名挤到侧边。")
+
+    required_scene_lines = [
+        f"器皿与摆盘必须沿用：{bundle['plate']}",
+        f"桌面与环境必须沿用：{bundle['table_setting']}",
+        f"背景陪衬必须沿用：{bundle['background_props']}",
+        f"主画面食材必须沿用：{bundle['main_food']}",
+        f"酱汁或汤汁状态必须沿用：{bundle['sauce']}",
+        f"质感重点必须沿用：{bundle['texture']}",
+        f"色彩点缀必须沿用：{bundle['colors']}",
+    ]
+    compact_normalized = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", normalized)
+    missing_scene_lines = [
+        line
+        for line in required_scene_lines
+        if re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", line.split("：", 1)[1]) not in compact_normalized
+    ]
+    if missing_scene_lines:
+        additions.append("封面背景必须沿用首图同一道菜的同场景信息，不要改写成另一套模板：")
+        additions.extend(missing_scene_lines)
+
+    if not additions:
+        return normalized
+
+    return normalized + "\n\n硬性补充约束：\n" + "\n".join(additions)
+
+
 def validate_cover_prompt_content(prompt_text: str, fixed_dish_name: str, bundle: dict[str, Any]) -> str:
     normalized = validate_image_prompt_content(prompt_text, fixed_dish_name=fixed_dish_name, stage_name="封面prompt")
+    normalized = append_cover_hard_requirements(normalized, fixed_dish_name=fixed_dish_name, bundle=bundle)
     if not re.search(r"竖版\s*9:16", normalized):
         raise ValueError("封面prompt 缺少 9:16 画幅约束。")
     if not re.search(r"(画布正中|中轴|正中竖轴|正中竖线).*(标题通道|单列竖排|竖向标题通道)", normalized):
@@ -2962,6 +3000,9 @@ def validate_cover_prompt_content(prompt_text: str, fixed_dish_name: str, bundle
         bundle.get("table_setting", ""),
         bundle.get("background_props", ""),
         bundle.get("main_food", ""),
+        bundle.get("sauce", ""),
+        bundle.get("texture", ""),
+        bundle.get("colors", ""),
     ]
     compact_normalized = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", normalized)
     missing_scene_values = [
