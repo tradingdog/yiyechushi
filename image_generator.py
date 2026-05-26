@@ -9,7 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from openai import OpenAI
+import httpx
+from openai import APIConnectionError, APITimeoutError, InternalServerError, OpenAI
 
 from guide_generator import generate_guide_pages
 from guide_pages import cover_page, page01_recipe
@@ -33,6 +34,7 @@ DEFAULT_TEXT_REQUEST_RETRY_COUNT = 3
 DEFAULT_TEXT_PROVIDER = "doubao"
 DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-mini-260428"
 DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+DEFAULT_TEXT_CONNECT_TIMEOUT_SECONDS = 20.0
 DEFAULT_OPENAI_IMAGE_MODEL = "gpt-image-2-2026-04-21"
 DEFAULT_AUTO_DISH_GENERATION_ENABLED = True
 DEFAULT_AUTO_DISH_REGION_CODE = "0"
@@ -743,6 +745,11 @@ def build_image_client() -> OpenAI:
     return OpenAI(api_key=api_key, timeout=request_timeout)
 
 
+def build_text_http_timeout(read_timeout: float) -> httpx.Timeout:
+    phase_timeout = min(read_timeout, DEFAULT_TEXT_CONNECT_TIMEOUT_SECONDS)
+    return httpx.Timeout(connect=phase_timeout, read=read_timeout, write=phase_timeout, pool=phase_timeout)
+
+
 def get_text_provider() -> str:
     ensure_runtime_config_loaded()
     provider = os.getenv("TEXT_API_PROVIDER", DEFAULT_TEXT_PROVIDER).strip().lower()
@@ -754,6 +761,7 @@ def get_text_provider() -> str:
 def build_text_client() -> OpenAI:
     ensure_runtime_config_loaded()
     request_timeout = get_text_request_timeout_seconds()
+    http_timeout = build_text_http_timeout(request_timeout)
     provider = get_text_provider()
 
     if provider == "doubao":
@@ -761,12 +769,12 @@ def build_text_client() -> OpenAI:
         if not doubao_api_key:
             raise RuntimeError("未找到 DOUBAO_API_KEY，请先在 .env 文件中配置。")
         base_url = os.getenv("DOUBAO_BASE_URL", DEFAULT_DOUBAO_BASE_URL).strip() or DEFAULT_DOUBAO_BASE_URL
-        return OpenAI(api_key=doubao_api_key, base_url=base_url, timeout=request_timeout)
+        return OpenAI(api_key=doubao_api_key, base_url=base_url, timeout=http_timeout)
 
     openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not openai_api_key:
         raise RuntimeError("未找到 OPENAI_API_KEY，请先在 .env 文件中配置。")
-    return OpenAI(api_key=openai_api_key, timeout=request_timeout)
+    return OpenAI(api_key=openai_api_key, timeout=http_timeout)
 
 
 def get_request_timeout_seconds() -> float:
@@ -779,7 +787,49 @@ def get_request_timeout_seconds() -> float:
 
 
 def is_timeout_error(exc: Exception) -> bool:
-    return "timed out" in str(exc).lower()
+    if isinstance(exc, (httpx.TimeoutException, APITimeoutError)):
+        return True
+    return "timed out" in str(exc).lower() or "timeout" in str(exc).lower()
+
+
+def close_openai_client(client: OpenAI | None) -> None:
+    if client is None:
+        return
+
+    close_method = getattr(client, "close", None)
+    if callable(close_method):
+        try:
+            close_method()
+        except Exception:
+            pass
+
+
+def is_retriable_text_request_error(exc: Exception) -> bool:
+    if is_timeout_error(exc):
+        return True
+
+    if isinstance(exc, (httpx.TransportError, APIConnectionError, InternalServerError)):
+        return True
+
+    message = str(exc).lower()
+    return any(
+        token in message
+        for token in (
+            "connection reset",
+            "connection aborted",
+            "connection refused",
+            "server disconnected",
+            "remote protocol error",
+            "unexpected eof",
+            "temporarily unavailable",
+        )
+    )
+
+
+def get_text_request_error_label(exc: Exception) -> str:
+    if is_timeout_error(exc):
+        return "超时"
+    return "连接异常"
 
 
 def contains_any(text: str, keywords: Sequence[str]) -> bool:
@@ -2520,8 +2570,9 @@ def request_text_generation(
     response = None
     print(f"正在生成{stage_name}，调用文本模型：{text_model}")
     for attempt in range(1, request_retry_count + 1):
+        request_client = client if attempt == 1 else build_text_client()
         try:
-            response = client.chat.completions.create(
+            response = request_client.chat.completions.create(
                 model=text_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -2533,11 +2584,15 @@ def request_text_generation(
             )
             break
         except Exception as exc:
-            if not is_timeout_error(exc):
+            if not is_retriable_text_request_error(exc):
                 raise
+            error_label = get_text_request_error_label(exc)
             if attempt >= request_retry_count:
-                raise RuntimeError(f"{stage_name}文本接口连续 {request_retry_count} 次超时，已终止本轮流程。") from exc
-            print(f"{stage_name}文本接口超时，正在重试第 {attempt + 1}/{request_retry_count} 次...")
+                raise RuntimeError(f"{stage_name}文本接口连续 {request_retry_count} 次{error_label}，已终止本轮流程。") from exc
+            print(f"{stage_name}文本接口{error_label}，正在重试第 {attempt + 1}/{request_retry_count} 次...")
+        finally:
+            if request_client is not client:
+                close_openai_client(request_client)
 
     content = extract_chat_text_output(response)
     if not content:
