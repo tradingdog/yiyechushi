@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-v0.79
+v0.81
 
 ## 使用方式
 
@@ -22,6 +22,7 @@ v0.79
 12. 默认情况下，主流程会先生成图解01到图解06并先做一次 publish 筛图，再用筛中的首图重写封面 prompt、生成封面并单独筛封面；若 PHOTOSHOP_AUTO_COMPOSITE=1，则最后只对 publish 目录里的入选图片执行 Photoshop 合成。若只想关掉 publish 这一步，把 config.env 里的 PUBLISH_AUTO_SELECT 改成 2。
 13. 如需手动指定 1 个或多个必须保留在最终 5 个抖音话题里的标签，修改 config.env 里的 PUBLISH_REQUIRED_TOPICS；多个话题可用空格、逗号、分号或换行分隔，写不写 # 都可以。
 14. 如需把 publish 目录里的图和对应标题/描述自动投喂到抖音创作者页，运行 tools/douyin_publish.py；若当前没有可接管的调试浏览器，脚本会自动拉起一个独立的 Chrome 自动化窗口。
+15. 如需手动先打开一个带 9222 远程调试端口的独立 Chrome，直接双击根目录里的 run_douyin_chrome_debug.bat；它会复用 tools/chrome_automation_profile 资料目录，便于后续 tools/douyin_publish.py 直接接管。命令行预检可用 run_douyin_chrome_debug.bat --check。
 
 ## 当前状态
 
@@ -209,6 +210,8 @@ python tools/douyin_publish.py
 python tools/douyin_publish.py --dry-run
 python tools/douyin_publish.py output\某个目录
 python tools/douyin_publish.py output\某个目录 --cdp-url http://127.0.0.1:9222
+run_douyin_chrome_debug.bat
+run_douyin_chrome_debug.bat --check
 ```
 
 说明：
@@ -220,6 +223,7 @@ python tools/douyin_publish.py output\某个目录 --cdp-url http://127.0.0.1:92
 6. 如果当前没有可接管的 Chrome 调试端口，脚本会自动拉起一个独立的自动化 Chrome，并使用 tools/chrome_automation_profile 作为独立资料目录，不会直接接管你当前已经打开的普通 Chrome 窗口。
 7. 这个独立自动化 Chrome 第一次使用时需要你手动登录一次抖音创作者中心；后续脚本会复用该资料目录，不用每次重新登录。
 8. 如果脚本提示当前自动化 Chrome 还没登录，那说明 publish 图片、标题和描述都已经识别成功，真正缺的是这个独立自动化 Chrome 的登录态，而不是本地素材问题。
+9. 如果你更习惯手动先把浏览器开好，再运行发布脚本，现在可以直接双击 run_douyin_chrome_debug.bat；它和 Python 脚本自动拉起浏览器时使用的是同一套 9222 端口与 tools/chrome_automation_profile 资料目录。
 
 ## 回归检查
 
