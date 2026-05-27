@@ -12,15 +12,21 @@ from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
-try:
-    from playwright.sync_api import Browser, Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
-except ImportError as exc:
-    raise SystemExit("未安装 playwright，请先执行 pip install -r requirements.txt。") from exc
-
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+
+from script_logging import setup_script_logging
+
+if __name__ == "__main__":
+    setup_script_logging(__file__)
+
+try:
+    from playwright.sync_api import Browser, Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
+except ImportError as exc:
+    raise SystemExit("未安装 playwright，请先执行 pip install -r requirements.txt。") from exc
 
 
 from image_generator import ensure_runtime_config_loaded, get_required_publish_topics, split_description_body_and_tags  # noqa: E402

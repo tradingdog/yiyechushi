@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from script_logging import setup_script_logging
+
+if __name__ == "__main__":
+    setup_script_logging(__file__)
+
 import base64
 import json
 import os

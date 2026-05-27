@@ -1,5 +1,10 @@
 from pathlib import Path
 
+from script_logging import setup_script_logging
+
+if __name__ == "__main__":
+    setup_script_logging(__file__)
+
 from image_generator import generate_recipe_assets_from_idea_file
 
 

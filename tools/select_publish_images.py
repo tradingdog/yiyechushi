@@ -21,6 +21,12 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 
+from script_logging import setup_script_logging
+
+if __name__ == "__main__":
+    setup_script_logging(__file__)
+
+
 from image_generator import (  # noqa: E402
     DEFAULT_DOUBAO_BASE_URL,
     DEFAULT_DOUBAO_TEXT_MODEL,

@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-v0.81
+v0.82
 
 ## 使用方式
 
@@ -23,6 +23,7 @@ v0.81
 13. 如需手动指定 1 个或多个必须保留在最终 5 个抖音话题里的标签，修改 config.env 里的 PUBLISH_REQUIRED_TOPICS；多个话题可用空格、逗号、分号或换行分隔，写不写 # 都可以。
 14. 如需把 publish 目录里的图和对应标题/描述自动投喂到抖音创作者页，运行 tools/douyin_publish.py；若当前没有可接管的调试浏览器，脚本会自动拉起一个独立的 Chrome 自动化窗口。
 15. 如需手动先打开一个带 9222 远程调试端口的独立 Chrome，直接双击根目录里的 run_douyin_chrome_debug.bat；它会复用 tools/chrome_automation_profile 资料目录，便于后续 tools/douyin_publish.py 直接接管。命令行预检可用 run_douyin_chrome_debug.bat --check。
+16. v0.82 起，主流程、图片工具、发布工具和独立 Chrome 启动脚本都会在根目录 logs 下按“时间戳_脚本名_pid.log”写入新日志文件；每运行一次脚本都会新建一份，便于排查问题。
 
 ## 当前状态
 
@@ -224,6 +225,7 @@ run_douyin_chrome_debug.bat --check
 7. 这个独立自动化 Chrome 第一次使用时需要你手动登录一次抖音创作者中心；后续脚本会复用该资料目录，不用每次重新登录。
 8. 如果脚本提示当前自动化 Chrome 还没登录，那说明 publish 图片、标题和描述都已经识别成功，真正缺的是这个独立自动化 Chrome 的登录态，而不是本地素材问题。
 9. 如果你更习惯手动先把浏览器开好，再运行发布脚本，现在可以直接双击 run_douyin_chrome_debug.bat；它和 Python 脚本自动拉起浏览器时使用的是同一套 9222 端口与 tools/chrome_automation_profile 资料目录。
+10. v0.82 起，运行 main.py、image_generator.py 和 tools 目录下各个可执行 Python 脚本时，终端输出会同步写入根目录 logs；日志文件名会带时间戳、脚本名和进程号，避免多次运行互相覆盖。
 
 ## 回归检查
 

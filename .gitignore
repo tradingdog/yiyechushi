@@ -4,6 +4,7 @@ __pycache__/
 image/
 touxiang/
 output/
+logs/
 tools/chrome_automation_profile/
 tools/chrome_manual_cdp/
 tools/.tmp_*.png
