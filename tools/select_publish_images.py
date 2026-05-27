@@ -47,7 +47,6 @@ SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 DEFAULT_PUBLISH_DIR_NAME = "publish"
 DEFAULT_REPORT_FILE_NAME = "publish_selection_report.json"
 DEFAULT_SUMMARY_FILE_NAME = "publish_selection_report.txt"
-DEFAULT_REGEN_WORK_DIR_NAME = "_publish_regen_cache"
 DEFAULT_TITLE_RETRY_LIMIT = 3
 TITLE_CENTERING_REQUIRED_PAGE_TYPES = {"page01", "guide_page"}
 TITLE_CENTERING_HARD_ISSUE_PATTERN = re.compile(
@@ -266,7 +265,7 @@ def encode_image_as_data_url(image_path: Path) -> str:
 
 
 def title_center_offset_threshold(group: ImageGroup) -> int:
-    return 1 if group.page_type == "page01" else 2
+    return 2 if group.page_type == "page01" else 3
 
 
 def encode_image_with_center_guide_data_url(image_path: Path) -> str:
@@ -686,17 +685,23 @@ def candidate_title_centering_pass(candidate: dict[str, Any], group: ImageGroup)
     if not requires_title_centering(group):
         return True
 
+    threshold = title_center_offset_threshold(group)
     local_offset_percent = parse_optional_int(candidate.get("local_title_center_offset_percent"))
-    if local_offset_percent is not None:
-        return abs(local_offset_percent) <= title_center_offset_threshold(group)
-
-    offset_percent = parse_optional_int(candidate.get("title_center_offset_percent"))
-    if offset_percent is not None:
-        return abs(offset_percent) <= title_center_offset_threshold(group)
-
+    ai_offset_percent = parse_optional_int(candidate.get("title_center_offset_percent"))
     explicit = parse_optional_bool(candidate.get("title_centering_pass"))
+
+    # 本地像素估算容易受描边、装饰笔画和副标题干扰；只要 AI 或任一偏移估算明确通过，就视为通过。
+    if local_offset_percent is not None and abs(local_offset_percent) <= threshold:
+        return True
+
+    if ai_offset_percent is not None and abs(ai_offset_percent) <= threshold:
+        return True
+
     if explicit is not None:
         return explicit
+
+    if local_offset_percent is not None or ai_offset_percent is not None:
+        return False
 
     hard_issues = normalize_text_list(candidate.get("hard_issues"))
     if any(TITLE_CENTERING_HARD_ISSUE_PATTERN.search(issue) for issue in hard_issues):
@@ -1023,7 +1028,6 @@ def regenerate_group_candidate(
     *,
     group: ImageGroup,
     input_dir: Path,
-    regeneration_dir: Path,
     image_client: OpenAI,
 ) -> dict[str, Any]:
     prompt_file = find_group_prompt_file(group, input_dir)
@@ -1040,10 +1044,10 @@ def regenerate_group_candidate(
         stage_name=f"{group.display_name} 标题居中补生图",
     )
 
-    start_index = get_next_group_image_index(group, regeneration_dir)
+    start_index = get_next_group_image_index(group, input_dir)
     saved_paths = save_regenerated_image_items(
         group,
-        save_dir=regeneration_dir,
+        save_dir=input_dir,
         image_items=image_items[:1],
         start_index=start_index,
     )
@@ -1075,7 +1079,6 @@ def evaluate_group_with_regeneration(
     image_client: OpenAI | None,
     settings: ReviewSettings,
     group: ImageGroup,
-    regeneration_dir: Path,
 ) -> tuple[ImageGroup, dict[str, Any], OpenAI | None]:
     current_group = group
     regeneration_attempts: list[dict[str, Any]] = []
@@ -1106,7 +1109,6 @@ def evaluate_group_with_regeneration(
             generated = regenerate_group_candidate(
                 group=current_group,
                 input_dir=settings.input_dir,
-                regeneration_dir=regeneration_dir,
                 image_client=image_client,
             )
         except Exception as exc:
@@ -1142,10 +1144,6 @@ def evaluate_group_with_regeneration(
 
 def run_publish_selection(settings: ReviewSettings, groups: list[ImageGroup] | None = None) -> dict[str, Any]:
     review_client = build_review_client(settings)
-    regeneration_dir = settings.input_dir / DEFAULT_REGEN_WORK_DIR_NAME
-    if regeneration_dir.exists():
-        shutil.rmtree(regeneration_dir, ignore_errors=True)
-    regeneration_dir.mkdir(parents=True, exist_ok=True)
 
     if groups is None:
         groups = collect_image_groups(settings.input_dir)
@@ -1154,44 +1152,40 @@ def run_publish_selection(settings: ReviewSettings, groups: list[ImageGroup] | N
 
     report_groups: list[dict[str, Any]] = []
     image_client: OpenAI | None = None
-    try:
-        for group in groups:
-            resolved_group, result, image_client = evaluate_group_with_regeneration(
-                review_client=review_client,
-                image_client=image_client,
-                settings=settings,
-                group=group,
-                regeneration_dir=regeneration_dir,
-            )
+    for group in groups:
+        resolved_group, result, image_client = evaluate_group_with_regeneration(
+            review_client=review_client,
+            image_client=image_client,
+            settings=settings,
+            group=group,
+        )
 
-            if result.get("selection_blocked"):
-                result["selected_output_path"] = ""
-                report_groups.append(result)
-                print(f"未选入 publish：{resolved_group.display_name} -> {result.get('selection_blocked_reason', '')}")
-                continue
-
-            winner_image_name = str(result.get("winner_image_name", "")).strip()
-            if not winner_image_name:
-                raise RuntimeError(f"评审结果缺少胜出图片名：{resolved_group.display_name}")
-
-            winner_source = next((path for path in resolved_group.image_paths if path.name == winner_image_name), None)
-            if winner_source is None:
-                raise RuntimeError(f"找不到胜出图片文件：{resolved_group.display_name} -> {winner_image_name}")
-
-            if settings.dry_run:
-                moved_to = settings.publish_dir / winner_source.name
-                print(f"[dry-run] {resolved_group.display_name} -> {winner_source.name}")
-            else:
-                moved_to = move_or_copy_selected_image(
-                    source_file=winner_source,
-                    publish_dir=settings.publish_dir,
-                    copy_mode=settings.copy_mode,
-                )
-                print(f"已选中 {resolved_group.display_name} -> {moved_to.name}")
-            result["selected_output_path"] = str(moved_to)
+        if result.get("selection_blocked"):
+            result["selected_output_path"] = ""
             report_groups.append(result)
-    finally:
-        shutil.rmtree(regeneration_dir, ignore_errors=True)
+            print(f"未选入 publish：{resolved_group.display_name} -> {result.get('selection_blocked_reason', '')}")
+            continue
+
+        winner_image_name = str(result.get("winner_image_name", "")).strip()
+        if not winner_image_name:
+            raise RuntimeError(f"评审结果缺少胜出图片名：{resolved_group.display_name}")
+
+        winner_source = next((path for path in resolved_group.image_paths if path.name == winner_image_name), None)
+        if winner_source is None:
+            raise RuntimeError(f"找不到胜出图片文件：{resolved_group.display_name} -> {winner_image_name}")
+
+        if settings.dry_run:
+            moved_to = settings.publish_dir / winner_source.name
+            print(f"[dry-run] {resolved_group.display_name} -> {winner_source.name}")
+        else:
+            moved_to = move_or_copy_selected_image(
+                source_file=winner_source,
+                publish_dir=settings.publish_dir,
+                copy_mode=settings.copy_mode,
+            )
+            print(f"已选中 {resolved_group.display_name} -> {moved_to.name}")
+        result["selected_output_path"] = str(moved_to)
+        report_groups.append(result)
 
     report_payload = {
         "input_dir": str(settings.input_dir),
