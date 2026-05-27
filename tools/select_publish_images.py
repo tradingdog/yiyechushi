@@ -690,7 +690,15 @@ def candidate_title_centering_pass(candidate: dict[str, Any], group: ImageGroup)
     ai_offset_percent = parse_optional_int(candidate.get("title_center_offset_percent"))
     explicit = parse_optional_bool(candidate.get("title_centering_pass"))
 
-    # 本地像素估算容易受描边、装饰笔画和副标题干扰；只要 AI 或任一偏移估算明确通过，就视为通过。
+    # 首图只信豆包；本地像素估算仅保留在报告中作为辅助备注，不参与是否通过的硬门槛。
+    if group.page_type == "page01":
+        if explicit is not None:
+            return explicit
+
+        if ai_offset_percent is not None:
+            return abs(ai_offset_percent) <= threshold
+
+    # 图解页仍保留本地估算与 AI 的双重兜底，避免模型偶发漏判明显居中的标题。
     if local_offset_percent is not None and abs(local_offset_percent) <= threshold:
         return True
 
