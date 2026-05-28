@@ -604,6 +604,10 @@ def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
 - 食材名 数量
 - 食材名 数量
 
+配菜
+- 食材名 数量
+- 食材名 数量
+
 香料
 - 食材名 数量
 - 食材名 数量
@@ -647,7 +651,7 @@ def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
 11. 器皿与摆盘、桌面与环境、背景陪衬必须跟这道菜本身的烹饪方式、上桌逻辑、菜系气质和主料结构相匹配，不要默认每道菜都写成暖色陶盘、木托、木桌和几只小碗的同一套模板。
 12. 如果这道菜更适合砂锅、深口汤碗、长鱼盘、铸铁盘、搪瓷盘、石面台、水磨石台面、亚麻餐垫或简洁厨房台面，就直接写清楚，不要偷懒回到同一种木桌陶盘。
 13. 不同出餐结构的菜必须主动拉开场景，不要只是把同一套浅灰石面、水磨石、小圆碟、玻璃油壶模板换成黑盘或白盘后重复使用。煎鱼挂汁类、炸卷类、锅物类、冷盘类、铁板类的桌面材质、器皿逻辑和后景陪衬都应该明显不同。
-14. 食材分组要清楚，数量要合理，不能互相打架。
+14. 食材分组要清楚，数量要合理，不能互相打架；如果存在明显配菜，单独放进“配菜”分组，不要混在主料里。
 15. 3 到 5 步必须前后顺序清晰，适合普通人照做；不要为了凑数把一个动作拆成两步，也不要为了省步数漏掉决定成败的关键环节。
 16. 文字整体要像成熟抖音爆款图文海报，而不是教程论文或餐厅菜单。
 """.strip()
@@ -1527,7 +1531,7 @@ def replace_recipe_field_value(recipe_text: str, field_name: str, new_value: str
 
 
 def extract_main_ingredient_evidence(recipe_text: str) -> str:
-    match = re.search(r"【2人份食材】\s*主料\s*(.*?)\n\s*香料", recipe_text, flags=re.S)
+    match = re.search(r"【2人份食材】\s*主料\s*(.*?)(?:\n\s*配菜|\n\s*香料)", recipe_text, flags=re.S)
     if not match:
         return ""
 
@@ -1561,6 +1565,7 @@ def extract_recipe_ingredient_groups(recipe_text: str) -> dict[str, list[tuple[s
     ingredients_block = extract_recipe_named_block(recipe_text, "2人份食材")
     grouped_lines: dict[str, list[str]] = {
         "主料": [],
+        "配菜": [],
         "香料": [],
         "调味料": [],
     }
@@ -1625,8 +1630,9 @@ def extract_recipe_steps(recipe_text: str) -> list[dict[str, str]]:
         if title_match:
             if current_step:
                 steps.append(current_step)
+            normalized_title = title_match.group(1).strip().rstrip("：:;；，,.。")
             current_step = {
-                "title": title_match.group(1).strip(),
+                "title": normalized_title,
                 "content": "",
             }
             continue
@@ -1673,6 +1679,7 @@ def build_recipe_bundle_from_recipe_text(recipe_text: str, fixed_dish_name: str,
         "dynamic_action": extract_recipe_field_value(normalized_recipe_text, "动态动作") or base_bundle["dynamic_action"],
         "colors": extract_recipe_field_value(normalized_recipe_text, "色彩点缀") or base_bundle["colors"],
         "main_ingredients": ingredient_groups.get("主料") or base_bundle["main_ingredients"],
+        "side_ingredients": ingredient_groups.get("配菜") or base_bundle.get("side_ingredients", []),
         "spices": ingredient_groups.get("香料") or base_bundle["spices"],
         "seasonings": ingredient_groups.get("调味料") or base_bundle["seasonings"],
         "tips": parsed_tips or base_bundle["tips"],
@@ -2133,6 +2140,23 @@ def infer_main_ingredients(dish_name: str, notes: str) -> list[tuple[str, str]]:
     return dedupe_items(ingredients)
 
 
+def infer_side_ingredients(notes: str) -> list[tuple[str, str]]:
+    side_candidates: list[tuple[tuple[str, ...], tuple[str, str]]] = [
+        (("土豆",), ("土豆", "200g")),
+        (("青椒", "大青椒"), ("大青椒", "120g")),
+        (("洋葱",), ("洋葱", "120g")),
+        (("芹菜",), ("芹菜", "100g")),
+        (("胡萝卜",), ("胡萝卜", "100g")),
+        (("杏鲍菇",), ("杏鲍菇", "120g")),
+        (("香菇",), ("香菇", "100g")),
+    ]
+    sides: list[tuple[str, str]] = []
+    for keywords, item in side_candidates:
+        if any(keyword in notes for keyword in keywords):
+            sides.append(item)
+    return dedupe_items(sides)
+
+
 def infer_spice_ingredients(notes: str) -> list[tuple[str, str]]:
     spices: list[tuple[str, str]] = []
     if "葱花" in notes:
@@ -2283,6 +2307,7 @@ def build_local_recipe_bundle(dish_name: str, notes: str, ad_copy: str) -> dict[
         "dynamic_action": dynamic_action_description,
         "colors": infer_color_description(normalized_notes),
         "main_ingredients": infer_main_ingredients(dish_name, normalized_notes),
+        "side_ingredients": infer_side_ingredients(normalized_notes),
         "spices": infer_spice_ingredients(normalized_notes),
         "seasonings": infer_seasoning_ingredients(normalized_notes),
         "tips": infer_key_tips(dish_name, normalized_notes),
@@ -2293,6 +2318,7 @@ def build_local_recipe_bundle(dish_name: str, notes: str, ad_copy: str) -> dict[
 
 def render_recipe_bundle_text(bundle: dict[str, Any]) -> str:
     main_ingredients = "\n".join(f"- {name} {amount}" for name, amount in bundle["main_ingredients"])
+    side_ingredients = "\n".join(f"- {name} {amount}" for name, amount in bundle.get("side_ingredients", []))
     spices = "\n".join(f"- {name} {amount}" for name, amount in bundle["spices"])
     seasonings = "\n".join(f"- {name} {amount}" for name, amount in bundle["seasonings"])
     tips = "\n".join(f"{index}. {tip}" for index, tip in enumerate(bundle["tips"], start=1))
@@ -2322,6 +2348,8 @@ def render_recipe_bundle_text(bundle: dict[str, Any]) -> str:
 【2人份食材】
 主料
 {main_ingredients}
+
+{"配菜\n" + side_ingredients + "\n" if side_ingredients else ""}
 
 香料
 {spices}
@@ -3467,7 +3495,7 @@ def build_page01_required_prompt_fragments(bundle: dict[str, Any]) -> list[str]:
         bundle.get("dynamic_action", ""),
     ]
 
-    for group_name in ("main_ingredients", "spices", "seasonings"):
+    for group_name in ("main_ingredients", "side_ingredients", "spices", "seasonings"):
         for name, amount in bundle.get(group_name, []):
             fragments.append(f"{name} {amount}".strip())
 
@@ -3492,64 +3520,54 @@ def build_page01_required_prompt_fragments(bundle: dict[str, Any]) -> list[str]:
     return unique_fragments
 
 
-def append_page01_hard_requirements(prompt_text: str, bundle: dict[str, Any]) -> str:
+def collect_page01_prompt_risks(prompt_text: str) -> list[str]:
     normalized = prompt_text.strip()
-    additions: list[str] = []
-
-    has_strong_centerline = bool(
-        re.search(
-            r"(文字块|黄条块|中心点).*(同一条.*正中竖线|画面正中竖线上|落在同一条.*正中竖线|均在同一条.*正中竖线)",
-            normalized,
-        )
+    risks: list[str] = []
+    leakage_patterns = (
+        r"硬性补充约束",
+        r"文生图\s*prompt",
+        r"程序化字段标签",
+        r"页面名称",
+        r"内容卡\d",
     )
-    has_symmetric_margin = bool(re.search(r"(左右留白|左右边距|左右空间|左右视觉重量).*(对称|均衡)", normalized))
-    has_no_left_alignment = bool(re.search(r"(不要偏左|不能偏左|不允许.*左对齐|无左对齐短条|不要左对齐|避免偏左|不得偏左)", normalized))
+    for pattern in leakage_patterns:
+        if re.search(pattern, normalized, flags=re.I):
+            risks.append("提示词泄露了流程术语或程序化字段。")
+            break
 
-    if not has_symmetric_margin and not has_strong_centerline:
-        additions.append("顶部引导句、主标题和黄条卖点必须左右留白对称，整体视觉重量均衡，不能一边挤一边空。")
-    if not has_no_left_alignment and not has_strong_centerline:
-        additions.append("顶部引导句、主标题和黄条卖点任何一行都不要偏左，不要做左对齐短条，所有文字块都沿画面正中竖线居中堆叠。")
-
-    required_fragments = build_page01_required_prompt_fragments(bundle)
-    compact_normalized = re.sub(r"\s+", "", normalized)
-    missing_fragments = [fragment for fragment in required_fragments if re.sub(r"\s+", "", fragment) not in compact_normalized]
-    if missing_fragments:
-        additions.append("以下文案必须原样出现在首图版式中，不要改写、不换词、不省略：")
-        additions.extend(missing_fragments)
-
-    if not additions:
-        return normalized
-
-    return normalized + "\n\n硬性补充约束：\n" + "\n".join(additions)
+    return risks
 
 
 def validate_page01_prompt_content(prompt_text: str, fixed_dish_name: str, bundle: dict[str, Any]) -> str:
     normalized = validate_image_prompt_content(prompt_text, fixed_dish_name=fixed_dish_name, stage_name="文生图prompt")
-    normalized = append_page01_hard_requirements(normalized, bundle)
-    if not re.search(r"(中轴线|正中竖线|画面正中竖线)", normalized):
-        raise ValueError("文生图prompt 缺少首图标题中轴约束。")
-    if not re.search(r"(中心点|中心柱布局|居中堆叠|居中排布)", normalized):
-        raise ValueError("文生图prompt 缺少首图标题中心柱布局约束。")
+    if not re.search(r"(中轴线|正中竖线|画面正中竖线|居中堆叠|居中排布)", normalized):
+        raise ValueError("文生图prompt 缺少首图标题居中结构约束。")
 
-    has_strong_centerline = bool(
-        re.search(
-            r"(文字块|黄条块|中心点).*(同一条.*正中竖线|画面正中竖线上|落在同一条.*正中竖线|均在同一条.*正中竖线)",
-            normalized,
-        )
-    )
-    has_symmetric_margin = bool(re.search(r"(左右留白|左右边距|左右空间|左右视觉重量).*(对称|均衡)", normalized))
-    has_no_left_alignment = bool(re.search(r"(不要偏左|不能偏左|不允许.*左对齐|无左对齐短条|不要左对齐|避免偏左|不得偏左)", normalized))
+    risks = collect_page01_prompt_risks(normalized)
+    if risks:
+        raise ValueError(f"文生图prompt 视觉审校未通过：{risks[0]}")
 
-    if not has_symmetric_margin and not has_strong_centerline:
-        raise ValueError("文生图prompt 缺少首图标题左右留白对称约束。")
-    if not has_no_left_alignment and not has_strong_centerline:
-        raise ValueError("文生图prompt 缺少首图标题禁止偏左约束。")
+    required_groups: list[tuple[str, list[tuple[str, str]]]] = [
+        ("主料", bundle.get("main_ingredients", [])),
+        ("香料", bundle.get("spices", [])),
+        ("调味料", bundle.get("seasonings", [])),
+    ]
+    side_ingredients = bundle.get("side_ingredients", [])
+    if side_ingredients:
+        required_groups.append(("配菜", side_ingredients))
 
-    required_fragments = build_page01_required_prompt_fragments(bundle)
     compact_normalized = re.sub(r"\s+", "", normalized)
-    missing_fragments = [fragment for fragment in required_fragments if re.sub(r"\s+", "", fragment) not in compact_normalized]
-    if missing_fragments:
-        raise ValueError(f"文生图prompt 缺少首图关键文案：{missing_fragments[0]}")
+    for group_name, items in required_groups:
+        if not items:
+            continue
+        matched_count = 0
+        for name, amount in items:
+            fragment = re.sub(r"\s+", "", f"{name}{amount}")
+            if fragment and fragment in compact_normalized:
+                matched_count += 1
+        min_required = max(1, min(2, len(items)))
+        if matched_count < min_required:
+            raise ValueError(f"文生图prompt 缺少{group_name}关键信息，请补充后重试。")
 
     return normalized
 
@@ -4708,6 +4726,110 @@ def generate_recipe_text_assets_from_idea_file(
         ],
         "cover_prompt": cover_prompt,
         "cover_output_name": cover_name,
+        "timestamp": timestamp,
+    }
+
+
+def generate_page01_prompt_only_from_idea_file(
+    idea_file_name: str = "dish_name.txt",
+) -> dict[str, Any]:
+    idea_file = ROOT_DIR / idea_file_name
+    ad_copy = load_text_variable(DEFAULT_AD_COPY_FILE, "guanggaoyu")
+    style_reference = render_prompt_template(load_prompt(DEFAULT_PROMPT_FILE))
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    print(f"正在读取创意文件：{idea_file}")
+    idea_payload = load_dish_idea(idea_file)
+    print(f"本次菜品创意：{idea_payload['dish_idea']}")
+    if idea_payload["notes"]:
+        print(f"补充说明：{idea_payload['notes']}")
+
+    text_client = build_text_client()
+
+    def build_recipe_text_result() -> tuple[dict[str, str], str]:
+        recipe_result = request_text_generation(
+            client=text_client,
+            system_prompt=build_recipe_system_prompt(
+                ad_copy=ad_copy,
+                fixed_dish_name=idea_payload["dish_idea"],
+            ),
+            user_prompt=build_recipe_user_prompt(
+                dish_idea=idea_payload["dish_idea"],
+                notes=idea_payload["notes"],
+            ),
+            stage_name="创意菜谱",
+        )
+        recipe_text = normalize_recipe_text(
+            recipe_text=recipe_result["content"],
+            fixed_dish_name=idea_payload["dish_idea"],
+            ad_copy=ad_copy,
+            notes=idea_payload["notes"],
+        )
+        recipe_text = validate_recipe_text_content(
+            recipe_text=recipe_text,
+            fixed_dish_name=idea_payload["dish_idea"],
+        )
+        return recipe_result, recipe_text
+
+    recipe_result, recipe_text = run_text_stage_with_validation_retry("创意菜谱", build_recipe_text_result)
+
+    generated_dish_name = idea_payload["dish_idea"]
+    run_output_dir = build_run_output_dir(timestamp, generated_dish_name)
+    guide_bundle = build_recipe_bundle_from_recipe_text(
+        recipe_text=recipe_text,
+        fixed_dish_name=generated_dish_name,
+        ad_copy=ad_copy,
+    )
+    creative_file = save_text_output(
+        content=recipe_text,
+        output_dir=run_output_dir,
+        timestamp=timestamp,
+        base_name=generated_dish_name,
+        suffix=f"_{page01_recipe.FILE_LABEL}",
+    )
+    print(f"创意菜谱已保存：{creative_file}")
+
+    def build_page01_prompt_result() -> tuple[dict[str, str], str]:
+        prompt_result = request_text_generation(
+            client=text_client,
+            system_prompt=page01_recipe.build_page01_prompt_system_prompt(
+                style_reference=style_reference,
+                fixed_dish_name=generated_dish_name,
+            ),
+            user_prompt=page01_recipe.build_page01_prompt_user_prompt(
+                recipe_text=recipe_text,
+                fixed_dish_name=generated_dish_name,
+            ),
+            stage_name="文生图prompt",
+        )
+        image_prompt = validate_page01_prompt_content(
+            prompt_text=prompt_result["content"],
+            fixed_dish_name=generated_dish_name,
+            bundle=guide_bundle,
+        )
+        return prompt_result, image_prompt
+
+    prompt_result, image_prompt = run_text_stage_with_validation_retry("文生图prompt", build_page01_prompt_result)
+
+    prompt_file = save_text_output(
+        content=image_prompt,
+        output_dir=run_output_dir,
+        timestamp=timestamp,
+        base_name=generated_dish_name,
+        suffix=f"_{page01_recipe.FILE_LABEL}_文生图prompt",
+    )
+    print(f"图解01 文生图 prompt 已保存：{prompt_file}")
+
+    return {
+        "dish_idea": idea_payload["dish_idea"],
+        "dish_name": generated_dish_name,
+        "notes": idea_payload["notes"],
+        "text_model": recipe_result["model"],
+        "prompt_model": prompt_result["model"],
+        "creative_file": creative_file,
+        "prompt_file": prompt_file,
+        "prompt": image_prompt,
+        "output_root": str(run_output_dir),
         "timestamp": timestamp,
     }
 

@@ -100,6 +100,22 @@ def build_page01_step_section_title(steps: list[dict[str, Any]]) -> str:
     return f"{step_count}步出锅"
 
 
+def build_page01_ingredient_card_text(bundle: dict[str, Any]) -> str:
+    sections: list[str] = ["2人份食材", "", "主料"]
+    sections.extend(f"{name} {amount}".strip() for name, amount in bundle["main_ingredients"])
+
+    side_ingredients = bundle.get("side_ingredients", [])
+    if side_ingredients:
+        sections.extend(["", "配菜"])
+        sections.extend(f"{name} {amount}".strip() for name, amount in side_ingredients)
+
+    sections.extend(["", "香料"])
+    sections.extend(f"{name} {amount}".strip() for name, amount in bundle["spices"])
+    sections.extend(["", "调味料"])
+    sections.extend(f"{name} {amount}".strip() for name, amount in bundle["seasonings"])
+    return "\n".join(sections)
+
+
 def build_page01_prompt_system_prompt(style_reference: str, fixed_dish_name: str) -> str:
     return f"""
 你是阿叶造新菜账号的海报 prompt 导演。你的任务是把一份已经完成的中文菜谱文案，转换成一条给 gpt-image-2 使用的完整中文文生图 prompt。
@@ -133,7 +149,7 @@ def build_page01_prompt_system_prompt(style_reference: str, fixed_dish_name: str
 输出要求：
 1. 只输出一条可直接用于 gpt-image-2 的完整中文 prompt，不要加解释。
 2. 必须把用户菜谱中的标题、副标题、食材、成败关键、步骤内容和底部文案全部吸收到 prompt 里。
-3. 左侧食材卡、右侧成败关键和实际步骤条里的每一条文字，都必须逐项继承用户菜谱原文；食材名、数量、顺序、短句标题和步骤内容都不能自行概括、换词或改写成通用模板句。
+3. 左侧食材卡、右侧成败关键和实际步骤条必须信息完整、顺序正确；允许做轻微自然改写，但不能漏关键信息，不能改数量。
 4. 不要根据菜名臆测主料；只有当原文食材表里真的写了菜名本身，才能把菜名放进“主料”卡。
 5. 主画面必须以菜谱中的器皿与摆盘、桌面与环境、背景陪衬说明为准。
 6. 强调整张图是“信息很多但一眼就想收藏”的成熟爆款海报，整张图的版式、字体、配色、标题层级和卡片结构必须严格沿用参考 VI；但主菜图片的真实手机实拍感优先级高于氛围道具和广告大片感。
@@ -146,7 +162,7 @@ def build_page01_prompt_system_prompt(style_reference: str, fixed_dish_name: str
 13. {build_page01_real_photo_requirement()}
 14. {build_page01_dish_interaction_requirement()}
 15. 这些真实拍摄要求只作用于食物照片层，不改变整张海报 VI。
-16. 最终输出的 prompt 末尾必须原样追加这一句，并且作为最后一行收尾：{build_page01_final_priority_sentence()}
+16. 最终输出前先做一轮自检：检查动作物理关系、餐具逻辑、主菜与配菜一致性，若发现冲突先改写再输出。
 """.strip()
 
 
@@ -168,10 +184,10 @@ def build_page01_prompt_user_prompt(recipe_text: str, fixed_dish_name: str) -> s
 {build_page01_real_photo_requirement()}
 {build_page01_dish_interaction_requirement()}
 不要改整张海报的 VI、排版、字体、边框、标题结构和整体配色。
-最终 prompt 的最后一行必须原样写成：{build_page01_final_priority_sentence()}
+输出前先自检一遍：主画面动作是否物理成立、主菜和配菜是否与食材卡一致、有没有出现程序化术语或提示词泄露。
 引导句和副标题都要短，不要写成长句。
-左侧食材卡必须逐字使用【2人份食材】中的主料、香料、调味料，不要把菜名当成主料，不要删成只剩 1 种香料或 1 种调味料。
-右侧成败关键必须逐字使用【成败关键】里的短句；下半部分步骤条必须逐条使用菜谱里实际的【3步出锅】、【4步出锅】或【5步出锅】区块中的标题和内容，不要改写成泛化模板步骤。
+左侧食材卡必须完整覆盖【2人份食材】中的主料、配菜（若有）、香料、调味料，不要把菜名当成主料，也不要把多个分组合并成一组。
+右侧成败关键和下半部分步骤条要和菜谱语义一致，允许轻微自然改写，不要改成泛化模板步骤。
 
 {recipe_text}
 """.strip()
@@ -197,9 +213,7 @@ def build_page01_food_specific_negative_requirements(bundle: dict[str, Any]) -> 
 
 
 def build_local_page01_prompt(bundle: dict[str, Any]) -> str:
-    main_ingredients = "\n".join(f"{name} {amount}" for name, amount in bundle["main_ingredients"])
-    spices = "\n".join(f"{name} {amount}" for name, amount in bundle["spices"])
-    seasonings = "\n".join(f"{name} {amount}" for name, amount in bundle["seasonings"])
+    ingredient_card_text = build_page01_ingredient_card_text(bundle)
     tips = "\n".join(bundle["tips"])
     dish_specific_negative_lines = build_page01_food_specific_negative_requirements(bundle)
     dish_specific_negative_block = ""
@@ -244,16 +258,7 @@ def build_local_page01_prompt(bundle: dict[str, Any]) -> str:
 这些真实拍摄约束只作用于食物照片层，不改变整张图的 VI、版式、字体和色调逻辑。
 
 左侧“2人份食材”卡内容必须清楚排版：
-2人份食材
-
-主料
-{main_ingredients}
-
-香料
-{spices}
-
-调味料
-{seasonings}
+{ingredient_card_text}
 
 右侧“成败关键”卡内容必须是 5 条无标点短句：
 成败关键
@@ -302,6 +307,4 @@ def build_local_page01_prompt(bundle: dict[str, Any]) -> str:
 不要把原来的海报 VI 改掉
 不要过度饱和
 不要无意义装饰
-
-{build_page01_final_priority_sentence()}
 """.strip()
