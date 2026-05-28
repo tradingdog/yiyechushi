@@ -35,8 +35,11 @@ def main() -> None:
     print(f"本次创意输入：{result['dish_idea']}")
     print(f"本次最终菜名：{result['dish_name']}")
     print(f"输出根目录：{result['output_root']}")
-    print(f"抖音图文标题文件：{result['publish_title_file']}")
+    print(f"图文标题文件：{result['publish_title_file']}")
     print(f"抖音图文描述文件：{result['publish_description_file']}")
+    print(f"图文描述正文文件：{result['publish_description_body_file']}")
+    for platform_key, topic_file in result.get("publish_platform_topic_files", {}).items():
+        print(f"{platform_key} 话题文件：{topic_file}")
     if result.get("publish_selection_report_file"):
         print(f"publish 评分报告：{result['publish_selection_report_file']}")
     if result.get("publish_selection_summary_file"):

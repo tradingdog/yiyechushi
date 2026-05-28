@@ -68,6 +68,100 @@ PUBLISH_GENERAL_TOPICS: tuple[str, ...] = (
 PUBLISH_BANNED_TOPIC_TOKENS: tuple[str, ...] = (
     "阿叶造新菜",
 )
+PUBLISH_PLATFORM_TOPIC_SPECS: tuple[tuple[str, str, int], ...] = (
+    ("douyin", "抖音", 5),
+    ("xiaohongshu", "小红书", 10),
+    ("wechat", "微信视频号和公众号", 30),
+    ("kuaishou", "快手", 4),
+)
+PUBLISH_PLATFORM_TOPIC_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "douyin": (
+        "抖音美食推荐官",
+        "跟着抖音学做菜",
+        "抖音美食",
+        "抖音热门美食",
+        "今日份晚饭",
+        "下饭菜",
+        "家常美食",
+        "美食教程",
+        "快手家常菜",
+        "厨房日常",
+        "新手做菜",
+        "一周不重样家常菜",
+    ),
+    "xiaohongshu": (
+        "小红书美食",
+        "小红书爆款菜谱",
+        "今日晚饭",
+        "家常菜",
+        "下饭菜",
+        "好吃到停不下来",
+        "厨房小白",
+        "懒人食谱",
+        "一人食",
+        "上班族晚饭",
+        "周末做饭",
+        "美食灵感",
+        "我的厨房日记",
+        "简单快手菜",
+        "请客菜",
+        "宴客菜",
+    ),
+    "wechat": (
+        "家常菜",
+        "家常菜谱",
+        "今日菜谱",
+        "今日晚餐",
+        "晚餐灵感",
+        "下饭菜",
+        "厨房技巧",
+        "做菜教程",
+        "美食做法",
+        "详细做法",
+        "新手做菜",
+        "零失败菜谱",
+        "一周菜单",
+        "营养搭配",
+        "家庭餐桌",
+        "妈妈味道",
+        "快手菜",
+        "懒人做饭",
+        "家宴菜",
+        "请客菜",
+        "节日餐桌",
+        "聚餐菜单",
+        "厨房干货",
+        "食材搭配",
+        "烹饪小技巧",
+        "香煎做法",
+        "鲜味料理",
+        "豆腐做法",
+        "海鲜做法",
+        "日常做饭",
+        "原创菜谱",
+        "美食分享",
+        "家庭料理",
+        "三餐四季",
+        "饭桌烟火气",
+        "餐桌日常",
+        "每周吃什么",
+        "今晚吃什么",
+        "孩子爱吃",
+        "上班族做饭",
+    ),
+    "kuaishou": (
+        "快手美食",
+        "快手家常菜",
+        "家常菜",
+        "下饭菜",
+        "快手菜谱",
+        "厨房实拍",
+        "今日晚饭",
+        "美食做法",
+        "简单好吃",
+        "跟着做不翻车",
+    ),
+}
 GUIDE_LINE_STALE_KEYWORDS = (
     "周末请客",
     "家宴",
@@ -3688,6 +3782,187 @@ def infer_publish_topic_tags(dish_name: str, source_text: str, notes: str = "") 
     return tags
 
 
+def build_platform_topic_prompt_system() -> str:
+    return """
+你是多平台美食内容运营助手。你要基于给定菜谱内容，为不同平台输出话题标签。
+
+硬要求：
+1. 必须先按“平台最新热门活动/热门话题”方向思考，再补“潜力增长话题”。
+2. 话题标签必须以 # 开头。
+3. 不能输出 #阿叶造新菜，不能输出菜品本身名称相关话题。
+4. 输出必须严格使用下面四个分区，不要加解释：
+
+【抖音】
+...
+
+【小红书】
+...
+
+【微信视频号和公众号】
+...
+
+【快手】
+...
+
+5. 各分区只输出空格分隔的话题标签，不要编号，不要句子。
+""".strip()
+
+
+def build_platform_topic_prompt_user(
+    dish_name: str,
+    topic_reference_text: str,
+) -> str:
+    return f"""
+当前菜名：{dish_name}
+
+关联新菜品文档（只允许使用这份文档的信息生成话题，不要引用其它来源文档）：
+{topic_reference_text}
+
+请按下面数量输出四个平台的话题（热门优先，再补潜力）：
+1. 抖音：5 个
+2. 小红书：10 个
+3. 微信视频号和公众号：30 个
+4. 快手：4 个
+""".strip()
+
+
+def extract_platform_topic_section(text: str, section_name: str) -> list[str]:
+    section_pattern = rf"【{re.escape(section_name)}】\s*(.*?)(?=\n【|\Z)"
+    match = re.search(section_pattern, text, flags=re.S)
+    if not match:
+        return []
+
+    raw_section = match.group(1).strip()
+    if not raw_section:
+        return []
+
+    tokens = re.findall(r"#?[^\s#]+", raw_section)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        tag = format_topic_tag(token)
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        cleaned.append(tag)
+    return cleaned
+
+
+def build_platform_topic_fallback_candidates(
+    *,
+    platform_key: str,
+    dish_name: str,
+    source_text: str,
+    notes: str,
+    description_body: str,
+) -> list[str]:
+    merged_text = f"{dish_name} {notes} {source_text} {description_body}"
+    candidates: list[str] = []
+
+    if platform_key == "douyin":
+        candidates.extend(get_required_publish_topics())
+        candidates.extend(build_publish_activity_topics(merged_text))
+        candidates.extend(infer_publish_topic_tags(dish_name=dish_name, source_text=source_text, notes=notes))
+
+    if contains_any(merged_text, ["煲", "锅", "汤"]):
+        candidates.extend(["家常煲菜", "一锅出晚饭", "热乎暖胃"])
+    if contains_any(merged_text, ["煎", "焦", "铁板"]):
+        candidates.extend(["香煎做法", "平底锅菜谱", "外脆里嫩"])
+    if contains_any(merged_text, ["鱼", "虾", "贝", "海鲜", "鱿", "蛤"]):
+        candidates.extend(["海鲜做法", "鲜味料理", "鲜香下饭"])
+    if contains_any(merged_text, ["豆", "豆腐", "素"]):
+        candidates.extend(["豆类料理", "豆腐做法", "素食家常菜"])
+
+    candidates.extend(PUBLISH_GENERAL_TOPICS)
+    candidates.extend(PUBLISH_PLATFORM_TOPIC_FALLBACKS.get(platform_key, ()))
+    return candidates
+
+
+def normalize_platform_topics(
+    *,
+    platform_key: str,
+    count: int,
+    dish_name: str,
+    model_topics: Sequence[str],
+    source_text: str,
+    notes: str,
+    description_body: str,
+) -> list[str]:
+    required_topics = get_required_publish_topics() if platform_key == "douyin" else []
+    required_tags = [format_topic_tag(item) for item in required_topics if format_topic_tag(item)]
+    required_set = set(required_tags)
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    for tag in required_tags:
+        if tag in seen:
+            continue
+        seen.add(tag)
+        normalized.append(tag)
+        if len(normalized) >= count:
+            return normalized[:count]
+
+    ordered_topics = [*model_topics, *build_platform_topic_fallback_candidates(
+        platform_key=platform_key,
+        dish_name=dish_name,
+        source_text=source_text,
+        notes=notes,
+        description_body=description_body,
+    )]
+
+    for topic in ordered_topics:
+        tag = format_topic_tag(topic)
+        if not tag:
+            continue
+        if tag not in required_set and is_disallowed_publish_topic(topic, dish_name=dish_name):
+            continue
+        if tag in seen:
+            continue
+        seen.add(tag)
+        normalized.append(tag)
+        if len(normalized) >= count:
+            return normalized[:count]
+
+    raise ValueError(f"{platform_key} 平台话题不足，无法凑够 {count} 个。")
+
+
+def generate_platform_topic_assets(
+    *,
+    client: OpenAI,
+    dish_name: str,
+    topic_reference_text: str,
+    source_text: str,
+    notes: str,
+    description_body: str,
+) -> dict[str, list[str]]:
+    platform_result = request_text_generation(
+        client=client,
+        system_prompt=build_platform_topic_prompt_system(),
+        user_prompt=build_platform_topic_prompt_user(
+            dish_name=dish_name,
+            topic_reference_text=topic_reference_text,
+        ),
+        stage_name="多平台话题",
+    )
+
+    content = platform_result["content"]
+    normalized_platform_topics: dict[str, list[str]] = {}
+    for platform_key, platform_label, count in PUBLISH_PLATFORM_TOPIC_SPECS:
+        model_topics = extract_platform_topic_section(content, platform_label)
+        normalized_platform_topics[platform_key] = normalize_platform_topics(
+            platform_key=platform_key,
+            count=count,
+            dish_name=dish_name,
+            model_topics=model_topics,
+            source_text=source_text,
+            notes=notes,
+            description_body=description_body,
+        )
+
+    return normalized_platform_topics
+
+
 def build_publish_copy_system_prompt(fixed_dish_name: str) -> str:
     return f"""
 你是阿叶造新菜账号的抖音图文运营编辑，负责把菜谱内容整理成更适合抖音发布的图文标题和图文描述。
@@ -3863,6 +4138,7 @@ def generate_publish_copy_assets(
     source_text: str,
     timestamp: str,
     notes: str = "",
+    topic_reference_text: str = "",
     output_name: str | None = None,
     source_label: str = "菜谱文案",
     output_dir: Path | None = None,
@@ -3895,29 +4171,82 @@ def generate_publish_copy_assets(
 
     publish_result, normalized = run_text_stage_with_validation_retry("抖音发布文案", build_publish_copy_result)
 
+    description_body, _ = split_description_body_and_tags(normalized["description"])
+    if not description_body:
+        raise ValueError("图文描述正文为空，无法生成多平台话题版本。")
+
+    topic_doc_text = topic_reference_text.strip()
+    if not topic_doc_text:
+        dish_name_file = ROOT_DIR / "dish_name.txt"
+        if dish_name_file.exists() and dish_name_file.is_file():
+            topic_doc_text = dish_name_file.read_text(encoding="utf-8").strip()
+    if not topic_doc_text:
+        topic_doc_text = dish_name
+
+    platform_topics = generate_platform_topic_assets(
+        client=client,
+        dish_name=dish_name,
+        topic_reference_text=topic_doc_text,
+        source_text=source_text,
+        notes=notes,
+        description_body=description_body,
+    )
+
     title_file = save_text_output(
         content=normalized["title"],
         output_dir=output_dir,
         timestamp=timestamp,
         base_name=output_name,
-        suffix="_抖音图文标题",
+        suffix="_图文标题",
     )
-    description_file = save_text_output(
-        content=normalized["description"],
+    description_body_file = save_text_output(
+        content=description_body,
         output_dir=output_dir,
         timestamp=timestamp,
         base_name=output_name,
-        suffix="_抖音图文描述",
+        suffix="_图文描述正文",
     )
-    print(f"抖音图文标题已保存：{title_file}")
-    print(f"抖音图文描述已保存：{description_file}")
+
+    platform_topic_files: dict[str, str] = {}
+    platform_description_files: dict[str, str] = {}
+    for platform_key, platform_label, _count in PUBLISH_PLATFORM_TOPIC_SPECS:
+        topic_line = " ".join(platform_topics[platform_key]).strip()
+        topic_file = save_text_output(
+            content=topic_line,
+            output_dir=output_dir,
+            timestamp=timestamp,
+            base_name=output_name,
+            suffix=f"_{platform_label}话题",
+        )
+        description_file = save_text_output(
+            content=f"{description_body}\n{topic_line}",
+            output_dir=output_dir,
+            timestamp=timestamp,
+            base_name=output_name,
+            suffix=f"_{platform_label}图文描述",
+        )
+        platform_topic_files[platform_key] = topic_file
+        platform_description_files[platform_key] = description_file
+
+    douyin_description_text = f"{description_body}\n{' '.join(platform_topics['douyin'])}".strip()
+
+    print(f"图文标题已保存：{title_file}")
+    print(f"通用图文描述正文已保存：{description_body_file}")
+    for platform_key, platform_label, _count in PUBLISH_PLATFORM_TOPIC_SPECS:
+        print(f"{platform_label}话题已保存：{platform_topic_files[platform_key]}")
+        print(f"{platform_label}图文描述已保存：{platform_description_files[platform_key]}")
 
     return {
         "model": publish_result["model"],
         "title": normalized["title"],
-        "description": normalized["description"],
+        "description": douyin_description_text,
+        "description_body": description_body,
+        "platform_topics": platform_topics,
         "title_file": title_file,
-        "description_file": description_file,
+        "description_file": platform_description_files["douyin"],
+        "description_body_file": description_body_file,
+        "platform_topic_files": platform_topic_files,
+        "platform_description_files": platform_description_files,
     }
 
 
@@ -4304,6 +4633,7 @@ def generate_recipe_text_assets_from_idea_file(
         source_text=recipe_text,
         timestamp=timestamp,
         notes=idea_payload["notes"],
+        topic_reference_text=idea_payload.get("dish_idea", ""),
         output_name=generated_dish_name,
         source_label="一页菜谱定稿文案",
         output_dir=run_output_dir,
@@ -4348,6 +4678,9 @@ def generate_recipe_text_assets_from_idea_file(
         "publish_description": publish_copy_result["description"],
         "publish_title_file": publish_copy_result["title_file"],
         "publish_description_file": publish_copy_result["description_file"],
+        "publish_description_body_file": publish_copy_result["description_body_file"],
+        "publish_platform_topic_files": publish_copy_result["platform_topic_files"],
+        "publish_platform_description_files": publish_copy_result["platform_description_files"],
         "guide_pages": [
             page01_result,
             *guide_page_results,

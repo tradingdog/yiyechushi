@@ -87,8 +87,9 @@ def main() -> int:
                     output_name=prompt_file.stem,
                     source_label=f"tools/prompt 中的 {prompt_file.name}",
                 )
-                print(f"已保存抖音图文标题：{result['title_file']}")
+                print(f"已保存图文标题：{result['title_file']}")
                 print(f"已保存抖音图文描述：{result['description_file']}")
+                print(f"已保存图文描述正文：{result['description_body_file']}")
             else:
                 result = generate_images_from_prompt_text(
                     client=client,

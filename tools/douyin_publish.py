@@ -304,7 +304,10 @@ def resolve_publish_assets(settings: PublishSettings) -> PublishAssets:
     if not publish_dir.exists() or not publish_dir.is_dir():
         raise RuntimeError(f"publish 目录不存在：{publish_dir}")
 
-    title_file = find_single_file(settings.output_dir, "_抖音图文标题.txt")
+    try:
+        title_file = find_single_file(settings.output_dir, "_图文标题.txt")
+    except RuntimeError:
+        title_file = find_single_file(settings.output_dir, "_抖音图文标题.txt")
     description_file = find_single_file(settings.output_dir, "_抖音图文描述.txt")
     title_text = read_utf8_text(title_file)
     description_text = read_utf8_text(description_file)
