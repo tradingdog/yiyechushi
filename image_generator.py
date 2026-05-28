@@ -478,7 +478,7 @@ def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
 8. 底部收藏文案必须固定为：{DEFAULT_COLLECTION_COPY}
 9. 首图上半部不要再额外设置收藏提示细条，避免和底部收藏关注横条重复。
 10. 最终菜名必须严格等于：{fixed_dish_name}
-11. 主画面必须安排与这道菜匹配的真实餐具和互动动作，餐具类型、数量、是否一只手或多只手入镜都按菜品自行判断，画面要有动作感和食欲感，不要固定成所有菜都一双筷子夹起主菜。
+11. 主画面必须直接指定一种最合适的真实餐具或上桌工具，写死具体名称、数量和动作瞬间，不要给后续文生图阶段列举多个餐具备选，也不要写“自行安排”“餐具数量不限”“例如”这类模板话。
 
 输出必须严格遵循下面这份纯文本结构，不要添加解释，不要使用 Markdown 代码块：
 
@@ -496,7 +496,7 @@ def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
 主画面食材：...
 汤汁或酱体：...
 质感重点：...
-动态动作：{DEFAULT_DYNAMIC_ACTION}
+动态动作：...
 色彩点缀：...
 
 【2人份食材】
@@ -540,13 +540,16 @@ def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
 4. 副标题必须像成熟黄条卖点写法，压缩成 2 到 3 个短卖点，总长度控制在 24 个汉字以内，优先用空格隔开，不要写成长句。
 5. 引导句和副标题整体都要更像抖音美食平台会用的轻口语短句，可以更鲜活、更俏皮、更有反应感，但不要油腻，不要为了押韵硬凑词。
 6. 引导句和副标题不能复用同一组词，不能只是上下换行、加减空格或多减一个字。引导句负责提供钩子点，副标题负责提炼 2 到 3 个卖点词，两者语义必须明显分工。
-7. 主画面说明要足够具体，让后续文生图阶段知道器皿、桌面、背景陪衬、主体食材、汤汁或酱体状态、画面颜色重点，还要明确最合适的餐具、餐具数量、是否一只手或多只手入镜，以及主菜互动动作的瞬间，不要再默认所有菜都是筷子夹起镜头。
-8. 器皿与摆盘、桌面与环境、背景陪衬必须跟这道菜本身的烹饪方式、上桌逻辑、菜系气质和主料结构相匹配，不要默认每道菜都写成暖色陶盘、木托、木桌和几只小碗的同一套模板。
-9. 如果这道菜更适合砂锅、深口汤碗、长鱼盘、铸铁盘、搪瓷盘、石面台、水磨石台面、亚麻餐垫或简洁厨房台面，就直接写清楚，不要偷懒回到同一种木桌陶盘。
-10. 不同出餐结构的菜必须主动拉开场景，不要只是把同一套浅灰石面、水磨石、小圆碟、玻璃油壶模板换成黑盘或白盘后重复使用。煎鱼挂汁类、炸卷类、锅物类、冷盘类、铁板类的桌面材质、器皿逻辑和后景陪衬都应该明显不同。
-11. 食材分组要清楚，数量要合理，不能互相打架。
-12. 3 到 5 步必须前后顺序清晰，适合普通人照做；不要为了凑数把一个动作拆成两步，也不要为了省步数漏掉决定成败的关键环节。
-13. 文字整体要像成熟抖音爆款图文海报，而不是教程论文或餐厅菜单。
+7. 主画面说明要足够具体，让后续文生图阶段知道器皿、桌面、背景陪衬、主体食材、汤汁或酱体状态、画面颜色重点，还要明确唯一最合适的具体餐具、具体动作瞬间和是否少量手部入镜，不要再默认所有菜都是筷子夹起镜头。
+8. 动态动作必须直接写成唯一方案，例如“搭配一把叉子叉起一块主菜”“一把大汤勺舀起一勺主菜”“一副刀叉切开后叉起一块”，不能写成“筷子或勺子都可以”“按菜品自行安排”这种把选择权继续丢给后续模型的句子。
+9. 如果主菜属于酿、夹心、包裹、卷入、夹层、内馅这类里面还包着其它食材的结构，主画面必须明确写出有一块主菜已被人真实咬开或掰开，能清楚看见里面食材和汁水，不要只写完整外表。
+10. 器皿与摆盘不仅要写器皿类型，还要写真实出菜状态；要按菜品具体写出类似“人为不完全整齐地码放”“自然错位堆叠”“疏密不一地铺开”“汤面配料自然浮沉”这类人手装盘痕迹，不能把所有菜都写成整齐复制模板。
+11. 器皿与摆盘、桌面与环境、背景陪衬必须跟这道菜本身的烹饪方式、上桌逻辑、菜系气质和主料结构相匹配，不要默认每道菜都写成暖色陶盘、木托、木桌和几只小碗的同一套模板。
+12. 如果这道菜更适合砂锅、深口汤碗、长鱼盘、铸铁盘、搪瓷盘、石面台、水磨石台面、亚麻餐垫或简洁厨房台面，就直接写清楚，不要偷懒回到同一种木桌陶盘。
+13. 不同出餐结构的菜必须主动拉开场景，不要只是把同一套浅灰石面、水磨石、小圆碟、玻璃油壶模板换成黑盘或白盘后重复使用。煎鱼挂汁类、炸卷类、锅物类、冷盘类、铁板类的桌面材质、器皿逻辑和后景陪衬都应该明显不同。
+14. 食材分组要清楚，数量要合理，不能互相打架。
+15. 3 到 5 步必须前后顺序清晰，适合普通人照做；不要为了凑数把一个动作拆成两步，也不要为了省步数漏掉决定成败的关键环节。
+16. 文字整体要像成熟抖音爆款图文海报，而不是教程论文或餐厅菜单。
 """.strip()
 
 
@@ -562,6 +565,9 @@ def build_recipe_user_prompt(dish_idea: str, notes: str) -> str:
 引导句和副标题不能复用同一组词，不能只是把同一串卖点放到菜名上方再重复一遍；引导句要像钩子，副标题要像拆开的卖点词。
 主画面的器皿、桌面和背景陪衬必须跟菜本身匹配，不要默认写成木桌、暖色陶盘、木托和几只失焦小碗。
 不同结构的菜请主动拉开场景，不要只是把同一套浅灰石面、水磨石和小圆碟背景换个盘色再复用。
+主画面的动态动作必须直接指定唯一一种最合适的餐具或上桌工具，不要把筷子、勺子、刀叉、叉子、手抓写成多个备选方向。
+如果主菜属于酿、夹心、包裹、卷入、夹层、内馅这类里面还有其它食材的结构，主画面必须明确写出有一块主菜被人真实咬开或掰开，能看见里面食材和汁水。
+器皿与摆盘要写出真实的人手出菜状态，例如轻微错位、高低差、疏密变化、自然铺开或少量盘边汁痕，不要写成整齐复制模板。
 """.strip()
 
 
@@ -1042,6 +1048,177 @@ def looks_like_template_scene_field(field_name: str, field_value: str) -> bool:
             return True
 
     return False
+
+
+FILLED_DISH_STRONG_KEYWORDS: tuple[str, ...] = (
+    "酿",
+    "夹心",
+    "包心",
+    "内馅",
+    "馅料",
+    "夹层",
+    "包裹",
+    "裹着",
+    "裹入",
+    "塞入",
+    "填入",
+    "填馅",
+    "露馅",
+    "露芯",
+)
+FILLED_DISH_STRUCTURE_KEYWORDS: tuple[str, ...] = (
+    "卷",
+    "盒",
+    "饼",
+    "豆腐",
+    "腐皮",
+    "春卷",
+    "丸",
+)
+FILLED_DISH_CONTENT_KEYWORDS: tuple[str, ...] = (
+    "肉",
+    "鱼",
+    "虾",
+    "豆腐",
+    "马蹄",
+    "笋",
+    "菌",
+    "馅",
+)
+GENERIC_DYNAMIC_ACTION_PATTERNS: tuple[str, ...] = (
+    r"按菜品结构自行安排",
+    r"最合适的餐具和互动动作",
+    r"餐具数量不限",
+    r"可一只手或多只手",
+    r"例如",
+    r"不固定成",
+)
+
+
+def is_filled_or_wrapped_dish(*text_parts: str) -> bool:
+    combined_text = " ".join(part for part in text_parts if part).strip()
+    if not combined_text:
+        return False
+
+    if contains_any(combined_text, list(FILLED_DISH_STRONG_KEYWORDS)):
+        return True
+
+    return contains_any(combined_text, list(FILLED_DISH_STRUCTURE_KEYWORDS)) and contains_any(
+        combined_text,
+        list(FILLED_DISH_CONTENT_KEYWORDS),
+    )
+
+
+def infer_plating_naturalness_phrase(
+    dish_name: str,
+    notes: str,
+    plate_description: str = "",
+    main_food_description: str = "",
+) -> str:
+    combined_text = " ".join(
+        part for part in (dish_name, notes, plate_description, main_food_description) if part
+    ).strip()
+
+    if contains_any(combined_text, ["面条", "炒面", "拌面", "焖面", "汤面", "凉面", "意面", "拉面", "乌冬", "米线", "河粉", "米粉", "炒粉", "拌粉", "汤粉", "粉丝"]):
+        return "面条与配料要像人手刚拌好或刚夹起前的自然堆叠状态，松紧不一，不要机械盘绕"
+    if contains_any(combined_text, ["汤", "羹", "煲", "锅", "砂锅", "锅仔", "炖"]):
+        return "主料和配料在汤汁里的分布要自然浮沉，疏密不匀，边缘保留少量真实汁痕"
+    if is_filled_or_wrapped_dish(combined_text) or contains_any(combined_text, ["块", "卷", "丸", "豆腐"]):
+        return "主菜以人手自然码放或堆叠，允许轻微错位、高低差、疏密变化和少量盘边汁痕，不要机械等距排列"
+    return "摆盘要保留人手整理后的轻微不齐、前后错位和少量汁痕，不要整齐复制"
+
+
+def normalize_plate_description(
+    plate_description: str,
+    dish_name: str,
+    notes: str,
+    main_food_description: str = "",
+) -> str:
+    normalized_description = " ".join(plate_description.split()).strip()
+    if not normalized_description:
+        normalized_description = infer_plate_description(dish_name, notes)
+
+    if re.search(r"(人为|人手|不完全整齐|轻微错位|高低差|疏密|自然随机)", normalized_description):
+        return normalized_description
+
+    naturalness_phrase = infer_plating_naturalness_phrase(
+        dish_name,
+        notes,
+        normalized_description,
+        main_food_description,
+    )
+    connector = "，" if normalized_description and not normalized_description.endswith(("，", "。")) else ""
+    return f"{normalized_description.rstrip('。')}{connector}{naturalness_phrase}".strip()
+
+
+def looks_like_generic_dynamic_action(action_text: str) -> bool:
+    normalized_action = " ".join(action_text.split()).strip()
+    if not normalized_action:
+        return True
+    if looks_like_placeholder_output(normalized_action):
+        return True
+    if any(re.search(pattern, normalized_action) for pattern in GENERIC_DYNAMIC_ACTION_PATTERNS):
+        return True
+    return bool(
+        re.search(r"(筷子|勺子|汤匙|大汤勺|刀叉|叉子|手抓|夹子).*(或|和|等|例如).*(筷子|勺子|汤匙|大汤勺|刀叉|叉子|手抓|夹子)", normalized_action)
+    )
+
+
+def infer_dynamic_action_description(
+    dish_name: str,
+    notes: str,
+    plate_description: str = "",
+    main_food_description: str = "",
+) -> str:
+    combined_text = " ".join(
+        part for part in (dish_name, notes, plate_description, main_food_description) if part
+    ).strip()
+    filled_dish = is_filled_or_wrapped_dish(combined_text)
+
+    if contains_any(combined_text, ["汉堡", "三明治", "夹饼", "夹馍", "卷饼", "塔可", "手抓饼"]):
+        action_text = "一只手直接拿起主菜主体，边缘保留真实按压痕迹"
+    elif contains_any(combined_text, ["汤", "羹", "煲", "砂锅", "锅仔", "炖", "火锅"]):
+        action_text = "一把大汤勺从锅边舀起一勺主菜和汤汁，少量自然手部入镜"
+    elif contains_any(combined_text, ["牛排", "菲力", "羊排", "猪排", "肋排", "排类"]):
+        action_text = "一副刀叉切开主菜后，叉子叉起一块最诱人的切面，少量自然手部入镜"
+    elif contains_any(combined_text, ["意面", "通心粉", "螺旋面"]):
+        action_text = "一把叉子卷起一口主菜和酱汁，少量自然手部入镜"
+    elif contains_any(combined_text, ["面条", "炒面", "拌面", "焖面", "汤面", "凉面", "拉面", "乌冬", "米线", "河粉", "米粉", "炒粉", "拌粉", "汤粉", "粉丝"]) and not contains_any(combined_text, ["意面"]):
+        action_text = "一双筷子挑起一口主菜主体，带出自然垂坠感，少量自然手部入镜"
+    elif contains_any(combined_text, ["豆腐", "酿", "卷", "丸", "块", "鱼肉", "鱼片", "虾球"]):
+        action_text = "一把叉子叉起一块主菜主体，少量自然手部入镜"
+    else:
+        action_text = "一双筷子夹起一口最有食欲的主菜主体，少量自然手部入镜"
+
+    if filled_dish and not re.search(r"(咬|露出|露芯|露馅|剖开|掰开|切开)", action_text):
+        action_text = f"{action_text.rstrip('。；，,')}，这块主菜已经被人真实咬开一口，能清楚看见里面包裹的食材层次和汁水"
+
+    return action_text
+
+
+def normalize_dynamic_action_description(
+    action_text: str,
+    dish_name: str,
+    notes: str,
+    plate_description: str = "",
+    main_food_description: str = "",
+) -> str:
+    if looks_like_generic_dynamic_action(action_text):
+        return infer_dynamic_action_description(
+            dish_name,
+            notes,
+            plate_description,
+            main_food_description,
+        )
+
+    normalized_action = " ".join(action_text.split()).strip()
+    if is_filled_or_wrapped_dish(dish_name, notes, plate_description, main_food_description) and not re.search(
+        r"(咬|露出|露芯|露馅|剖开|掰开|切开)",
+        normalized_action,
+    ):
+        normalized_action = f"{normalized_action.rstrip('。；，,')}，这块主菜已经被人真实咬开一口，能清楚看见里面包裹的食材层次和汁水"
+
+    return normalized_action
 
 
 def dedupe_items(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -1975,9 +2152,21 @@ def infer_steps(dish_name: str, notes: str) -> list[dict[str, str]]:
 
 def build_local_recipe_bundle(dish_name: str, notes: str, ad_copy: str) -> dict[str, Any]:
     normalized_notes = " ".join(notes.split())
-    plate_description = infer_plate_description(dish_name, normalized_notes)
+    main_food_description = infer_main_food_description(dish_name, normalized_notes)
+    plate_description = normalize_plate_description(
+        infer_plate_description(dish_name, normalized_notes),
+        dish_name,
+        normalized_notes,
+        main_food_description,
+    )
     table_description = infer_table_description(dish_name, normalized_notes, plate_description)
     background_prop_description = infer_background_prop_description(dish_name, normalized_notes)
+    dynamic_action_description = infer_dynamic_action_description(
+        dish_name,
+        normalized_notes,
+        plate_description,
+        main_food_description,
+    )
     return {
         "dish_name": dish_name,
         "guide_line": infer_guide_line(dish_name, normalized_notes),
@@ -1988,10 +2177,10 @@ def build_local_recipe_bundle(dish_name: str, notes: str, ad_copy: str) -> dict[
         "plate": plate_description,
         "table_setting": table_description,
         "background_props": background_prop_description,
-        "main_food": infer_main_food_description(dish_name, normalized_notes),
+        "main_food": main_food_description,
         "sauce": infer_sauce_description(normalized_notes),
         "texture": infer_texture_description(normalized_notes),
-        "dynamic_action": DEFAULT_DYNAMIC_ACTION,
+        "dynamic_action": dynamic_action_description,
         "colors": infer_color_description(normalized_notes),
         "main_ingredients": infer_main_ingredients(dish_name, normalized_notes),
         "spices": infer_spice_ingredients(normalized_notes),
@@ -3021,11 +3210,21 @@ def remove_prefixed_line(text: str, prefix: str) -> str:
 def normalize_recipe_text(recipe_text: str, fixed_dish_name: str, ad_copy: str, notes: str = "") -> str:
     normalized_text = recipe_text.strip()
     normalized_notes = " ".join(notes.split())
+    main_food_description = extract_recipe_field_value(normalized_text, "主画面食材") or infer_main_food_description(
+        fixed_dish_name,
+        normalized_notes,
+    )
     inferred_plate_description = infer_plate_description(fixed_dish_name, normalized_notes)
     existing_plate_description = extract_recipe_field_value(normalized_text, "器皿与摆盘")
     plate_description = existing_plate_description
     if should_infer_scene_field(plate_description):
         plate_description = inferred_plate_description
+    plate_description = normalize_plate_description(
+        plate_description,
+        fixed_dish_name,
+        normalized_notes,
+        main_food_description,
+    )
 
     inferred_table_description = infer_table_description(fixed_dish_name, normalized_notes, plate_description)
     existing_table_description = extract_recipe_field_value(normalized_text, "桌面与环境")
@@ -3046,10 +3245,18 @@ def normalize_recipe_text(recipe_text: str, fixed_dish_name: str, ad_copy: str, 
         insert_after_prefix="创意来源：",
     )
     normalized_text = remove_prefixed_line(normalized_text, prefix="收藏提示：")
+    existing_dynamic_action = extract_recipe_field_value(normalized_text, "动态动作")
+    dynamic_action_description = normalize_dynamic_action_description(
+        existing_dynamic_action,
+        fixed_dish_name,
+        normalized_notes,
+        plate_description,
+        main_food_description,
+    )
     normalized_text = replace_or_insert_prefixed_line(
         text=normalized_text,
         prefix="动态动作：",
-        replacement_line=f"动态动作：{DEFAULT_DYNAMIC_ACTION}",
+        replacement_line=f"动态动作：{dynamic_action_description}",
         insert_after_prefix="质感重点：",
     )
     normalized_text = replace_or_insert_prefixed_line(
@@ -3156,6 +3363,8 @@ def build_page01_required_prompt_fragments(bundle: dict[str, Any]) -> list[str]:
         bundle.get("subtitle", ""),
         bundle.get("collection_copy", ""),
         bundle.get("ad_copy", ""),
+        bundle.get("plate", ""),
+        bundle.get("dynamic_action", ""),
     ]
 
     for group_name in ("main_ingredients", "spices", "seasonings"):
@@ -3278,25 +3487,10 @@ def append_cover_hard_requirements(prompt_text: str, fixed_dish_name: str, bundl
         additions.append(cover_page.build_cover_centered_vertical_title_requirement(fixed_dish_name, vertical_dish_name))
     if not re.search(r"(背景主菜|餐盘|背景).*(避开|退到).*(中轴|下半部|右下|左下)", normalized):
         additions.append("背景主菜和餐盘必须主动避开中轴标题通道，主要退到中下段、下半部、右下或左下，不能把竖排菜名挤到侧边。")
-
-    required_scene_lines = [
-        f"器皿与摆盘必须沿用：{bundle['plate']}",
-        f"桌面与环境必须沿用：{bundle['table_setting']}",
-        f"背景陪衬必须沿用：{bundle['background_props']}",
-        f"主画面食材必须沿用：{bundle['main_food']}",
-        f"酱汁或汤汁状态必须沿用：{bundle['sauce']}",
-        f"质感重点必须沿用：{bundle['texture']}",
-        f"色彩点缀必须沿用：{bundle['colors']}",
-    ]
-    compact_normalized = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", normalized)
-    missing_scene_lines = [
-        line
-        for line in required_scene_lines
-        if re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", line.split("：", 1)[1]) not in compact_normalized
-    ]
-    if missing_scene_lines:
-        additions.append("封面背景必须沿用首图同一道菜的同场景信息，不要改写成另一套模板：")
-        additions.extend(missing_scene_lines)
+    if not re.search(r"(封面背景|背景).*(沿用|来自|参考).*(首图|参考图).*(同场景|同一道菜)", normalized):
+        additions.append("封面背景沿用首图同一道菜的同场景，不要另起模板。")
+    if not re.search(r"(除菜名外|其它区域\s*0\s*文字|0\s*文字)", normalized):
+        additions.append("除菜名外画面其它区域 0 文字。")
 
     if not additions:
         return normalized
@@ -3313,24 +3507,10 @@ def validate_cover_prompt_content(prompt_text: str, fixed_dish_name: str, bundle
         raise ValueError("封面prompt 缺少菜名单列竖排中轴约束。")
     if not re.search(r"(背景主菜|餐盘|背景).*(避开|退到).*(中轴|下半部|右下|左下)", normalized):
         raise ValueError("封面prompt 缺少背景避让中轴约束。")
-
-    required_scene_values = [
-        bundle.get("plate", ""),
-        bundle.get("table_setting", ""),
-        bundle.get("background_props", ""),
-        bundle.get("main_food", ""),
-        bundle.get("sauce", ""),
-        bundle.get("texture", ""),
-        bundle.get("colors", ""),
-    ]
-    compact_normalized = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", normalized)
-    missing_scene_values = [
-        value
-        for value in required_scene_values
-        if value and re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", value) not in compact_normalized
-    ]
-    if missing_scene_values:
-        raise ValueError("封面prompt 缺少首图同场景锁定信息。")
+    if not re.search(r"(封面背景|背景).*(沿用|来自|参考).*(首图|参考图).*(同场景|同一道菜)", normalized):
+        raise ValueError("封面prompt 缺少首图同场景约束。")
+    if not re.search(r"(除菜名外|其它区域\s*0\s*文字|0\s*文字)", normalized):
+        raise ValueError("封面prompt 缺少除菜名外 0 文字约束。")
 
     return normalized
 

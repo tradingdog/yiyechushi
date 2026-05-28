@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 from guide_pages.shared import (
-    build_adaptive_food_interaction_requirement,
     build_iphone_food_photo_requirement,
     build_strict_centered_title_requirement,
     build_unbranded_prop_requirement,
@@ -13,6 +12,18 @@ from guide_pages.shared import (
 PAGE_NUMBER = 1
 PAGE_NAME = "一页菜谱"
 FILE_LABEL = "图解01_一页菜谱"
+FILLED_DISH_KEYWORDS = (
+    "酿",
+    "夹心",
+    "包心",
+    "内馅",
+    "夹层",
+    "包裹",
+    "卷入",
+    "馅",
+    "露馅",
+    "露芯",
+)
 
 
 def build_page01_output_name(dish_name: str) -> str:
@@ -38,7 +49,40 @@ def build_page01_real_photo_requirement() -> str:
 
 
 def build_page01_dish_interaction_requirement() -> str:
-    return build_adaptive_food_interaction_requirement("主画面里", require_interaction=True)
+    return (
+        "主画面互动必须直接沿用菜谱【主画面说明】里的动态动作字段，"
+        "只允许写一种最合适的具体餐具或上桌工具、明确的数量和动作瞬间。"
+        "不要在最终 prompt 里再给 gpt 列举筷子、勺子、刀叉、叉子、手抓或其它多个备选方向。"
+        "如果需要手部，只允许少量真实手部自然入镜，不要人物脸部，不要完整手臂，不要手部特写抢戏。"
+    )
+
+
+def has_page01_filled_main_dish(bundle: dict[str, Any]) -> bool:
+    combined_text = " ".join(
+        str(bundle.get(field_name, "")).strip()
+        for field_name in ("dish_name", "plate", "main_food", "dynamic_action", "notes")
+    )
+    return any(keyword in combined_text for keyword in FILLED_DISH_KEYWORDS)
+
+
+def build_page01_plating_naturalness_requirement(bundle: dict[str, Any]) -> str:
+    combined_text = " ".join(
+        str(bundle.get(field_name, "")).strip()
+        for field_name in ("dish_name", "plate", "main_food", "notes")
+    )
+    if any(keyword in combined_text for keyword in ("面条", "炒面", "拌面", "焖面", "汤面", "凉面", "意面", "拉面", "乌冬", "米线", "河粉", "米粉", "炒粉", "拌粉", "汤粉", "粉丝")):
+        return "器皿与摆盘要像人手刚拌好或刚夹起前的自然堆叠状态，松紧不一，不要机械盘绕。"
+    if any(keyword in combined_text for keyword in ("汤", "羹", "煲", "锅", "砂锅", "锅仔", "炖")):
+        return "配料在汤汁里的分布要自然浮沉，疏密不匀，边缘保留少量真实汁痕，不要规则摆点。"
+    if has_page01_filled_main_dish(bundle) or any(keyword in combined_text for keyword in ("块", "卷", "丸", "豆腐")):
+        return "主菜摆盘要像人手刚码盘：允许轻微错位、高低差、疏密变化和少量盘边汁痕，不要机械等距排列。"
+    return "摆盘要保留人手整理后的轻微不齐、前后错位和少量汁痕，不要整齐复制。"
+
+
+def build_page01_filled_cross_section_requirement(bundle: dict[str, Any]) -> str:
+    if not has_page01_filled_main_dish(bundle):
+        return ""
+    return "如果主菜里面还包着其它食材，首图必须有一块主菜已经被人真实咬开一口，能清楚看到里面包裹的食材层次和汁水，不要只给完整外表。"
 
 
 def build_page01_title_axis_requirement() -> str:
@@ -73,10 +117,12 @@ def build_page01_prompt_system_prompt(style_reference: str, fixed_dish_name: str
 10. 主配色固定为暖奶白、橙红、金黄、焦糖棕，但器皿、桌面材质和后景陪衬必须跟随菜谱主画面说明变化，不允许所有菜都回到木桌、暖陶盘、木托这一套默认模板。
 11. 所有中文必须自然工整，不要英文，不要乱码，不要错字。
 12. 主标题必须直接使用“{fixed_dish_name}”这 1 个菜名，不能改字，不能扩写，不能另起新名。
-13. 主画面必须安排与这道菜匹配的真实餐具和互动动作，餐具类型、数量、是否一只手或多只手入镜都按菜品自行判断，但必须形成明确动作感和食欲点，不要回到所有菜都固定用一双木筷的模板。
+13. 主画面必须直接沿用菜谱【主画面说明】里的动态动作字段，写死一种最合适的具体餐具或上桌工具，不要再给 gpt 列举多种餐具备选方向。
 14. 主标题上方的引导句必须很短，控制在 12 个汉字以内。
 15. 主标题下方黄条卖点必须精简成 2 到 3 个短卖点，总长度控制在 24 个汉字以内。
 16. 严禁生成“上方暖奶白标题底 + 下方矩形主图”的两段式首图，也严禁用任何横向切割把标题区和主菜照片区拆开。
+17. 如果这道菜的主菜内部还包着其它食材，最终 prompt 必须明确写出有一块主菜被人真实咬开或掰开，能清楚看到里面食材和汁水。
+18. 器皿与摆盘必须保留真实的人手出菜痕迹，例如轻微错位、高低差、疏密变化、自然铺开或少量盘边汁痕，不要整齐复制。
 
 请优先继承下面这份当前满意版本的参考 prompt 的风格取向，但不要照抄其中具体菜名和配方，只复用它的版式、密度、配色、语气、卡片结构和负面约束：
 
@@ -92,7 +138,7 @@ def build_page01_prompt_system_prompt(style_reference: str, fixed_dish_name: str
 5. 主画面必须以菜谱中的器皿与摆盘、桌面与环境、背景陪衬说明为准。
 6. 强调整张图是“信息很多但一眼就想收藏”的成熟爆款海报，整张图的版式、字体、配色、标题层级和卡片结构必须严格沿用参考 VI；但主菜图片的真实手机实拍感优先级高于氛围道具和广告大片感。
 7. 保留清晰的负面约束，避免极简、错误结构、食材畸形、塑料感、贴边、乱码和过度装饰。
-8. 明确写出主菜要与最合适的餐具或上桌工具产生互动，餐具类型、数量、手数和动作瞬间都按菜品自行分析，但要像真实吃饭或上桌抓拍，不要人物脸部，不要手部特写。
+8. 明确写出主菜要与菜谱【主画面说明】中已经指定好的唯一餐具或上桌工具产生互动，不要把多种餐具写成备选方向。
 9. {build_strict_centered_title_requirement('顶部引导句、主标题和黄条卖点')}
 10. {build_page01_title_axis_requirement()}
 11. {build_iphone_food_photo_requirement('主菜大图、背景里可见的食材点缀和画面中任何出现的食物内容')}
@@ -113,7 +159,10 @@ def build_page01_prompt_user_prompt(recipe_text: str, fixed_dish_name: str) -> s
 {build_page01_title_axis_requirement()}
 首图从页面顶边到步骤条上缘必须是一张连续主菜背景照片，顶部标题、黄条和左右卡片都直接压在这张照片上；不要再单独做奶白标题底，不要把主菜照片裁成带框主图。
 首图上半部不要再额外加收藏提示细条，避免和底部收藏关注横条重复。
-画面里必须安排与这道菜匹配的真实餐具和主菜互动，餐具类型、数量、是否一只手或多只手入镜都按菜品自行判断；动作感必须保留，但不要再固定成所有菜都用一双木筷夹起主菜的模板。
+画面里必须安排与这道菜匹配的真实餐具和主菜互动，具体餐具、数量和动作瞬间以菜谱【主画面说明】里的动态动作字段为准；动作感必须保留，但不要再固定成所有菜都用一双木筷夹起主菜的模板。
+最终 prompt 必须直接沿用菜谱【主画面说明】里的动态动作字段，不要再把筷子、勺子、刀叉、叉子、手抓写成多个备选方向。
+如果这道菜的主菜内部还包着其它食材，最终 prompt 必须明确写出有一块主菜被人真实咬开或掰开，能清楚看到里面食材和汁水。
+器皿与摆盘要保留真实的人手出菜痕迹，例如轻微错位、高低差、疏密变化、自然铺开或少量盘边汁痕，不要整齐复制。
 {build_iphone_food_photo_requirement('整张海报里')}
 {build_unbranded_prop_requirement('整张海报里')}
 {build_page01_real_photo_requirement()}
@@ -183,7 +232,10 @@ def build_local_page01_prompt(bundle: dict[str, Any]) -> str:
 酱汁或汤汁状态必须是：{bundle['sauce']}
 质感重点必须是：{bundle['texture']}
 色彩点缀必须是：{bundle['colors']}
+主画面互动动作必须是：{bundle['dynamic_action']}
 {build_page01_dish_interaction_requirement()}
+{build_page01_plating_naturalness_requirement(bundle)}
+{build_page01_filled_cross_section_requirement(bundle)}
 整张图的标题、字体、边框、配色、卡片排版和海报节奏必须严格沿用当前满意版本的爆款 VI，不要因为主菜更真实就把整张图改成普通手机纪实照片。
 {build_iphone_food_photo_requirement('主菜成品图、背景里可见的小食材和桌面上的任何食物内容')}
 {build_unbranded_prop_requirement('主菜成品图、左右卡片附近、桌面上和背景里的所有器皿、调料、瓶罐、包装与辅助道具')}
