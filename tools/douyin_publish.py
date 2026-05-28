@@ -260,23 +260,26 @@ def resolve_cover_path(publish_dir: Path) -> Path:
     if direct_cover.exists() and direct_cover.is_file():
         return direct_cover
 
+    # 优先按通用关键词识别封面文件，兼容“cover”和“封面”两种命名习惯。
     candidates = sorted(
         path
         for path in publish_dir.iterdir()
-        if path.is_file() and path.stem.lower() == "cover" and path.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES
+        if path.is_file()
+        and path.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES
+        and ("cover" in path.stem.lower() or "封面" in path.stem)
     )
     if not candidates:
         raise RuntimeError(f"publish 目录里未找到 cover 图片：{publish_dir}")
     return candidates[-1]
 
 
-def collect_publish_images(publish_dir: Path) -> tuple[Path, ...]:
+def collect_publish_images(publish_dir: Path, *, cover_path: Path | None = None) -> tuple[Path, ...]:
     image_paths = sorted(
         path
         for path in publish_dir.iterdir()
         if path.is_file()
         and path.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES
-        and path.stem.lower() != "cover"
+        and (cover_path is None or path.resolve() != cover_path.resolve())
     )
     if not image_paths:
         raise RuntimeError(f"publish 目录里没有可上传的图文图片：{publish_dir}")
@@ -326,11 +329,12 @@ def resolve_publish_assets(settings: PublishSettings) -> PublishAssets:
         description_file.write_text(normalized_description_text, encoding="utf-8")
         print(f"已按当前 config 同步描述文件话题：{description_file}")
 
+    cover_path = resolve_cover_path(publish_dir)
     return PublishAssets(
         output_dir=settings.output_dir,
         publish_dir=publish_dir,
-        image_paths=collect_publish_images(publish_dir),
-        cover_path=resolve_cover_path(publish_dir),
+        image_paths=collect_publish_images(publish_dir, cover_path=cover_path),
+        cover_path=cover_path,
         title_text=title_text,
         description_body=description_body,
         topic_tags=merged_topic_tags,
