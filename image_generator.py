@@ -2927,7 +2927,7 @@ def get_cover_image_settings() -> dict[str, Any]:
     return {
         "model": os.getenv("OPENAI_COVER_IMAGE_MODEL", default_model).strip() or default_model,
         "size": validate_gpt_image_size(
-            os.getenv("OPENAI_COVER_IMAGE_SIZE", "864x1536").strip() or "864x1536",
+            os.getenv("OPENAI_COVER_IMAGE_SIZE", "1024x1536").strip() or "1024x1536",
             env_name="OPENAI_COVER_IMAGE_SIZE",
         ),
         "quality": os.getenv("OPENAI_COVER_IMAGE_QUALITY", default_quality).strip() or default_quality,
@@ -3481,12 +3481,12 @@ def append_cover_hard_requirements(prompt_text: str, fixed_dish_name: str, bundl
     additions: list[str] = []
     vertical_dish_name = cover_page.format_vertical_dish_name(fixed_dish_name)
 
-    if not re.search(r"竖版\s*9:16", normalized):
-        additions.append("整张图必须是竖版9:16短视频封面图，不是2:3，也不是其它比例。")
+    if not re.search(r"竖版\s*2:3", normalized):
+        additions.append("整张图必须是竖版2:3封面图。")
     if not re.search(r"(画布正中|中轴|正中竖轴|正中竖线).*(标题通道|单列竖排|竖向标题通道)", normalized):
         additions.append(cover_page.build_cover_centered_vertical_title_requirement(fixed_dish_name, vertical_dish_name))
-    if not re.search(r"(背景主菜|餐盘|背景).*(避开|退到).*(中轴|下半部|右下|左下)", normalized):
-        additions.append("背景主菜和餐盘必须主动避开中轴标题通道，主要退到中下段、下半部、右下或左下，不能把竖排菜名挤到侧边。")
+    if not re.search(r"(背景主菜|餐盘|陪衬|背景).*(避开|退到).*(中轴|标题通道)", normalized):
+        additions.append("背景主菜、餐盘和陪衬必须主动避开中轴标题通道，不能把竖排菜名挤到侧边。")
     if not re.search(r"(封面背景|背景).*(沿用|来自|参考).*(首图|参考图).*(同场景|同一道菜)", normalized):
         additions.append("封面背景沿用首图同一道菜的同场景，不要另起模板。")
     if not re.search(r"(除菜名外|其它区域\s*0\s*文字|0\s*文字)", normalized):
@@ -3501,11 +3501,11 @@ def append_cover_hard_requirements(prompt_text: str, fixed_dish_name: str, bundl
 def validate_cover_prompt_content(prompt_text: str, fixed_dish_name: str, bundle: dict[str, Any]) -> str:
     normalized = validate_image_prompt_content(prompt_text, fixed_dish_name=fixed_dish_name, stage_name="封面prompt")
     normalized = append_cover_hard_requirements(normalized, fixed_dish_name=fixed_dish_name, bundle=bundle)
-    if not re.search(r"竖版\s*9:16", normalized):
-        raise ValueError("封面prompt 缺少 9:16 画幅约束。")
+    if not re.search(r"竖版\s*2:3", normalized):
+        raise ValueError("封面prompt 缺少 2:3 画幅约束。")
     if not re.search(r"(画布正中|中轴|正中竖轴|正中竖线).*(标题通道|单列竖排|竖向标题通道)", normalized):
         raise ValueError("封面prompt 缺少菜名单列竖排中轴约束。")
-    if not re.search(r"(背景主菜|餐盘|背景).*(避开|退到).*(中轴|下半部|右下|左下)", normalized):
+    if not re.search(r"(背景主菜|餐盘|陪衬|背景).*(避开|退到).*(中轴|标题通道)", normalized):
         raise ValueError("封面prompt 缺少背景避让中轴约束。")
     if not re.search(r"(封面背景|背景).*(沿用|来自|参考).*(首图|参考图).*(同场景|同一道菜)", normalized):
         raise ValueError("封面prompt 缺少首图同场景约束。")
@@ -4011,10 +4011,12 @@ def build_cover_reference_prompt_user_content(
 你要做的是重写最终封面图 prompt，让封面背景里的主菜样式、器皿、桌面、酱汁和构图关系尽量贴近这张已筛中的首图，而不是只沿用抽象文字描述。
 
 必须继续保留这些封面硬约束：
-- 竖版 9:16。
+- 竖版 2:3。
 - 菜名单列竖排压在中轴。
 - 除菜名外画面其它区域 0 文字。
-- 背景主菜和餐盘主动避开中轴标题通道，主要退到中下段、下半部、右下或左下。
+- 背景主菜和餐盘主动避开中轴标题通道。
+
+最终 prompt 要继续保持简洁直接，不要自行增加复杂条件、长清单或重复限制。
 
 下面是当前已有的封面 prompt 草稿，请在保留上述硬约束的前提下，按这张已筛中的首图把它改写得更贴近真实参考图：
 
