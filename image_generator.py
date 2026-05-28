@@ -578,7 +578,7 @@ def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
 8. 底部收藏文案必须固定为：{DEFAULT_COLLECTION_COPY}
 9. 首图上半部不要再额外设置收藏提示细条，避免和底部收藏关注横条重复。
 10. 最终菜名必须严格等于：{fixed_dish_name}
-11. 主画面必须直接指定一种最合适的真实餐具或上桌工具，写死具体名称、数量和动作瞬间，不要给后续文生图阶段列举多个餐具备选，也不要写“自行安排”“餐具数量不限”“例如”这类模板话。
+11. 主画面必须指定一种最合适的真实餐具或上桌工具，并写出“有人手持餐具与主菜互动的瞬间”；不要给后续文生图阶段列举多个餐具备选，也不要写“自行安排”“例如”这类模板话。
 
 输出必须严格遵循下面这份纯文本结构，不要添加解释，不要使用 Markdown 代码块：
 
@@ -645,7 +645,7 @@ def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
 5. 引导句和副标题整体都要更像抖音美食平台会用的轻口语短句，可以更鲜活、更俏皮、更有反应感，但不要油腻，不要为了押韵硬凑词。
 6. 引导句和副标题不能复用同一组词，不能只是上下换行、加减空格或多减一个字。引导句负责提供钩子点，副标题负责提炼 2 到 3 个卖点词，两者语义必须明显分工。
 7. 主画面说明要足够具体，让后续文生图阶段知道器皿、桌面、背景陪衬、主体食材、汤汁或酱体状态、画面颜色重点，还要明确唯一最合适的具体餐具、具体动作瞬间和是否少量手部入镜，不要再默认所有菜都是筷子夹起镜头。
-8. 动态动作必须直接写成唯一方案，例如“搭配一把叉子叉起一块主菜”“一把大汤勺舀起一勺主菜”“一副刀叉切开后叉起一块”，不能写成“筷子或勺子都可以”“按菜品自行安排”这种把选择权继续丢给后续模型的句子。
+8. 动态动作必须直接写成唯一方案，并明确是“有人手持餐具与主菜互动的瞬间”；不能写成“筷子或勺子都可以”“按菜品自行安排”这种把选择权继续丢给后续模型的句子。
 9. 如果主菜属于酿、夹心、包裹、卷入、夹层、内馅这类里面还包着其它食材的结构，主画面必须明确写出有一块主菜已被人真实咬开或掰开，能清楚看见里面食材和汁水，不要只写完整外表。
 10. 器皿与摆盘不仅要写器皿类型，还要写真实出菜状态；要按菜品具体写出类似“人为不完全整齐地码放”“自然错位堆叠”“疏密不一地铺开”“汤面配料自然浮沉”这类人手装盘痕迹，不能把所有菜都写成整齐复制模板。
 11. 器皿与摆盘、桌面与环境、背景陪衬必须跟这道菜本身的烹饪方式、上桌逻辑、菜系气质和主料结构相匹配，不要默认每道菜都写成暖色陶盘、木托、木桌和几只小碗的同一套模板。
@@ -654,6 +654,7 @@ def build_recipe_system_prompt(ad_copy: str, fixed_dish_name: str) -> str:
 14. 食材分组要清楚，数量要合理，不能互相打架；如果存在明显配菜，单独放进“配菜”分组，不要混在主料里。
 15. 3 到 5 步必须前后顺序清晰，适合普通人照做；不要为了凑数把一个动作拆成两步，也不要为了省步数漏掉决定成败的关键环节。
 16. 文字整体要像成熟抖音爆款图文海报，而不是教程论文或餐厅菜单。
+17. 主画面食材要显式体现家庭厨房切配随机性：同一种食材允许有大有小、有长有短、厚薄不一的自然差异，不要做成工厂化毫米级统一切割。
 """.strip()
 
 
@@ -669,7 +670,7 @@ def build_recipe_user_prompt(dish_idea: str, notes: str) -> str:
 引导句和副标题不能复用同一组词，不能只是把同一串卖点放到菜名上方再重复一遍；引导句要像钩子，副标题要像拆开的卖点词。
 主画面的器皿、桌面和背景陪衬必须跟菜本身匹配，不要默认写成木桌、暖色陶盘、木托和几只失焦小碗。
 不同结构的菜请主动拉开场景，不要只是把同一套浅灰石面、水磨石和小圆碟背景换个盘色再复用。
-主画面的动态动作必须直接指定唯一一种最合适的餐具或上桌工具，不要把筷子、勺子、刀叉、叉子、手抓写成多个备选方向。
+主画面的动态动作必须直接指定唯一一种最合适的餐具或上桌工具，并写成“有人手持餐具与主菜互动的瞬间”；不要把筷子、勺子、刀叉、叉子、手抓写成多个备选方向。
 如果主菜属于酿、夹心、包裹、卷入、夹层、内馅这类里面还有其它食材的结构，主画面必须明确写出有一块主菜被人真实咬开或掰开，能看见里面食材和汁水。
 器皿与摆盘要写出真实的人手出菜状态，例如轻微错位、高低差、疏密变化、自然铺开或少量盘边汁痕，不要写成整齐复制模板。
 """.strip()
@@ -1196,6 +1197,8 @@ GENERIC_DYNAMIC_ACTION_PATTERNS: tuple[str, ...] = (
     r"可一只手或多只手",
     r"例如",
     r"不固定成",
+    r"一只筷",
+    r"另一只筷",
 )
 
 
@@ -1280,19 +1283,19 @@ def infer_dynamic_action_description(
     filled_dish = is_filled_or_wrapped_dish(combined_text)
 
     if contains_any(combined_text, ["汉堡", "三明治", "夹饼", "夹馍", "卷饼", "塔可", "手抓饼"]):
-        action_text = "一只手直接拿起主菜主体，边缘保留真实按压痕迹"
+        action_text = "有人手持主菜自然上手取食的瞬间，边缘保留真实按压痕迹"
     elif contains_any(combined_text, ["汤", "羹", "煲", "砂锅", "锅仔", "炖", "火锅"]):
-        action_text = "一把大汤勺从锅边舀起一勺主菜和汤汁，少量自然手部入镜"
+        action_text = "有人手持汤勺舀起主菜与汤汁的瞬间，少量自然手部入镜"
     elif contains_any(combined_text, ["牛排", "菲力", "羊排", "猪排", "肋排", "排类"]):
-        action_text = "一副刀叉切开主菜后，叉子叉起一块最诱人的切面，少量自然手部入镜"
+        action_text = "有人手持刀叉切开并托起主菜切面的瞬间，少量自然手部入镜"
     elif contains_any(combined_text, ["意面", "通心粉", "螺旋面"]):
-        action_text = "一把叉子卷起一口主菜和酱汁，少量自然手部入镜"
+        action_text = "有人手持叉子卷起一口主菜与酱汁的瞬间，少量自然手部入镜"
     elif contains_any(combined_text, ["面条", "炒面", "拌面", "焖面", "汤面", "凉面", "拉面", "乌冬", "米线", "河粉", "米粉", "炒粉", "拌粉", "汤粉", "粉丝"]) and not contains_any(combined_text, ["意面"]):
-        action_text = "一双筷子挑起一口主菜主体，带出自然垂坠感，少量自然手部入镜"
+        action_text = "有人手持餐具挑起一口主菜主体的瞬间，带出自然垂坠感，少量自然手部入镜"
     elif contains_any(combined_text, ["豆腐", "酿", "卷", "丸", "块", "鱼肉", "鱼片", "虾球"]):
-        action_text = "一把叉子叉起一块主菜主体，少量自然手部入镜"
+        action_text = "有人手持餐具托起一块主菜主体的瞬间，少量自然手部入镜"
     else:
-        action_text = "一双筷子夹起一口最有食欲的主菜主体，少量自然手部入镜"
+        action_text = "有人手持餐具与主菜互动的瞬间，突出最有食欲的一口，少量自然手部入镜"
 
     if filled_dish and not re.search(r"(咬|露出|露芯|露馅|剖开|掰开|切开)", action_text):
         action_text = f"{action_text.rstrip('。；，,')}，这块主菜已经被人真实咬开一口，能清楚看见里面包裹的食材层次和汁水"
@@ -1316,6 +1319,9 @@ def normalize_dynamic_action_description(
         )
 
     normalized_action = " ".join(action_text.split()).strip()
+    normalized_action = re.sub(r"一只\s*筷子?", "一双筷子", normalized_action)
+    normalized_action = re.sub(r"另一只\s*筷子?", "另一双筷子", normalized_action)
+    normalized_action = re.sub(r"一把\s*筷子", "一双筷子", normalized_action)
     if is_filled_or_wrapped_dish(dish_name, notes, plate_description, main_food_description) and not re.search(
         r"(咬|露出|露芯|露馅|剖开|掰开|切开)",
         normalized_action,
@@ -3520,6 +3526,29 @@ def build_page01_required_prompt_fragments(bundle: dict[str, Any]) -> list[str]:
     return unique_fragments
 
 
+def normalize_page01_prompt_phrasing(prompt_text: str) -> str:
+    normalized = prompt_text.strip()
+    normalized = re.sub(r"一只\s*竹?筷子?", "一双筷子", normalized)
+    normalized = re.sub(r"另一只\s*竹?筷子?", "另一双筷子", normalized)
+    normalized = re.sub(r"一把\s*竹?筷子", "一双筷子", normalized)
+    normalized = re.sub(
+        r"有人手持竹?筷[，,、]\s*一只([^，。；;]*?)[，,、]\s*另一只([^，。；;]*?)",
+        r"有人手持餐具与主菜互动，\1，同时\2",
+        normalized,
+    )
+    normalized = re.sub(
+        r"一双竹?筷子?夹起([^，。；;]*?)[，,、]\s*另一只([^，。；;]*?)",
+        r"有人手持餐具夹起\1，并\2",
+        normalized,
+    )
+    normalized = re.sub(
+        r"一双竹?筷子?([^，。；;]*?)[，,、]\s*另一双竹?筷子?([^，。；;]*?)",
+        r"有人手持餐具与主菜互动，\1，并\2",
+        normalized,
+    )
+    return normalized
+
+
 def collect_page01_prompt_risks(prompt_text: str) -> list[str]:
     normalized = prompt_text.strip()
     risks: list[str] = []
@@ -3540,6 +3569,7 @@ def collect_page01_prompt_risks(prompt_text: str) -> list[str]:
 
 def validate_page01_prompt_content(prompt_text: str, fixed_dish_name: str, bundle: dict[str, Any]) -> str:
     normalized = validate_image_prompt_content(prompt_text, fixed_dish_name=fixed_dish_name, stage_name="文生图prompt")
+    normalized = normalize_page01_prompt_phrasing(normalized)
     if not re.search(r"(中轴线|正中竖线|画面正中竖线|居中堆叠|居中排布)", normalized):
         raise ValueError("文生图prompt 缺少首图标题居中结构约束。")
 
