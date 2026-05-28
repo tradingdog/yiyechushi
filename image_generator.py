@@ -74,6 +74,12 @@ PUBLISH_PLATFORM_TOPIC_SPECS: tuple[tuple[str, str, int], ...] = (
     ("wechat", "微信视频号和公众号", 30),
     ("kuaishou", "快手", 4),
 )
+PUBLISH_PLATFORM_REQUIRED_TOPIC_ENV: dict[str, str] = {
+    "douyin": "PUBLISH_REQUIRED_TOPICS",
+    "xiaohongshu": "PUBLISH_REQUIRED_TOPICS_XIAOHONGSHU",
+    "wechat": "PUBLISH_REQUIRED_TOPICS_WECHAT",
+    "kuaishou": "PUBLISH_REQUIRED_TOPICS_KUAISHOU",
+}
 PUBLISH_PLATFORM_TOPIC_FALLBACKS: dict[str, tuple[str, ...]] = {
     "douyin": (
         "抖音美食推荐官",
@@ -3657,8 +3663,13 @@ def parse_publish_topic_candidates(raw_topics: str) -> list[str]:
 
 
 def get_required_publish_topics() -> list[str]:
+    return get_required_publish_topics_for_platform("douyin")
+
+
+def get_required_publish_topics_for_platform(platform_key: str) -> list[str]:
     ensure_runtime_config_loaded()
-    raw_topics = os.getenv("PUBLISH_REQUIRED_TOPICS", "").strip()
+    env_name = PUBLISH_PLATFORM_REQUIRED_TOPIC_ENV.get(platform_key, "PUBLISH_REQUIRED_TOPICS")
+    raw_topics = os.getenv(env_name, "").strip()
     return parse_publish_topic_candidates(raw_topics)
 
 
@@ -3812,6 +3823,14 @@ def build_platform_topic_prompt_user(
     dish_name: str,
     topic_reference_text: str,
 ) -> str:
+    required_topic_lines: list[str] = []
+    for platform_key, platform_label, _count in PUBLISH_PLATFORM_TOPIC_SPECS:
+        required_topics = get_required_publish_topics_for_platform(platform_key)
+        required_text = " ".join(required_topics) if required_topics else "无"
+        required_topic_lines.append(f"- {platform_label}：{required_text}")
+
+    required_topic_block = "\n".join(required_topic_lines)
+
     return f"""
 当前菜名：{dish_name}
 
@@ -3823,6 +3842,9 @@ def build_platform_topic_prompt_user(
 2. 小红书：10 个
 3. 微信视频号和公众号：30 个
 4. 快手：4 个
+
+各平台指定必带话题（如为“无”则不强制）：
+{required_topic_block}
 """.strip()
 
 
@@ -3857,10 +3879,9 @@ def build_platform_topic_fallback_candidates(
     description_body: str,
 ) -> list[str]:
     merged_text = f"{dish_name} {notes} {source_text} {description_body}"
-    candidates: list[str] = []
+    candidates: list[str] = [*get_required_publish_topics_for_platform(platform_key)]
 
     if platform_key == "douyin":
-        candidates.extend(get_required_publish_topics())
         candidates.extend(build_publish_activity_topics(merged_text))
         candidates.extend(infer_publish_topic_tags(dish_name=dish_name, source_text=source_text, notes=notes))
 
@@ -3888,7 +3909,7 @@ def normalize_platform_topics(
     notes: str,
     description_body: str,
 ) -> list[str]:
-    required_topics = get_required_publish_topics() if platform_key == "douyin" else []
+    required_topics = get_required_publish_topics_for_platform(platform_key)
     required_tags = [format_topic_tag(item) for item in required_topics if format_topic_tag(item)]
     required_set = set(required_tags)
 

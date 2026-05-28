@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-v0.88
+v0.89
 
 ## 使用方式
 
@@ -20,7 +20,7 @@ v0.88
 10. 如需单独只刷新 dish_name.txt 而不继续生成 prompt 或图片，直接运行 tools/generate_auto_dish_idea.py。
 11. 如需从某个 output 子目录里的多版本图片中自动筛出更适合发布的版本，运行 tools/select_publish_images.py；它会按页面分组让豆包逐页打分，再把胜出图移入 publish 文件夹。
 12. 默认情况下，主流程会先生成图解01到图解06并先做一次 publish 筛图，再用筛中的首图重写封面 prompt、生成封面并单独筛封面；若 PHOTOSHOP_AUTO_COMPOSITE=1，则最后只对 publish 目录里的入选图片执行 Photoshop 合成。若只想关掉 publish 这一步，把 config.env 里的 PUBLISH_AUTO_SELECT 改成 2。
-13. 如需手动指定 1 个或多个必须保留在最终 5 个抖音话题里的标签，修改 config.env 里的 PUBLISH_REQUIRED_TOPICS；多个话题可用空格、逗号、分号或换行分隔，写不写 # 都可以。
+13. 如需手动指定各平台必须保留的话题，修改 config.env：抖音用 PUBLISH_REQUIRED_TOPICS，小红书用 PUBLISH_REQUIRED_TOPICS_XIAOHONGSHU，微信视频号和公众号用 PUBLISH_REQUIRED_TOPICS_WECHAT，快手用 PUBLISH_REQUIRED_TOPICS_KUAISHOU；留空表示该平台不强制必带。多个话题可用空格、逗号、分号或换行分隔，写不写 # 都可以。
 14. 如需把 publish 目录里的图和对应标题/描述自动投喂到抖音创作者页，运行 tools/douyin_publish.py；若当前没有可接管的调试浏览器，脚本会自动拉起一个独立的 Chrome 自动化窗口。
 15. 如需手动先打开一个带 9222 远程调试端口的独立 Chrome，直接双击根目录里的 run_douyin_chrome_debug.bat；它会复用 tools/chrome_automation_profile 资料目录，便于后续 tools/douyin_publish.py 直接接管。命令行预检可用 run_douyin_chrome_debug.bat --check。
 16. v0.82 起，主流程、图片工具、发布工具和独立 Chrome 启动脚本都会在根目录 logs 下按“时间戳_脚本名_pid.log”写入新日志文件；每运行一次脚本都会新建一份，便于排查问题。
@@ -29,6 +29,7 @@ v0.88
 19. v0.86 起，封面 prompt 已改成更短更直接的同场景口径：主流程按已筛中的首图重写封面 prompt 时，会优先沿用参考首图的同场景背景，不再强制把器皿、桌面、后景、质感和色彩逐条背成长清单；图解01 同时新增更强的主画面约束，动态动作不再被 normalize 覆盖成通用模板，主画面必须沿用豆包写出的唯一具体餐具，对酿、夹心、内馅、包裹类主菜会强制出现露芯咬口画面，摆盘也会保留人手自然码放和轻微不齐。
 20. v0.87 起，封面 prompt 再次收口为固定模板句式，系统提示、用户提示和本地兜底都改为“短句直给 + 固定顺序 + 少条件”的简洁风格；封面比例同步改回竖版 2:3，默认尺寸统一为 1024x1536。
 21. v0.88 起，图文标题文件改为通用命名“_图文标题.txt”；图文描述已按平台拆分为多个版本：抖音（5话题）、小红书（10话题）、微信视频号和公众号（30话题）、快手（4话题），并分别输出平台话题 txt 与平台图文描述 txt。多平台话题生成阶段固定只使用 dish_name.txt 作为关联新菜品文档。
+22. v0.89 起，三平台“必带话题”配置已开放：小红书、微信视频号和公众号、快手都可像抖音一样在 config.env 独立设置必带标签，也可以保持默认空值不强制。
 
 ## 当前状态
 
