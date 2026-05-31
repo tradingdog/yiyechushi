@@ -21,12 +21,23 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from main import run_v2_first_feature
-from v2_core import IDEA_FILE, OUTPUT_DIR, ensure_runtime_config_loaded
+from v2_core import (
+    IDEA_FILE,
+    OUTPUT_DIR,
+    build_openai_image_client,
+    build_run_output_dir,
+    ensure_runtime_config_loaded,
+    generate_images_by_prompt,
+    get_image_settings,
+    get_timestamp,
+    save_generated_images,
+    save_text_output,
+)
 
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.27"
+PANEL_VERSION = "v0.28"
 
 RUN_LOCK = threading.Lock()
 RUNNING = False
@@ -337,7 +348,7 @@ HTML_PAGE = """<!doctype html>
           </div>
         </div>
 
-        <div class="section-card">
+        <div id="notesCard" class="section-card">
           <h3 class="sec-title">补充说明</h3>
           <textarea id="dishNotes" placeholder="可写关键做法、口味倾向、你想强调的卖点"></textarea>
         </div>
@@ -446,6 +457,9 @@ HTML_PAGE = """<!doctype html>
       const manual = mode === "file";
       $("dishName").disabled = !manual;
       $("dishName").classList.toggle("input-disabled", !manual);
+      $("dishNotes").disabled = !manual;
+      $("dishNotes").classList.toggle("input-disabled", !manual);
+      $("notesCard").style.display = manual ? "block" : "none";
     }
 
     function setStatus(text, level=""){
@@ -655,7 +669,10 @@ HTML_PAGE = """<!doctype html>
       state.currentResult = result || null;
       更新结果信息(result?.dish_name, result?.reference_dish, result?.region_label, result?.output_dir);
       renderGallery(result?.saved_images || []);
-      const msg = result?.image_error ? ("生图异常：\\n" + result.image_error) : "生图成功。";
+      const isRegen = result?.run_kind === "regenerate_image";
+      const msg = result?.image_error
+        ? ((isRegen ? "重新生图异常：\\n" : "生图异常：\\n") + result.image_error)
+        : (isRegen ? "已按原提示词重新生图完成。" : "生图成功。");
       $("resultMsg").textContent = msg;
       $("resultMsg").className = "status " + (result?.image_error ? "warn" : "ok");
     }
@@ -824,24 +841,41 @@ HTML_PAGE = """<!doctype html>
       if(showMsg){ setStatus("页面状态已刷新。", "ok"); }
     }
 
-    async function runNow(){
-      if(state.mode === "file" && !$("dishName").value.trim()){
+    async function runNow(options = {}){
+      const regenerateOnly = Boolean(options?.regenerateOnly);
+      if(!regenerateOnly && state.mode === "file" && !$("dishName").value.trim()){
         setStatus("手动点名模式下请先填写菜名。", "danger");
         $("dishName").focus();
         return;
       }
+      if(regenerateOnly && !state.currentOutputPath){
+        setStatus("请先在右侧选中一条已有结果，再执行重新生成。", "warn");
+        return;
+      }
       state.logNextIndex = 0;
       if(!state.pollTimer){ $("logPanel").textContent = ""; }
-      setStatus("任务已提交，正在加入队列...");
+      if(regenerateOnly){
+        setStatus("重新生成任务已提交：沿用原提示词，仅按当前画质/数量重新出图。");
+      }else{
+        setStatus("任务已提交，正在加入队列...");
+      }
       try{
-        const payload = {
-          mode: state.mode,
-          dish_name: $("dishName").value.trim(),
-          notes: $("dishNotes").value.trim(),
-          model_temperature: $("temperature").value.trim(),
-          image_quality: $("imageQuality").value.trim(),
-          image_count: $("imageCount").value.trim()
-        };
+        const payload = regenerateOnly
+          ? {
+              action: "regenerate_image",
+              source_output_dir: state.currentOutputPath,
+              image_quality: $("imageQuality").value.trim(),
+              image_count: $("imageCount").value.trim()
+            }
+          : {
+              action: "run",
+              mode: state.mode,
+              dish_name: $("dishName").value.trim(),
+              notes: $("dishNotes").value.trim(),
+              model_temperature: $("temperature").value.trim(),
+              image_quality: $("imageQuality").value.trim(),
+              image_count: $("imageCount").value.trim()
+            };
         const res = await fetch("/api/run_start", {
           method:"POST",
           headers:{"Content-Type":"application/json"},
@@ -851,10 +885,15 @@ HTML_PAGE = """<!doctype html>
         if(!res.ok){ throw new Error(data.error || "运行失败"); }
         if(data.started_now){
           appendLogs([`[${new Date().toLocaleTimeString()}] 任务 #${data.task_id} 已开始执行。`]);
-          setStatus("任务已开始执行。");
+          setStatus(regenerateOnly ? "重新生成已开始执行。" : "任务已开始执行。");
         }else{
           appendLogs([`[${new Date().toLocaleTimeString()}] 任务 #${data.task_id} 已加入队列，前方 ${data.waiting_ahead} 个任务。`]);
-          setStatus(`已加入队列，前方还有 ${data.waiting_ahead} 个任务。`, "ok");
+          setStatus(
+            regenerateOnly
+              ? `重新生成已加入队列，前方还有 ${data.waiting_ahead} 个任务。`
+              : `已加入队列，前方还有 ${data.waiting_ahead} 个任务。`,
+            "ok"
+          );
         }
         startPolling();
         await fetchRunStatus();
@@ -909,7 +948,7 @@ HTML_PAGE = """<!doctype html>
       $("modeAutoBtn").onclick = () => setMode("auto");
       $("modeFileBtn").onclick = () => setMode("file");
       $("runBtn").onclick = runNow;
-      $("regenBtn").onclick = runNow;
+      $("regenBtn").onclick = () => runNow({regenerateOnly: true});
       $("presetBudgetBtn").onclick = () => applyPreset("budget");
       $("presetQualityBtn").onclick = () => applyPreset("quality");
       $("prevImgBtn").onclick = () => showGalleryImage(state.galleryIndex - 1);
@@ -1021,6 +1060,85 @@ def write_idea_file(dish_name: str, notes: str) -> None:
     IDEA_FILE.write_text(payload + "\n", encoding="utf-8")
 
 
+def load_prompt_from_output_dir(source_output_dir: Path) -> tuple[str, Path]:
+    prompt_files = sorted(source_output_dir.glob("*_豆包提示词.txt"))
+    if not prompt_files:
+        raise FileNotFoundError("当前目录未找到可用于重生图的提示词文件（*_豆包提示词.txt）。")
+    prompt_file = prompt_files[0]
+    prompt_text = prompt_file.read_text(encoding="utf-8").strip()
+    if not prompt_text:
+        raise ValueError(f"提示词文件为空：{prompt_file}")
+    return prompt_text, prompt_file
+
+
+def regenerate_images_from_output_dir(source_output_dir: Path) -> dict[str, Any]:
+    dish_name = infer_dish_name_from_folder(source_output_dir.name)
+    prompt_text, source_prompt_file = load_prompt_from_output_dir(source_output_dir)
+
+    timestamp = get_timestamp()
+    run_output_dir = build_run_output_dir(timestamp, dish_name)
+    prompt_file = run_output_dir / f"{dish_name}_豆包提示词.txt"
+    save_text_output(prompt_text, prompt_file)
+    print(f"重新生成沿用提示词：{source_prompt_file}")
+    print(f"重新生成输出目录：{run_output_dir}")
+
+    image_client = build_openai_image_client()
+    image_settings = get_image_settings()
+    print(
+        "重新生图参数："
+        f"quality={image_settings['quality']}，n={image_settings['image_count']}，model={image_settings['model']}"
+    )
+
+    image_items: list[dict[str, str]] = []
+    image_error = ""
+    try:
+        image_items = generate_images_by_prompt(
+            client=image_client,
+            prompt_text=prompt_text,
+            settings=image_settings,
+        )
+    except Exception as image_exc:
+        image_error = f"生图失败：{image_exc}"
+        error_file = run_output_dir / "生图失败原因.txt"
+        save_text_output(
+            "本轮为重新生图模式，已沿用原提示词执行到生图调用点。\n"
+            f"失败原因：{image_exc}\n"
+            "建议：稍后重试，或先检查 OPENAI_API_KEY、网络代理与账号可用区。",
+            error_file,
+        )
+        print(f"重新生图失败，已写入说明：{error_file}")
+    finally:
+        close_image = getattr(image_client, "close", None)
+        if callable(close_image):
+            close_image()
+
+    saved_images: list[str] = []
+    if image_items:
+        saved_images = save_generated_images(
+            image_items=image_items,
+            output_dir=run_output_dir,
+            timestamp=timestamp,
+            dish_name=dish_name,
+        )
+        for image_file in saved_images:
+            print(f"已保存图片：{image_file}")
+
+    return {
+        "dish_name": dish_name,
+        "notes": "",
+        "region_label": "",
+        "reference_dish": "",
+        "memory_file": "",
+        "prompt_file": str(prompt_file),
+        "output_dir": str(run_output_dir),
+        "saved_images": saved_images,
+        "image_error": image_error,
+        "run_kind": "regenerate_image",
+        "source_output_dir": str(source_output_dir),
+        "source_prompt_file": str(source_prompt_file),
+    }
+
+
 def current_config_snapshot() -> dict[str, str]:
     ensure_runtime_config_loaded()
     return {
@@ -1085,18 +1203,25 @@ def start_next_task_locked() -> bool:
 def run_task_worker(task: dict[str, Any]) -> None:
     global RUNNING, LAST_RESULT, LAST_ERROR, LAST_FINISHED_AT, CURRENT_TASK
     stream = LiveLogWriter()
+    action = str(task.get("action", "run")).strip().lower() or "run"
     mode = str(task.get("mode", "")).strip().lower()
     dish_name = str(task.get("dish_name", "")).strip()
+    source_output_dir = str(task.get("source_output_dir", "")).strip()
     append_run_log(
         f"[{time.strftime('%H:%M:%S')}] 开始任务 #{task.get('task_id', '-')}"
-        f"（模式：{mode or '按配置'}，菜名：{dish_name or '自动生成'}）"
+        f"（类型：{'重新生图' if action == 'regenerate_image' else '正常生成'}，"
+        f"模式：{mode or '按配置'}，菜名：{dish_name or '自动生成'}）"
     )
     try:
         with redirect_stdout(stream), redirect_stderr(stream):
             apply_runtime_overrides(task)
-            if mode == "file":
-                write_idea_file(str(task.get("dish_name", "")).strip(), str(task.get("notes", "")).strip())
-            result = run_v2_first_feature(mode=mode if mode in {"auto", "file"} else None)
+            if action == "regenerate_image":
+                source_dir = resolve_output_path(source_output_dir)
+                result = regenerate_images_from_output_dir(source_dir)
+            else:
+                if mode == "file":
+                    write_idea_file(str(task.get("dish_name", "")).strip(), str(task.get("notes", "")).strip())
+                result = run_v2_first_feature(mode=mode if mode in {"auto", "file"} else None)
         with RUN_LOCK:
             LAST_RESULT = result
             LAST_ERROR = ""
@@ -1240,23 +1365,39 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, code=400)
             return
 
+        action = str(payload.get("action", "run")).strip().lower() or "run"
         mode = str(payload.get("mode", "")).strip().lower()
         dish_name = str(payload.get("dish_name", "")).strip()
-        if mode == "file" and not dish_name:
-            self._send_json({"error": "手动模式下，菜名不能为空。"}, code=400)
-            return
+        source_output_dir = str(payload.get("source_output_dir", "")).strip()
+
+        if action == "regenerate_image":
+            if not source_output_dir:
+                self._send_json({"error": "重新生成需要指定来源输出目录。"}, code=400)
+                return
+            try:
+                source_dir = resolve_output_path(source_output_dir)
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": f"来源目录无效：{exc}"}, code=400)
+                return
+            dish_name = infer_dish_name_from_folder(source_dir.name)
+        else:
+            if mode == "file" and not dish_name:
+                self._send_json({"error": "手动模式下，菜名不能为空。"}, code=400)
+                return
 
         with RUN_LOCK:
             waiting_ahead = len(TASK_QUEUE) + (1 if RUNNING else 0)
             TASK_SEQ += 1
             task_item = {
                 "task_id": TASK_SEQ,
+                "action": action if action in {"run", "regenerate_image"} else "run",
                 "mode": mode if mode in {"auto", "file"} else "",
                 "dish_name": dish_name,
                 "notes": str(payload.get("notes", "")).strip(),
                 "model_temperature": str(payload.get("model_temperature", "")).strip(),
                 "image_quality": str(payload.get("image_quality", "")).strip(),
                 "image_count": str(payload.get("image_count", "")).strip(),
+                "source_output_dir": str(source_dir) if action == "regenerate_image" else "",
                 "queued_at": time.time(),
             }
             if waiting_ahead == 0:
