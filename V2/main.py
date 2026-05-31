@@ -4,6 +4,7 @@ import argparse
 import os
 import shutil
 from pathlib import Path
+import re
 
 from script_logging import setup_script_logging
 
@@ -101,6 +102,38 @@ def remap_selected_image_path(image_paths: list[str], selected_path: str) -> lis
 
 
 def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) -> list[dict[str, str]]:
+    forbidden_overlay_terms = [
+        "图解教程",
+        "图解1/3",
+        "图解2/3",
+        "图解3/3",
+        "步骤与转化页",
+        "教程页",
+        "转化页",
+        "第1步",
+        "第2步",
+        "第3步",
+        "Step 1",
+        "Step 2",
+        "Step 3",
+    ]
+    forbidden_overlay_text = "、".join(forbidden_overlay_terms)
+    meta_text_cleaner = re.compile(r"(图解教程|图解\s*\d+\s*/\s*\d+|步骤与转化页|教程页|转化页|第\s*[一二三123]\s*步)", re.IGNORECASE)
+
+    def clean_text_overlay(raw_text: str) -> str:
+        text = meta_text_cleaner.sub("", raw_text).strip()
+        text = re.sub(r"\s{2,}", " ", text)
+        text = re.sub(r"^[·•\-—\s]+", "", text)
+        text = re.sub(r"[·•\-—\s]+$", "", text)
+        return text
+
+    card1_hook_text = clean_text_overlay(str(script_payload.get("card1_hook", "")).strip())
+    card1_sub_text = clean_text_overlay(str(script_payload.get("card1_sub", "")).strip())
+    if not card1_hook_text:
+        card1_hook_text = f"{dish_name}这样做太香了"
+    if not card1_sub_text:
+        card1_sub_text = "家常做法，真能一次成功"
+
     card2_items = script_payload.get("card2_items", [])
     if not isinstance(card2_items, list):
         card2_items = []
@@ -131,18 +164,20 @@ def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) 
     fixed_ad_slogan = "关注@阿叶造新菜，开店家用都不赖！"
 
     card1_prompt = (
-        f"为菜品“{dish_name}”生成竖版2:3图文第1张（6秒钩子页）。"
+        f"为菜品“{dish_name}”生成竖版2:3系列图的首张封面钩子图。"
         "画面主体是刚出锅成品，真实手机拍摄质感，暖色家常氛围。"
-        f"顶部大字标题：{script_payload.get('card1_hook','')}"
-        f"；副标题：{script_payload.get('card1_sub','')}。"
+        f"顶部大字标题：{card1_hook_text}"
+        f"；副标题：{card1_sub_text}。"
         "文字要粗大清晰，排版稳定，突出“看完还想继续滑”的视觉冲击力。"
         f"{realism_anchor}"
         f"{visual_consistency_block}"
+        "文字白名单：只允许出现“菜名、钩子标题、副标题”三类文字。"
+        f"文字黑名单：禁止出现“{forbidden_overlay_text}”及任何流程标签。"
         "禁止品牌logo和无关英文。"
     )
 
     card2_prompt = (
-        f"为菜品“{dish_name}”生成竖版2:3图文第2张（食材清单页，6秒）。"
+        f"为菜品“{dish_name}”生成竖版2:3系列图的食材清单页。"
         f"标题：{script_payload.get('card2_title','食材清单')}。"
         "必须严格继承图解01的视觉设计（色温、配色、字体、装饰元素、边框样式、阴影强度）。"
         "画面采用两列清单布局，文字清晰易读，留白合理。"
@@ -150,21 +185,23 @@ def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) 
         "这一页只做食材信息，不要步骤，不要大段营销文案。"
         f"{realism_anchor}"
         f"{visual_consistency_block}"
+        "文字白名单：只允许出现“菜名（可选）、食材清单标题、食材条目”。"
+        f"文字黑名单：禁止出现“{forbidden_overlay_text}”及任何流程标签。"
         "真实手机拍摄风格，无品牌logo。"
     )
 
-    card3_step_text = str(script_payload.get("card3_step", "")).strip()
+    card3_step_text = clean_text_overlay(str(script_payload.get("card3_step", "")).strip())
     if not card3_step_text:
         card3_step_text = "食材处理好后大火快炒上色，转中火焖3分钟，收汁后立刻出锅"
-    card3_cta_text = str(script_payload.get("card3_cta", "")).strip()
+    card3_cta_text = clean_text_overlay(str(script_payload.get("card3_cta", "")).strip())
     if "收藏" not in card3_cta_text:
         card3_cta_text = f"{card3_cta_text}，收藏起来下次做".strip("，")
     if fixed_ad_slogan not in card3_cta_text:
         card3_cta_text = f"{card3_cta_text}；{fixed_ad_slogan}".strip("；")
 
     card3_prompt = (
-        f"为菜品“{dish_name}”生成竖版2:3图文第3张（步骤与转化页，6秒）。"
-        f"一句话做法（必须具体可执行，不要'步骤1/步骤2/步骤3'编号）：{card3_step_text}。"
+        f"为菜品“{dish_name}”生成竖版2:3系列图的做法页。"
+        f"一句话做法（必须具体可执行，不要任何编号前缀）：{card3_step_text}。"
         f"底部两行引导文案：第一行“收藏起来，下次想吃直接做”；第二行“{fixed_ad_slogan}”。"
         f"若需要补充口吻，可参考：{card3_cta_text}。"
         "必须严格继承图解01/图解02的视觉设计（同色调、同字体、同版式系统）。"
@@ -172,6 +209,8 @@ def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) 
         f"{realism_anchor}"
         "底部引导文案必须完整可见，不可裁切，不可改字。"
         f"{visual_consistency_block}"
+        "文字白名单：只允许出现“菜名（可选）、一句话做法、收藏引导、关注引导”四类文字。"
+        f"文字黑名单：禁止出现“{forbidden_overlay_text}”及任何流程标签。"
         "真实手机拍摄风格，无品牌logo。"
     )
 

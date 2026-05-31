@@ -42,6 +42,10 @@ DEFAULT_CONTENT_TRACK = "电饭煲一锅出"
 _RUNTIME_CONFIG_LOADED = False
 TEMPLATE_PLACEHOLDER_PATTERN = re.compile(r"\{变量(?:[：:,，][^{}]*)?\}")
 STEP_PREFIX_PATTERN = re.compile(r"^\s*(?:第?\s*\d+\s*[步段]|步骤\s*\d+|step\s*\d+)\s*[:：、.．-]?\s*", re.IGNORECASE)
+META_COPY_PATTERN = re.compile(
+    r"(图解教程|图解\s*\d+\s*/\s*\d+|步骤与转化页|教程页|转化页|第\s*[一二三123]\s*张|第\s*[一二三123]\s*步)",
+    re.IGNORECASE,
+)
 
 
 def strip_inline_env_comment(raw_value: str) -> str:
@@ -603,11 +607,23 @@ def generate_three_card_script(
     if fixed_ad not in card3_cta:
         card3_cta = f"{card3_cta}；{fixed_ad}"
 
+    def clean_meta_copy(raw_text: str) -> str:
+        cleaned = META_COPY_PATTERN.sub("", raw_text).strip()
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        cleaned = re.sub(r"^[·•\-—\s]+", "", cleaned)
+        cleaned = re.sub(r"[·•\-—\s]+$", "", cleaned)
+        return cleaned
+
+    card1_hook = clean_meta_copy(str(payload.get("card1_hook", "")).strip()) or f"不用开火不用炒！{dish_name}"
+    card1_sub = clean_meta_copy(str(payload.get("card1_sub", "")).strip()) or "零失败，拌米饭能吃三碗"
+    card2_title = clean_meta_copy(str(payload.get("card2_title", "")).strip()) or "食材清单"
+    card3_cta = clean_meta_copy(card3_cta)
+
     return {
         "content_track": str(payload.get("content_track", "")).strip() or content_track,
-        "card1_hook": str(payload.get("card1_hook", "")).strip() or f"不用开火不用炒！{dish_name}",
-        "card1_sub": str(payload.get("card1_sub", "")).strip() or "零失败，拌米饭能吃三碗",
-        "card2_title": str(payload.get("card2_title", "")).strip() or "食材清单",
+        "card1_hook": card1_hook,
+        "card1_sub": card1_sub,
+        "card2_title": card2_title,
         "card2_items": card2_items[:10],
         "card3_step": card3_step,
         "card3_cta": card3_cta,
