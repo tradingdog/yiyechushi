@@ -20,6 +20,7 @@ OUTPUT_DIR = ROOT_DIR / "output"
 
 DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-mini-260428"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_IMAGE_SIZE = "1024x1536"
 DEFAULT_IMAGE_QUALITY = "low"
@@ -92,7 +93,8 @@ def parse_bool_env(env_name: str, default: bool) -> bool:
 
 
 def build_httpx_client(timeout_seconds: float) -> httpx.Client:
-    trust_env = parse_bool_env("HTTP_TRUST_ENV", default=False)
+    # 与 V1 行为保持一致：默认继承系统代理/证书环境。
+    trust_env = parse_bool_env("HTTP_TRUST_ENV", default=True)
     return httpx.Client(timeout=timeout_seconds, trust_env=trust_env)
 
 
@@ -184,17 +186,13 @@ def build_openai_image_client() -> OpenAI:
     if not api_key:
         raise RuntimeError("未找到 OPENAI_API_KEY，请在根目录 .env 中配置。")
     timeout = parse_float_env("OPENAI_IMAGE_REQUEST_TIMEOUT_SECONDS", 900.0)
-    base_url = os.getenv("OPENAI_BASE_URL", "").strip()
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip() or DEFAULT_OPENAI_BASE_URL
     client_kwargs: dict[str, Any] = {
         "api_key": api_key,
         "timeout": timeout,
-        "http_client": build_httpx_client(timeout_seconds=timeout),
+        "base_url": base_url,
     }
-    if base_url:
-        client_kwargs["base_url"] = base_url
-    return OpenAI(
-        **client_kwargs,
-    )
+    return OpenAI(**client_kwargs)
 
 
 def load_manual_dish_idea(idea_file: Path = IDEA_FILE) -> dict[str, str]:
