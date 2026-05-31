@@ -35,58 +35,90 @@ HTML_PAGE = """<!doctype html>
   <title>V2 自动造菜控制台</title>
   <style>
     :root{
-      --bg:#f6f8fb;--card:#fff;--line:#e6eaf2;--text:#1f2937;--sub:#6b7280;--pri:#2563eb;--ok:#059669;--warn:#d97706;
+      --bg:#f3f6fb; --card:#ffffff; --line:#e6ebf3; --text:#1f2937; --sub:#6b7280;
+      --pri:#2563eb; --pri-soft:#eff6ff; --ok:#059669; --warn:#d97706; --danger:#dc2626;
+      --shadow:0 6px 18px rgba(18,38,63,.06);
     }
     *{box-sizing:border-box}
     body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--text)}
-    .wrap{max-width:1200px;margin:0 auto;padding:20px}
-    .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+    .wrap{max-width:1320px;margin:0 auto;padding:20px}
+    .top{
+      display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;
+      background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;box-shadow:var(--shadow);
+      position:sticky;top:10px;z-index:5;
+    }
     .title{font-size:22px;font-weight:700}
     .sub{font-size:13px;color:var(--sub)}
-    .grid{display:grid;grid-template-columns:380px 1fr;gap:16px}
-    .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}
+    .chips{display:flex;gap:8px;flex-wrap:wrap}
+    .chip{font-size:12px;background:#f8fafc;border:1px solid var(--line);padding:6px 9px;border-radius:999px;color:#334155}
+    .grid{display:grid;grid-template-columns:420px 1fr;gap:16px}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;box-shadow:var(--shadow)}
     .sec-title{font-size:16px;font-weight:700;margin:0 0 10px}
+    .sec-desc{font-size:12px;color:var(--sub);margin:-2px 0 10px}
     label{display:block;font-size:13px;color:var(--sub);margin-bottom:6px}
     input,textarea,select,button{
       width:100%;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:14px;
-      font-family:inherit;background:#fff;
+      font-family:inherit;background:#fff;outline:none;
     }
-    textarea{min-height:84px;resize:vertical}
+    input:focus,textarea:focus,select:focus{border-color:#93c5fd;box-shadow:0 0 0 3px #dbeafe}
+    textarea{min-height:92px;resize:vertical;line-height:1.5}
     .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
     .mode{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
-    .mode button{padding:9px 8px}
+    .mode button{padding:10px 8px}
     .mode .active{background:var(--pri);color:#fff;border-color:var(--pri)}
-    .btn-primary{background:var(--pri);color:#fff;border-color:var(--pri);font-weight:700;cursor:pointer}
+    .input-disabled{opacity:.65;background:#f8fafc}
+    .btn-primary{
+      background:var(--pri);color:#fff;border-color:var(--pri);font-weight:700;cursor:pointer;
+      display:flex;align-items:center;justify-content:center;gap:8px;
+    }
     .btn-primary:disabled{opacity:.6;cursor:not-allowed}
-    .status{margin-top:10px;font-size:13px;color:var(--sub);white-space:pre-wrap}
-    .ok{color:var(--ok)} .warn{color:var(--warn)}
+    .btn-line{
+      border:1px solid var(--line);background:#fff;color:#334155;cursor:pointer;font-size:13px;
+    }
+    .status{
+      margin-top:10px;font-size:13px;color:var(--sub);white-space:pre-wrap;line-height:1.45;
+      border:1px dashed var(--line);border-radius:10px;padding:9px;background:#fcfdff;
+    }
+    .ok{color:var(--ok)} .warn{color:var(--warn)} .danger{color:var(--danger)}
     .result-meta{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
-    .kv{border:1px solid var(--line);border-radius:10px;padding:10px}
+    .kv{border:1px solid var(--line);border-radius:10px;padding:10px;background:#fcfdff}
     .k{font-size:12px;color:var(--sub)}
     .v{font-size:14px;font-weight:600;word-break:break-all}
     .img-wrap{border:1px solid var(--line);border-radius:12px;padding:8px;background:#fcfdff}
-    .img-wrap img{width:100%;border-radius:8px;display:block}
+    .img-wrap img{width:100%;border-radius:8px;display:block;min-height:260px;object-fit:cover;background:#f3f6fb}
     .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
-    .history-item{border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px;cursor:pointer}
+    .history-actions{display:flex;gap:8px;margin-bottom:8px}
+    .history-list{max-height:300px;overflow:auto;padding-right:2px}
+    .history-item{border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px;cursor:pointer;background:#fff}
     .history-item:hover{border-color:#b9c7e6;background:#f8fbff}
+    .history-item.active{border-color:#60a5fa;background:var(--pri-soft)}
     .history-name{font-weight:700;margin-bottom:4px}
     .history-path{font-size:12px;color:var(--sub);word-break:break-all}
-    @media(max-width:980px){.grid{grid-template-columns:1fr}}
+    .history-time{font-size:12px;color:#475569}
+    .split{height:1px;background:var(--line);margin:12px 0}
+    .hint{font-size:12px;color:#64748b;line-height:1.5}
+    @media(max-width:1080px){.grid{grid-template-columns:1fr}}
+    @media(max-width:640px){.row,.result-meta{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="top">
       <div>
-        <div class="title">V2 自动造菜前端面板（第一版）</div>
-        <div class="sub">一键运行：自动/手动菜名 -> 豆包提示词 -> gpt-image-2 生图</div>
+        <div class="title">V2 自动造菜控制台（UX 优化版）</div>
+        <div class="sub">自动/手动菜名 -> 豆包提示词 -> gpt-image-2 生图，支持参数调节与历史预览</div>
       </div>
-      <div class="sub" id="envBrief">加载中...</div>
+      <div class="chips">
+        <span id="envModel" class="chip">模型加载中...</span>
+        <span id="envQuality" class="chip">质量 -</span>
+        <span id="envCount" class="chip">数量 -</span>
+      </div>
     </div>
 
     <div class="grid">
       <div class="card">
         <h3 class="sec-title">运行控制</h3>
+        <div class="sec-desc">先选模式，再调整参数，最后点击「开始运行」。</div>
         <div class="mode">
           <button id="modeAutoBtn" class="active" type="button">自动造菜</button>
           <button id="modeFileBtn" type="button">手动菜名</button>
@@ -118,7 +150,8 @@ HTML_PAGE = """<!doctype html>
         </select>
 
         <button id="runBtn" class="btn-primary" style="margin-top:12px">开始运行</button>
-        <div id="status" class="status">就绪。</div>
+        <div id="status" class="status">就绪。你可以先点右侧历史记录预览最近结果。</div>
+        <div class="hint" style="margin-top:8px">提示：运行期间按钮会锁定，避免重复触发。</div>
       </div>
 
       <div class="card">
@@ -133,9 +166,13 @@ HTML_PAGE = """<!doctype html>
           <img id="resultImg" alt="暂无图片" />
         </div>
         <div id="resultMsg" class="status"></div>
+        <div class="history-actions">
+          <button id="copyOutputBtn" class="btn-line" type="button">复制输出目录</button>
+          <button id="refreshBtn" class="btn-line" type="button">刷新历史</button>
+        </div>
 
         <h3 class="sec-title" style="margin-top:14px">最近输出</h3>
-        <div id="history"></div>
+        <div id="history" class="history-list"></div>
       </div>
     </div>
   </div>
@@ -151,6 +188,8 @@ HTML_PAGE = """<!doctype html>
       const manual = mode === "file";
       $("dishName").disabled = !manual;
       $("dishNotes").disabled = !manual;
+      $("dishName").classList.toggle("input-disabled", !manual);
+      $("dishNotes").classList.toggle("input-disabled", !manual);
     }
 
     function fileUrl(path){
@@ -180,11 +219,14 @@ HTML_PAGE = """<!doctype html>
         box.innerHTML = '<div class="sub">暂无历史输出</div>';
         return;
       }
+      const currentOut = $("rOut").textContent || "";
       items.forEach((item) => {
         const div = document.createElement("div");
-        div.className = "history-item";
+        div.className = "history-item" + (currentOut === item.path ? " active" : "");
+        const timeText = item.name.split("_").slice(0,2).join(" ");
         div.innerHTML = `
           <div class="history-name">${item.name}</div>
+          <div class="history-time">${timeText}</div>
           <div class="history-path">${item.path}</div>
         `;
         div.onclick = () => {
@@ -199,10 +241,12 @@ HTML_PAGE = """<!doctype html>
       });
     }
 
-    async function loadState(){
+    async function loadState(showMsg=false){
       const res = await fetch("/api/state");
       const data = await res.json();
-      $("envBrief").textContent = `模型 ${data.config.OPENAI_IMAGE_MODEL} | ${data.config.OPENAI_IMAGE_QUALITY} | count ${data.config.OPENAI_IMAGE_COUNT}`;
+      $("envModel").textContent = `模型 ${data.config.OPENAI_IMAGE_MODEL}`;
+      $("envQuality").textContent = `质量 ${data.config.OPENAI_IMAGE_QUALITY}`;
+      $("envCount").textContent = `数量 ${data.config.OPENAI_IMAGE_COUNT}`;
       $("temperature").value = data.config.MODEL_TEMPERATURE;
       $("imageCount").value = data.config.OPENAI_IMAGE_COUNT;
       $("imageQuality").value = data.config.OPENAI_IMAGE_QUALITY;
@@ -212,12 +256,27 @@ HTML_PAGE = """<!doctype html>
       setMode(data.config.AUTO_GENERATE_DISH_IDEA === "1" ? "auto" : "file");
       renderHistory(data.history);
       if (data.last_result){ renderResult(data.last_result); }
+      if(showMsg){
+        $("status").textContent = "历史已刷新。";
+        $("status").className = "status ok";
+      }
     }
 
     async function runNow(){
+      if(state.mode === "file" && !$("dishName").value.trim()){
+        $("status").textContent = "手动模式下请先填写菜名。";
+        $("status").className = "status danger";
+        $("dishName").focus();
+        return;
+      }
       $("runBtn").disabled = true;
+      const startedAt = Date.now();
       $("status").textContent = "运行中，请稍候...";
       $("status").className = "status";
+      const timer = setInterval(() => {
+        const sec = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
+        $("status").textContent = `运行中，请稍候...（已等待 ${sec}s）`;
+      }, 1000);
       try{
         const payload = {
           mode: state.mode,
@@ -242,13 +301,33 @@ HTML_PAGE = """<!doctype html>
         $("status").textContent = "失败：" + err.message;
         $("status").className = "status warn";
       }finally{
+        clearInterval(timer);
         $("runBtn").disabled = false;
+      }
+    }
+
+    async function copyOutputPath(){
+      const path = $("rOut").textContent.trim();
+      if(!path || path === "-"){
+        $("status").textContent = "当前没有可复制的输出目录。";
+        $("status").className = "status warn";
+        return;
+      }
+      try{
+        await navigator.clipboard.writeText(path);
+        $("status").textContent = "输出目录已复制到剪贴板。";
+        $("status").className = "status ok";
+      }catch{
+        $("status").textContent = "复制失败，请手动选中路径复制。";
+        $("status").className = "status warn";
       }
     }
 
     $("modeAutoBtn").onclick = () => setMode("auto");
     $("modeFileBtn").onclick = () => setMode("file");
     $("runBtn").onclick = runNow;
+    $("copyOutputBtn").onclick = copyOutputPath;
+    $("refreshBtn").onclick = () => loadState(true);
 
     loadState();
   </script>
