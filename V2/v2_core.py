@@ -37,6 +37,7 @@ DEFAULT_IMAGE_SIZE = "1024x1536"
 DEFAULT_IMAGE_QUALITY = "low"
 DEFAULT_IMAGE_COUNT = 1
 DEFAULT_COVER_IMAGE_COUNT = 1
+DEFAULT_CONTENT_TRACK = "电饭煲一锅出"
 
 _RUNTIME_CONFIG_LOADED = False
 TEMPLATE_PLACEHOLDER_PATTERN = re.compile(r"\{变量(?:[：:,，][^{}]*)?\}")
@@ -459,6 +460,11 @@ def get_cover_image_count() -> int:
     return parse_int_env("COVER_IMAGE_COUNT", DEFAULT_COVER_IMAGE_COUNT)
 
 
+def get_content_track() -> str:
+    ensure_runtime_config_loaded()
+    return os.getenv("CONTENT_TRACK", DEFAULT_CONTENT_TRACK).strip() or DEFAULT_CONTENT_TRACK
+
+
 def render_cover_prompt_by_template(template_text: str, dish_name: str) -> str:
     placeholders = collect_template_placeholders(template_text)
     if not placeholders:
@@ -466,6 +472,122 @@ def render_cover_prompt_by_template(template_text: str, dish_name: str) -> str:
     # 封面模板只允许替换菜名变量，其它文字保持原样。
     replacements = [dish_name.strip()] * len(placeholders)
     return render_template_by_replacements(template_text=template_text, replacements=replacements)
+
+
+def build_three_card_script_fallback(dish_name: str, notes: str, content_track: str) -> dict[str, Any]:
+    notes_text = notes.strip()
+    return {
+        "content_track": content_track,
+        "card1_hook": f"不用开火不用炒！{dish_name}",
+        "card1_sub": "零失败，拌米饭能吃三碗",
+        "card2_title": "食材清单",
+        "card2_items": [dish_name, "主料适量", "常规调味料", "米饭搭配更下饭"],
+        "card3_step": "所有食材处理好后入锅，一键烹饪，收汁后即可开吃",
+        "card3_cta": "收藏起来，下次想吃直接做",
+        "caption": f"{dish_name}，家常快手，适合{content_track}内容方向。",
+        "hashtags": ["#电饭煲美食", "#懒人食谱", "#家常菜"],
+        "notes_used": notes_text,
+    }
+
+
+def generate_three_card_script(
+    *,
+    client: OpenAI,
+    dish_name: str,
+    notes: str,
+    content_track: str,
+) -> dict[str, Any]:
+    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    temperature = get_text_temperature()
+    max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
+
+    system_prompt = """
+你是短视频美食图文编导。请为同一道菜输出“固定3张图”脚本：
+1) 图1：成品 + 反常识钩子大字（吸引滑动）
+2) 图2：纯食材清单（两列可读）
+3) 图3：一句话步骤 + 收藏引导
+
+要求：
+- 必须适配任意菜名，不能写死具体菜。
+- 语言口语化、简短、强行动导向。
+- card3_cta 必须包含“收藏”语义。
+- 仅输出 JSON，不要解释。
+""".strip()
+
+    user_prompt = f"""
+菜名：{dish_name}
+补充说明：{notes or "无"}
+内容赛道：{content_track}
+
+请输出 JSON，字段固定：
+{{
+  "content_track": "...",
+  "card1_hook": "...",
+  "card1_sub": "...",
+  "card2_title": "...",
+  "card2_items": ["...","..."],
+  "card3_step": "...",
+  "card3_cta": "...",
+  "caption": "...",
+  "hashtags": ["#...","#...","#..."]
+}}
+""".strip()
+
+    response = None
+    last_error: Exception | None = None
+    for _ in range(max_retry):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=1600,
+                temperature=temperature,
+            )
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+
+    if response is None:
+        raise RuntimeError(f"三图脚本生成失败：{last_error}")
+
+    raw_text = extract_chat_text_output(response).strip()
+    if not raw_text:
+        raise RuntimeError("三图脚本生成失败：模型未返回内容。")
+    payload = extract_json_object_from_text(raw_text)
+
+    card2_items_raw = payload.get("card2_items", [])
+    if not isinstance(card2_items_raw, list):
+        card2_items_raw = []
+    card2_items = [str(item).strip() for item in card2_items_raw if str(item).strip()]
+    if not card2_items:
+        card2_items = [dish_name, "主料适量", "常规调味料", "米饭搭配更下饭"]
+
+    hashtags_raw = payload.get("hashtags", [])
+    if not isinstance(hashtags_raw, list):
+        hashtags_raw = []
+    hashtags = [str(item).strip() for item in hashtags_raw if str(item).strip()]
+    if not hashtags:
+        hashtags = ["#电饭煲美食", "#懒人食谱", "#家常菜"]
+
+    card3_cta = str(payload.get("card3_cta", "")).strip() or "收藏起来，下次想吃直接做"
+    if "收藏" not in card3_cta:
+        card3_cta = f"{card3_cta}，收藏起来下次做"
+
+    return {
+        "content_track": str(payload.get("content_track", "")).strip() or content_track,
+        "card1_hook": str(payload.get("card1_hook", "")).strip() or f"不用开火不用炒！{dish_name}",
+        "card1_sub": str(payload.get("card1_sub", "")).strip() or "零失败，拌米饭能吃三碗",
+        "card2_title": str(payload.get("card2_title", "")).strip() or "食材清单",
+        "card2_items": card2_items[:10],
+        "card3_step": str(payload.get("card3_step", "")).strip() or "所有食材处理好后入锅，一键烹饪，收汁后即可开吃",
+        "card3_cta": card3_cta,
+        "caption": str(payload.get("caption", "")).strip() or f"{dish_name}，家常快手，零失败。",
+        "hashtags": hashtags[:5],
+        "notes_used": notes.strip(),
+    }
 
 
 def build_run_output_dir(timestamp: str, dish_name: str) -> Path:
