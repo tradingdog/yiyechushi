@@ -39,7 +39,7 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.31"
+PANEL_VERSION = "v0.32"
 
 RUN_LOCK = threading.Lock()
 RUNNING = False
@@ -325,6 +325,10 @@ HTML_PAGE = """<!doctype html>
             <option value="电饭煲一锅出">电饭煲一锅出</option>
             <option value="懒人下饭快手菜">懒人下饭快手菜</option>
             <option value="家常硬菜">家常硬菜</option>
+            <option value="家庭宴客菜">家庭宴客菜（家里请客）</option>
+            <option value="餐饮店招牌菜">餐饮店招牌菜（重摆盘）</option>
+            <option value="下酒夜宵菜">下酒夜宵菜</option>
+            <option value="节日年菜">节日年菜</option>
           </select>
         </div>
 
