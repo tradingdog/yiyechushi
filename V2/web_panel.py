@@ -38,7 +38,7 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.29"
+PANEL_VERSION = "v0.30"
 
 RUN_LOCK = threading.Lock()
 RUNNING = False
@@ -401,6 +401,8 @@ HTML_PAGE = """<!doctype html>
             <div class="overlay-line"><div class="overlay-k">目录</div><div id="rOut" class="overlay-v mono">-</div></div>
             <div class="overlay-line"><div class="overlay-k">主图首选</div><div id="rBestMain" class="overlay-v mono">暂无</div></div>
             <div class="overlay-line"><div class="overlay-k">封面首选</div><div id="rBestCover" class="overlay-v mono">暂无</div></div>
+            <div class="overlay-line"><div class="overlay-k">选图方式</div><div id="rPickMode" class="overlay-v">暂无</div></div>
+            <div class="overlay-line"><div class="overlay-k">PS合成</div><div id="rPsStatus" class="overlay-v">暂无</div></div>
           </div>
           <div class="result-actions">
             <button id="openOutputBtn" type="button">打开输出目录</button>
@@ -646,13 +648,31 @@ HTML_PAGE = """<!doctype html>
       return parts[parts.length - 1] || path;
     }
 
-    function 更新结果信息(菜名, 参考菜, 菜系, 输出目录, 主图首选="", 封面首选=""){
+    function 选图方式文案(mainMode, coverMode){
+      const toText = (mode) => {
+        if(mode === "direct"){ return "数量=1直入"; }
+        if(mode === "scored"){ return "豆包评分"; }
+        return "未执行";
+      };
+      return `主图：${toText(mainMode)} / 封面：${toText(coverMode)}`;
+    }
+
+    function PS状态文案(psFiles, psError){
+      if(psError){ return `失败：${psError}`; }
+      const count = Array.isArray(psFiles) ? psFiles.length : 0;
+      if(count > 0){ return `已覆盖 ${count} 张`; }
+      return "未执行";
+    }
+
+    function 更新结果信息(菜名, 参考菜, 菜系, 输出目录, 主图首选="", 封面首选="", 主图方式="", 封面方式="", psFiles=[], psError=""){
       $("rDish").textContent = 菜名 || "暂无";
       $("rRef").textContent = 参考菜 || "暂无";
       $("rRegion").textContent = 菜系 || "暂无";
       $("rOut").textContent = 输出目录 || "-";
       $("rBestMain").textContent = 文件名(主图首选) || "暂无";
       $("rBestCover").textContent = 文件名(封面首选) || "暂无";
+      $("rPickMode").textContent = 选图方式文案(主图方式, 封面方式);
+      $("rPsStatus").textContent = PS状态文案(psFiles, psError);
       state.currentOutputPath = 输出目录 || "";
     }
 
@@ -699,7 +719,11 @@ HTML_PAGE = """<!doctype html>
         result?.region_label,
         result?.output_dir,
         result?.primary_selected_image,
-        result?.cover_selected_image
+        result?.cover_selected_image,
+        result?.primary_selection_mode,
+        result?.cover_selection_mode,
+        result?.photoshop_processed_files || [],
+        result?.photoshop_error || ""
       );
       const coverImages = result?.cover_saved_images || [];
       renderGallery((result?.saved_images || []).concat(coverImages));
@@ -749,7 +773,7 @@ HTML_PAGE = """<!doctype html>
       div.onclick = () => {
         const 历史参考菜 = item.reference_dish || "未记录参考菜";
         const 历史菜系 = item.region_label || "未记录菜系";
-        更新结果信息(item.dish_name, 历史参考菜, 历史菜系, item.path, "", "");
+        更新结果信息(item.dish_name, 历史参考菜, 历史菜系, item.path, "", "", "", "", [], "");
         renderGallery(item.images || (item.preview_image ? [item.preview_image] : []));
         $("resultMsg").textContent = "已切换为历史预览。";
         $("resultMsg").className = "status";

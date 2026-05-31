@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
+from pathlib import Path
 
 from script_logging import setup_script_logging
 
@@ -36,6 +38,7 @@ from v2_core import (
 )
 
 from tools.select_publish_images import select_publish_images
+from tools.apply_photoshop_template_batch import apply_photoshop_template_batch_to_dir
 
 
 def resolve_auto_generate_enabled(mode: str | None) -> bool:
@@ -56,6 +59,33 @@ def find_selected_output_path(selection_result: dict[str, object], page_type: st
         if selected:
             return selected
     return ""
+
+
+def move_image_to_publish(source_image_path: str, publish_dir: Path) -> str:
+    source = Path(source_image_path)
+    publish_dir.mkdir(parents=True, exist_ok=True)
+    target = publish_dir / source.name
+    if target.exists():
+        target.unlink()
+    shutil.move(str(source), str(target))
+    return str(target)
+
+
+def remap_selected_image_path(image_paths: list[str], selected_path: str) -> list[str]:
+    if not selected_path:
+        return image_paths
+    selected_name = Path(selected_path).name
+    remapped: list[str] = []
+    replaced = False
+    for path in image_paths:
+        if Path(path).name == selected_name:
+            remapped.append(selected_path)
+            replaced = True
+        else:
+            remapped.append(path)
+    if not replaced:
+        remapped.append(selected_path)
+    return remapped
 
 
 def generate_cover_images_from_reference(
@@ -181,25 +211,38 @@ def run_v2_first_feature(mode: str | None = None) -> dict[str, object]:
             print(f"已保存图片：{image_file}")
 
     primary_publish_selection: dict[str, object] = {}
+    primary_selection_mode = ""
     primary_selected_image = ""
     cover_prompt_file = ""
     cover_saved_images: list[str] = []
     cover_publish_selection: dict[str, object] = {}
+    cover_selection_mode = ""
     cover_selected_image = ""
     cover_image_error = ""
+    photoshop_processed_files: list[str] = []
+    photoshop_error = ""
+    publish_dir = run_output_dir / "publish"
 
     if saved_images:
-        try:
-            print("开始进行主图评分并选入 publish ...")
-            primary_publish_selection = select_publish_images(
-                input_dir=run_output_dir,
-                include_page_types=("other",),
-            )
-            primary_selected_image = find_selected_output_path(primary_publish_selection, page_type="other")
-            if primary_selected_image:
-                print(f"主图评分完成，首选图：{primary_selected_image}")
-        except Exception as select_exc:
-            print(f"主图评分失败，跳过自动首选：{select_exc}")
+        if len(saved_images) == 1:
+            primary_selected_image = move_image_to_publish(saved_images[0], publish_dir)
+            primary_selection_mode = "direct"
+            saved_images = [primary_selected_image]
+            print(f"主图数量=1，跳过豆包评分，直接入 publish：{primary_selected_image}")
+        else:
+            try:
+                print("开始进行主图评分并选入 publish ...")
+                primary_publish_selection = select_publish_images(
+                    input_dir=run_output_dir,
+                    include_page_types=("other",),
+                )
+                primary_selected_image = find_selected_output_path(primary_publish_selection, page_type="other")
+                if primary_selected_image:
+                    primary_selection_mode = "scored"
+                    saved_images = remap_selected_image_path(saved_images, primary_selected_image)
+                    print(f"主图评分完成，首选图：{primary_selected_image}")
+            except Exception as select_exc:
+                print(f"主图评分失败，跳过自动首选：{select_exc}")
 
     if primary_selected_image:
         try:
@@ -247,17 +290,36 @@ def run_v2_first_feature(mode: str | None = None) -> dict[str, object]:
             print(cover_image_error)
 
     if cover_saved_images:
+        if len(cover_saved_images) == 1:
+            cover_selected_image = move_image_to_publish(cover_saved_images[0], publish_dir)
+            cover_selection_mode = "direct"
+            cover_saved_images = [cover_selected_image]
+            print(f"封面数量=1，跳过豆包评分，直接入 publish：{cover_selected_image}")
+        else:
+            try:
+                print("开始进行封面评分并选入 publish ...")
+                cover_publish_selection = select_publish_images(
+                    input_dir=run_output_dir,
+                    include_page_types=("cover",),
+                )
+                cover_selected_image = find_selected_output_path(cover_publish_selection, page_type="cover")
+                if cover_selected_image:
+                    cover_selection_mode = "scored"
+                    cover_saved_images = remap_selected_image_path(cover_saved_images, cover_selected_image)
+                    print(f"封面评分完成，首选封面：{cover_selected_image}")
+            except Exception as cover_select_exc:
+                print(f"封面评分失败，跳过自动首选：{cover_select_exc}")
+
+    selected_for_publish = [path for path in [primary_selected_image, cover_selected_image] if path]
+    if len(selected_for_publish) >= 2:
         try:
-            print("开始进行封面评分并选入 publish ...")
-            cover_publish_selection = select_publish_images(
-                input_dir=run_output_dir,
-                include_page_types=("cover",),
-            )
-            cover_selected_image = find_selected_output_path(cover_publish_selection, page_type="cover")
-            if cover_selected_image:
-                print(f"封面评分完成，首选封面：{cover_selected_image}")
-        except Exception as cover_select_exc:
-            print(f"封面评分失败，跳过自动首选：{cover_select_exc}")
+            print("publish 已有主图与封面首选，开始执行 Photoshop 覆盖合成...")
+            processed_file_map = apply_photoshop_template_batch_to_dir(input_dir=publish_dir)
+            photoshop_processed_files = list(processed_file_map.values())
+            print(f"Photoshop 合成完成：{len(photoshop_processed_files)} 张")
+        except Exception as ps_exc:
+            photoshop_error = f"Photoshop 合成失败：{ps_exc}"
+            print(photoshop_error)
 
     close_doubao = getattr(doubao_client, "close", None)
     if callable(close_doubao):
@@ -276,14 +338,18 @@ def run_v2_first_feature(mode: str | None = None) -> dict[str, object]:
         "output_dir": str(run_output_dir),
         "saved_images": saved_images,
         "image_error": image_error,
-        "publish_dir": str(run_output_dir / "publish"),
+        "publish_dir": str(publish_dir),
         "primary_publish_selection": primary_publish_selection,
+        "primary_selection_mode": primary_selection_mode,
         "primary_selected_image": primary_selected_image,
         "cover_prompt_file": cover_prompt_file,
         "cover_saved_images": cover_saved_images,
         "cover_image_error": cover_image_error,
         "cover_publish_selection": cover_publish_selection,
+        "cover_selection_mode": cover_selection_mode,
         "cover_selected_image": cover_selected_image,
+        "photoshop_processed_files": photoshop_processed_files,
+        "photoshop_error": photoshop_error,
     }
 
 
