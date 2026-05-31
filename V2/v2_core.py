@@ -26,6 +26,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = ROOT_DIR / "config.env"
 IDEA_FILE = ROOT_DIR / "dish_name.txt"
 REFERENCE_FILE = ROOT_DIR / "cankao.txt"
+COVER_TEMPLATE_FILE = ROOT_DIR / "cover_promtp_cankao.txt"
 OUTPUT_DIR = ROOT_DIR / "output"
 
 DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
@@ -35,6 +36,7 @@ DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_IMAGE_SIZE = "1024x1536"
 DEFAULT_IMAGE_QUALITY = "low"
 DEFAULT_IMAGE_COUNT = 1
+DEFAULT_COVER_IMAGE_COUNT = 1
 
 _RUNTIME_CONFIG_LOADED = False
 TEMPLATE_PLACEHOLDER_PATTERN = re.compile(r"\{变量(?:[：:,，][^{}]*)?\}")
@@ -300,6 +302,15 @@ def load_cankao_template(template_file: Path = REFERENCE_FILE) -> str:
     return template
 
 
+def load_cover_template(template_file: Path = COVER_TEMPLATE_FILE) -> str:
+    if not template_file.exists():
+        raise FileNotFoundError(f"未找到封面模板：{template_file}")
+    template = template_file.read_text(encoding="utf-8").strip()
+    if not template:
+        raise ValueError(f"封面模板为空：{template_file}")
+    return template
+
+
 def collect_template_placeholders(template_text: str) -> list[str]:
     placeholders: list[str] = []
     for match in TEMPLATE_PLACEHOLDER_PATTERN.finditer(template_text):
@@ -441,6 +452,20 @@ def get_image_settings() -> dict[str, Any]:
         "quality": os.getenv("OPENAI_IMAGE_QUALITY", DEFAULT_IMAGE_QUALITY).strip() or DEFAULT_IMAGE_QUALITY,
         "image_count": parse_int_env("OPENAI_IMAGE_COUNT", DEFAULT_IMAGE_COUNT),
     }
+
+
+def get_cover_image_count() -> int:
+    ensure_runtime_config_loaded()
+    return parse_int_env("COVER_IMAGE_COUNT", DEFAULT_COVER_IMAGE_COUNT)
+
+
+def render_cover_prompt_by_template(template_text: str, dish_name: str) -> str:
+    placeholders = collect_template_placeholders(template_text)
+    if not placeholders:
+        return template_text.strip()
+    # 封面模板只允许替换菜名变量，其它文字保持原样。
+    replacements = [dish_name.strip()] * len(placeholders)
+    return render_template_by_replacements(template_text=template_text, replacements=replacements)
 
 
 def build_run_output_dir(timestamp: str, dish_name: str) -> Path:

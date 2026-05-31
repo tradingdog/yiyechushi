@@ -28,6 +28,7 @@ from v2_core import (
     build_run_output_dir,
     ensure_runtime_config_loaded,
     generate_images_by_prompt,
+    get_cover_image_count,
     get_image_settings,
     get_timestamp,
     save_generated_images,
@@ -37,7 +38,7 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.28"
+PANEL_VERSION = "v0.29"
 
 RUN_LOCK = threading.Lock()
 RUNNING = False
@@ -286,6 +287,7 @@ HTML_PAGE = """<!doctype html>
       <div class="chips">
         <span id="envQuality" class="chip">画质：-</span>
         <span id="envCount" class="chip">出图数：-</span>
+        <span id="envCoverCount" class="chip">封面数：-</span>
         <span id="envMode" class="chip">模式：-</span>
         <span class="version-tag">版本：__PANEL_VERSION__</span>
       </div>
@@ -348,6 +350,14 @@ HTML_PAGE = """<!doctype html>
           </div>
         </div>
 
+        <div class="section-card">
+          <h3 class="sec-title">封面参数</h3>
+          <label>封面生成数量</label>
+          <input id="coverCount" type="number" step="1" min="1" max="4" />
+          <input id="coverCountSlider" class="slider" type="range" min="1" max="4" step="1" />
+          <div class="sec-desc">封面会基于主图首选（publish）生成，再进行封面评分并选入 publish。</div>
+        </div>
+
         <div id="notesCard" class="section-card">
           <h3 class="sec-title">补充说明</h3>
           <textarea id="dishNotes" placeholder="可写关键做法、口味倾向、你想强调的卖点"></textarea>
@@ -389,9 +399,12 @@ HTML_PAGE = """<!doctype html>
             <div class="overlay-line"><div class="overlay-k">参考菜</div><div id="rRef" class="overlay-v">暂无</div></div>
             <div class="overlay-line"><div class="overlay-k">菜系</div><div id="rRegion" class="overlay-v">暂无</div></div>
             <div class="overlay-line"><div class="overlay-k">目录</div><div id="rOut" class="overlay-v mono">-</div></div>
+            <div class="overlay-line"><div class="overlay-k">主图首选</div><div id="rBestMain" class="overlay-v mono">暂无</div></div>
+            <div class="overlay-line"><div class="overlay-k">封面首选</div><div id="rBestCover" class="overlay-v mono">暂无</div></div>
           </div>
           <div class="result-actions">
             <button id="openOutputBtn" type="button">打开输出目录</button>
+            <button id="openPublishBtn" type="button">打开 publish</button>
             <button id="copyOutputBtn" type="button">复制路径</button>
             <button id="regenBtn" type="button">重新生成</button>
           </div>
@@ -561,15 +574,19 @@ HTML_PAGE = """<!doctype html>
       $("temperatureSlider").value = String(t);
       const c = Math.max(1, Math.min(4, Number($("imageCount").value || "1")));
       $("imageCountSlider").value = String(c);
+      const coverCount = Math.max(1, Math.min(4, Number($("coverCount").value || "1")));
+      $("coverCountSlider").value = String(coverCount);
       $("imageQualitySlider").value = String(QUALITY_INDEX[$("imageQuality").value] ?? 0);
     }
 
     function 绑定参数滑块(){
       $("temperatureSlider").oninput = () => { $("temperature").value = (Number($("temperatureSlider").value) / 10).toFixed(1); };
       $("imageCountSlider").oninput = () => { $("imageCount").value = String(Number($("imageCountSlider").value)); };
+      $("coverCountSlider").oninput = () => { $("coverCount").value = String(Number($("coverCountSlider").value)); };
       $("imageQualitySlider").oninput = () => { $("imageQuality").value = INDEX_QUALITY[Number($("imageQualitySlider").value)] || "low"; };
       $("temperature").oninput = 同步参数滑块;
       $("imageCount").oninput = 同步参数滑块;
+      $("coverCount").oninput = 同步参数滑块;
       $("imageQuality").onchange = 同步参数滑块;
     }
 
@@ -622,11 +639,20 @@ HTML_PAGE = """<!doctype html>
       updateGalleryIndexLabel();
     }
 
-    function 更新结果信息(菜名, 参考菜, 菜系, 输出目录){
+    function 文件名(path){
+      if(!path){ return ""; }
+      const normalized = String(path).replaceAll("\\\\", "/");
+      const parts = normalized.split("/");
+      return parts[parts.length - 1] || path;
+    }
+
+    function 更新结果信息(菜名, 参考菜, 菜系, 输出目录, 主图首选="", 封面首选=""){
       $("rDish").textContent = 菜名 || "暂无";
       $("rRef").textContent = 参考菜 || "暂无";
       $("rRegion").textContent = 菜系 || "暂无";
       $("rOut").textContent = 输出目录 || "-";
+      $("rBestMain").textContent = 文件名(主图首选) || "暂无";
+      $("rBestCover").textContent = 文件名(封面首选) || "暂无";
       state.currentOutputPath = 输出目录 || "";
     }
 
@@ -667,14 +693,24 @@ HTML_PAGE = """<!doctype html>
 
     function renderResult(result){
       state.currentResult = result || null;
-      更新结果信息(result?.dish_name, result?.reference_dish, result?.region_label, result?.output_dir);
-      renderGallery(result?.saved_images || []);
+      更新结果信息(
+        result?.dish_name,
+        result?.reference_dish,
+        result?.region_label,
+        result?.output_dir,
+        result?.primary_selected_image,
+        result?.cover_selected_image
+      );
+      const coverImages = result?.cover_saved_images || [];
+      renderGallery((result?.saved_images || []).concat(coverImages));
       const isRegen = result?.run_kind === "regenerate_image";
-      const msg = result?.image_error
-        ? ((isRegen ? "重新生图异常：\\n" : "生图异常：\\n") + result.image_error)
-        : (isRegen ? "已按原提示词重新生图完成。" : "生图成功。");
+      const hasError = Boolean(result?.image_error || result?.cover_image_error);
+      const errText = [result?.image_error, result?.cover_image_error].filter(Boolean).join("\\n");
+      const msg = hasError
+        ? ((isRegen ? "重新生图异常：\\n" : "生图异常：\\n") + errText)
+        : (isRegen ? "已按原提示词重新生图完成。" : "主图/封面流程已完成。");
       $("resultMsg").textContent = msg;
-      $("resultMsg").className = "status " + (result?.image_error ? "warn" : "ok");
+      $("resultMsg").className = "status " + (hasError ? "warn" : "ok");
     }
 
     async function 删除历史(path){
@@ -713,7 +749,7 @@ HTML_PAGE = """<!doctype html>
       div.onclick = () => {
         const 历史参考菜 = item.reference_dish || "未记录参考菜";
         const 历史菜系 = item.region_label || "未记录菜系";
-        更新结果信息(item.dish_name, 历史参考菜, 历史菜系, item.path);
+        更新结果信息(item.dish_name, 历史参考菜, 历史菜系, item.path, "", "");
         renderGallery(item.images || (item.preview_image ? [item.preview_image] : []));
         $("resultMsg").textContent = "已切换为历史预览。";
         $("resultMsg").className = "status";
@@ -825,9 +861,11 @@ HTML_PAGE = """<!doctype html>
       const data = await res.json();
       $("envQuality").textContent = `画质：${画质文案(data.config.OPENAI_IMAGE_QUALITY)}`;
       $("envCount").textContent = `出图数：${data.config.OPENAI_IMAGE_COUNT}`;
+      $("envCoverCount").textContent = `封面数：${data.config.COVER_IMAGE_COUNT || "-"}`;
       $("envMode").textContent = `模式：${data.config.AUTO_GENERATE_DISH_IDEA === "1" ? "自动造菜" : "手动点名"}`;
       $("temperature").value = data.config.MODEL_TEMPERATURE;
       $("imageCount").value = data.config.OPENAI_IMAGE_COUNT;
+      $("coverCount").value = data.config.COVER_IMAGE_COUNT || "1";
       $("imageQuality").value = data.config.OPENAI_IMAGE_QUALITY;
       $("dishName").value = data.idea.dish_name || "";
       $("dishNotes").value = data.idea.notes || "";
@@ -865,7 +903,8 @@ HTML_PAGE = """<!doctype html>
               action: "regenerate_image",
               source_output_dir: state.currentOutputPath,
               image_quality: $("imageQuality").value.trim(),
-              image_count: $("imageCount").value.trim()
+              image_count: $("imageCount").value.trim(),
+              cover_count: $("coverCount").value.trim()
             }
           : {
               action: "run",
@@ -874,7 +913,8 @@ HTML_PAGE = """<!doctype html>
               notes: $("dishNotes").value.trim(),
               model_temperature: $("temperature").value.trim(),
               image_quality: $("imageQuality").value.trim(),
-              image_count: $("imageCount").value.trim()
+              image_count: $("imageCount").value.trim(),
+              cover_count: $("coverCount").value.trim()
             };
         const res = await fetch("/api/run_start", {
           method:"POST",
@@ -932,6 +972,7 @@ HTML_PAGE = """<!doctype html>
       if(kind === "budget"){
         $("temperature").value = "0.2";
         $("imageCount").value = "1";
+        $("coverCount").value = "1";
         $("imageQuality").value = "low";
         同步参数滑块();
         setStatus("已套用省成本模板。", "ok");
@@ -939,6 +980,7 @@ HTML_PAGE = """<!doctype html>
       }
       $("temperature").value = "0.6";
       $("imageCount").value = "2";
+      $("coverCount").value = "2";
       $("imageQuality").value = "high";
       同步参数滑块();
       setStatus("已套用高质量模板。", "ok");
@@ -958,6 +1000,14 @@ HTML_PAGE = """<!doctype html>
       $("copyOutputBtn").onclick = () => copyText(state.currentOutputPath, "输出目录已复制到剪贴板。");
       $("copyOutputTopBtn").onclick = () => copyText(state.currentOutputPath, "输出目录已复制到剪贴板。");
       $("openOutputBtn").onclick = async () => { try{ await openOutputPath(); }catch(err){ setStatus("打开目录失败：" + err.message, "warn"); } };
+      $("openPublishBtn").onclick = async () => {
+        try{
+          const publishPath = state.currentOutputPath ? (state.currentOutputPath.replace(/[\\\\/]+$/, "") + "/publish") : "";
+          await openOutputPath(publishPath);
+        }catch(err){
+          setStatus("打开 publish 失败：" + err.message, "warn");
+        }
+      };
       $("openOutputTopBtn").onclick = async () => { try{ await openOutputPath(); }catch(err){ setStatus("打开目录失败：" + err.message, "warn"); } };
       $("refreshTopBtn").onclick = () => loadState(true);
       $("loadMoreBtn").onclick = () => loadHistory(false);
@@ -1028,6 +1078,9 @@ def list_history(limit: int = 12, offset: int = 0) -> list[dict[str, Any]]:
     sliced = dirs[offset : offset + limit]
     for folder in sliced:
         images = [str(image) for image in sorted(folder.glob("*.png"))]
+        publish_dir = folder / "publish"
+        if publish_dir.exists() and publish_dir.is_dir():
+            images.extend(str(image) for image in sorted(publish_dir.glob("*.png")))
         preview = ""
         if images:
             preview = images[0]
@@ -1147,6 +1200,7 @@ def current_config_snapshot() -> dict[str, str]:
         "OPENAI_IMAGE_MODEL": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2").strip() or "gpt-image-2",
         "OPENAI_IMAGE_QUALITY": os.getenv("OPENAI_IMAGE_QUALITY", "low").strip() or "low",
         "OPENAI_IMAGE_COUNT": os.getenv("OPENAI_IMAGE_COUNT", "1").strip() or "1",
+        "COVER_IMAGE_COUNT": str(get_cover_image_count()),
     }
 
 
@@ -1160,6 +1214,8 @@ def apply_runtime_overrides(payload: dict[str, Any]) -> None:
         os.environ["OPENAI_IMAGE_QUALITY"] = str(payload["image_quality"]).strip()
     if str(payload.get("image_count", "")).strip():
         os.environ["OPENAI_IMAGE_COUNT"] = str(payload["image_count"]).strip()
+    if str(payload.get("cover_count", "")).strip():
+        os.environ["COVER_IMAGE_COUNT"] = str(payload["cover_count"]).strip()
 
 
 def resolve_output_path(raw_path: str) -> Path:
@@ -1397,6 +1453,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 "model_temperature": str(payload.get("model_temperature", "")).strip(),
                 "image_quality": str(payload.get("image_quality", "")).strip(),
                 "image_count": str(payload.get("image_count", "")).strip(),
+                "cover_count": str(payload.get("cover_count", "")).strip(),
                 "source_output_dir": str(source_dir) if action == "regenerate_image" else "",
                 "queued_at": time.time(),
             }

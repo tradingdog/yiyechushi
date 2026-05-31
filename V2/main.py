@@ -15,18 +15,27 @@ from v2_core import (
     build_openai_image_client,
     build_run_output_dir,
     ensure_runtime_config_loaded,
+    extract_image_items,
+    get_cover_image_count,
     generate_doubao_prompt_by_template,
     generate_images_by_prompt,
     get_image_settings,
     get_timestamp,
     load_cankao_template,
+    load_cover_template,
     load_manual_dish_idea,
     parse_bool_env,
+    parse_float_env,
+    parse_int_env,
     render_prompt_fallback,
+    render_cover_prompt_by_template,
+    sanitize_file_name,
     save_generated_images,
     save_text_output,
     write_dish_idea_file,
 )
+
+from tools.select_publish_images import select_publish_images
 
 
 def resolve_auto_generate_enabled(mode: str | None) -> bool:
@@ -35,6 +44,54 @@ def resolve_auto_generate_enabled(mode: str | None) -> bool:
     if mode == "file":
         return False
     return parse_bool_env("AUTO_GENERATE_DISH_IDEA", default=False)
+
+
+def find_selected_output_path(selection_result: dict[str, object], page_type: str) -> str:
+    for group_result in selection_result.get("groups", []):
+        if not isinstance(group_result, dict):
+            continue
+        if str(group_result.get("page_type", "")) != page_type:
+            continue
+        selected = str(group_result.get("selected_output_path", "")).strip()
+        if selected:
+            return selected
+    return ""
+
+
+def generate_cover_images_from_reference(
+    *,
+    image_client,
+    reference_image_path: str,
+    cover_prompt: str,
+    cover_settings: dict[str, object],
+) -> list[dict[str, str]]:
+    request_timeout = parse_float_env("OPENAI_IMAGE_REQUEST_TIMEOUT_SECONDS", 900.0)
+    max_retry = parse_int_env("IMAGE_REQUEST_RETRY_COUNT", 2)
+    response = None
+    for attempt in range(1, max_retry + 1):
+        try:
+            with open(reference_image_path, "rb") as image_file:
+                response = image_client.images.edit(
+                    model=cover_settings["model"],
+                    image=image_file,
+                    prompt=cover_prompt,
+                    size=cover_settings["size"],
+                    quality=cover_settings["quality"],
+                    n=cover_settings["image_count"],
+                    timeout=request_timeout,
+                )
+            break
+        except Exception as exc:
+            if attempt >= max_retry:
+                raise RuntimeError(f"封面生图失败：{exc}") from exc
+            print(f"封面生图失败，正在重试第 {attempt + 1}/{max_retry} 次...")
+
+    if response is None:
+        raise RuntimeError("封面生图失败：接口未返回有效响应。")
+    image_items = extract_image_items(response)
+    if not image_items:
+        raise RuntimeError("封面生图失败：接口未返回有效图片数据。")
+    return image_items
 
 
 def run_v2_first_feature(mode: str | None = None) -> dict[str, object]:
@@ -123,6 +180,85 @@ def run_v2_first_feature(mode: str | None = None) -> dict[str, object]:
         for image_file in saved_images:
             print(f"已保存图片：{image_file}")
 
+    primary_publish_selection: dict[str, object] = {}
+    primary_selected_image = ""
+    cover_prompt_file = ""
+    cover_saved_images: list[str] = []
+    cover_publish_selection: dict[str, object] = {}
+    cover_selected_image = ""
+    cover_image_error = ""
+
+    if saved_images:
+        try:
+            print("开始进行主图评分并选入 publish ...")
+            primary_publish_selection = select_publish_images(
+                input_dir=run_output_dir,
+                include_page_types=("other",),
+            )
+            primary_selected_image = find_selected_output_path(primary_publish_selection, page_type="other")
+            if primary_selected_image:
+                print(f"主图评分完成，首选图：{primary_selected_image}")
+        except Exception as select_exc:
+            print(f"主图评分失败，跳过自动首选：{select_exc}")
+
+    if primary_selected_image:
+        try:
+            cover_template = load_cover_template()
+            cover_prompt = render_cover_prompt_by_template(template_text=cover_template, dish_name=dish_name)
+            cover_group_key = f"{timestamp}_{sanitize_file_name(dish_name)}封面"
+            cover_prompt_path = run_output_dir / f"{cover_group_key}_文生图prompt.txt"
+            save_text_output(cover_prompt, cover_prompt_path)
+            cover_prompt_file = str(cover_prompt_path)
+            print(f"封面提示词已生成：{cover_prompt_file}")
+
+            image_settings = get_image_settings()
+            cover_settings = {
+                "model": image_settings["model"],
+                "size": image_settings["size"],
+                "quality": image_settings["quality"],
+                "image_count": get_cover_image_count(),
+            }
+            print(
+                "开始生成封面："
+                f"model={cover_settings['model']}，size={cover_settings['size']}，"
+                f"quality={cover_settings['quality']}，n={cover_settings['image_count']}"
+            )
+            cover_items = generate_cover_images_from_reference(
+                image_client=image_client,
+                reference_image_path=primary_selected_image,
+                cover_prompt=cover_prompt,
+                cover_settings=cover_settings,
+            )
+            cover_saved_images = save_generated_images(
+                image_items=cover_items,
+                output_dir=run_output_dir,
+                timestamp=timestamp,
+                dish_name=f"{dish_name}封面",
+            )
+            for image_file in cover_saved_images:
+                print(f"已保存封面：{image_file}")
+        except Exception as cover_exc:
+            cover_image_error = f"封面生图失败：{cover_exc}"
+            save_text_output(
+                "封面生成失败，本轮主图首选流程已完成。\n"
+                f"失败原因：{cover_exc}",
+                run_output_dir / "封面生图失败原因.txt",
+            )
+            print(cover_image_error)
+
+    if cover_saved_images:
+        try:
+            print("开始进行封面评分并选入 publish ...")
+            cover_publish_selection = select_publish_images(
+                input_dir=run_output_dir,
+                include_page_types=("cover",),
+            )
+            cover_selected_image = find_selected_output_path(cover_publish_selection, page_type="cover")
+            if cover_selected_image:
+                print(f"封面评分完成，首选封面：{cover_selected_image}")
+        except Exception as cover_select_exc:
+            print(f"封面评分失败，跳过自动首选：{cover_select_exc}")
+
     close_doubao = getattr(doubao_client, "close", None)
     if callable(close_doubao):
         close_doubao()
@@ -140,6 +276,14 @@ def run_v2_first_feature(mode: str | None = None) -> dict[str, object]:
         "output_dir": str(run_output_dir),
         "saved_images": saved_images,
         "image_error": image_error,
+        "publish_dir": str(run_output_dir / "publish"),
+        "primary_publish_selection": primary_publish_selection,
+        "primary_selected_image": primary_selected_image,
+        "cover_prompt_file": cover_prompt_file,
+        "cover_saved_images": cover_saved_images,
+        "cover_image_error": cover_image_error,
+        "cover_publish_selection": cover_publish_selection,
+        "cover_selected_image": cover_selected_image,
     }
 
 
@@ -174,6 +318,10 @@ def main() -> int:
         print(f"生图状态：成功，共 {len(result['saved_images'])} 张")
     else:
         print("生图状态：未返回图片，但流程已完成。")
+    if result.get("primary_selected_image"):
+        print(f"主图首选：{result['primary_selected_image']}")
+    if result.get("cover_selected_image"):
+        print(f"封面首选：{result['cover_selected_image']}")
     return 0
 
 
