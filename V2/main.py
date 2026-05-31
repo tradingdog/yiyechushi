@@ -25,6 +25,7 @@ from v2_core import (
     get_content_track,
     get_image_settings,
     get_timestamp,
+    load_cankao_template,
     load_cover_template,
     load_manual_dish_idea,
     parse_bool_env,
@@ -107,6 +108,22 @@ def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) 
     if not card2_lines:
         card2_lines = ["- 主料适量", "- 常规调味料适量"]
     card2_text = "\n".join(card2_lines[:10])
+    try:
+        cankao_text = load_cankao_template()
+    except Exception:
+        cankao_text = ""
+
+    realism_anchor = (
+        "写实硬约束：必须是普通家庭餐桌场景（中国大陆家庭常见环境），"
+        "iPhone主摄1x直拍、低饱和、轻微暖调；"
+        "保留人为痕迹：刀工可略不整齐、摆盘可微凌乱、酱汁与餐具可有自然使用痕迹，"
+        "整体像家里现做现吃，不像商业棚拍或AI机械拼贴。"
+    )
+    if cankao_text:
+        realism_anchor = (
+            f"{realism_anchor}"
+            "同时遵循参考规范中的核心要求：家常真实、人与食物互动自然、禁品牌与logo。"
+        )
     visual_consistency_block = (
         "三张图必须是同一套系列视觉：同一菜品、同一拍摄场景与器皿、同一暖色调、同一字体风格、同一排版骨架。"
         "可理解为同一模板拆成3页，不允许每页像不同账号/不同模板。"
@@ -119,6 +136,7 @@ def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) 
         f"顶部大字标题：{script_payload.get('card1_hook','')}"
         f"；副标题：{script_payload.get('card1_sub','')}。"
         "文字要粗大清晰，排版稳定，突出“看完还想继续滑”的视觉冲击力。"
+        f"{realism_anchor}"
         f"{visual_consistency_block}"
         "禁止品牌logo和无关英文。"
     )
@@ -130,6 +148,7 @@ def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) 
         "画面采用两列清单布局，文字清晰易读，留白合理。"
         f"食材内容如下：\n{card2_text}\n"
         "这一页只做食材信息，不要步骤，不要大段营销文案。"
+        f"{realism_anchor}"
         f"{visual_consistency_block}"
         "真实手机拍摄风格，无品牌logo。"
     )
@@ -150,6 +169,7 @@ def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) 
         f"若需要补充口吻，可参考：{card3_cta_text}。"
         "必须严格继承图解01/图解02的视觉设计（同色调、同字体、同版式系统）。"
         "画面主体为成品拌饭/出锅场景，突出食欲和可执行性。"
+        f"{realism_anchor}"
         "底部引导文案必须完整可见，不可裁切，不可改字。"
         f"{visual_consistency_block}"
         "真实手机拍摄风格，无品牌logo。"

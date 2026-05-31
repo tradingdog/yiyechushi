@@ -501,6 +501,18 @@ def generate_three_card_script(
     model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
     temperature = get_text_temperature()
     max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
+    try:
+        cankao_text = load_cankao_template()
+    except Exception:
+        cankao_text = ""
+    cankao_style_anchor = (
+        "写实风格基线：普通家庭餐桌环境、iPhone主摄直拍低饱和、"
+        "保留家常人为痕迹（刀工略不齐、摆盘略随意、非商业棚拍）。"
+    )
+    if cankao_text:
+        cankao_style_anchor = (
+            f"{cankao_style_anchor} 必须吸收参考规范中的真实感偏好，不做过度工整的广告模板。"
+        )
 
     system_prompt = """
 你是短视频美食图文编导。请为同一道菜输出“固定3张图”脚本：
@@ -516,6 +528,7 @@ def generate_three_card_script(
 - card3_step 禁止出现“步骤1/步骤2/步骤3”“Step 1/2/3”这类编号前缀。
 - card3_cta 必须包含“收藏”语义。
 - card3_cta 末尾必须追加固定文案：“关注@阿叶造新菜，开店家用都不赖！”
+- 全局视觉语气必须更“人做饭”而非“AI模板”：允许自然不完美，禁止机械化设计感。
 - 仅输出 JSON，不要解释。
 """.strip()
 
@@ -523,6 +536,7 @@ def generate_three_card_script(
 菜名：{dish_name}
 补充说明：{notes or "无"}
 内容赛道：{content_track}
+写实参考：{cankao_style_anchor}
 
 请输出 JSON，字段固定：
 {{
