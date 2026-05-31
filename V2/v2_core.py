@@ -41,6 +41,7 @@ DEFAULT_CONTENT_TRACK = "电饭煲一锅出"
 
 _RUNTIME_CONFIG_LOADED = False
 TEMPLATE_PLACEHOLDER_PATTERN = re.compile(r"\{变量(?:[：:,，][^{}]*)?\}")
+STEP_PREFIX_PATTERN = re.compile(r"^\s*(?:第?\s*\d+\s*[步段]|步骤\s*\d+|step\s*\d+)\s*[:：、.．-]?\s*", re.IGNORECASE)
 
 
 def strip_inline_env_comment(raw_value: str) -> str:
@@ -482,8 +483,8 @@ def build_three_card_script_fallback(dish_name: str, notes: str, content_track: 
         "card1_sub": "零失败，拌米饭能吃三碗",
         "card2_title": "食材清单",
         "card2_items": [dish_name, "主料适量", "常规调味料", "米饭搭配更下饭"],
-        "card3_step": "所有食材处理好后入锅，一键烹饪，收汁后即可开吃",
-        "card3_cta": "收藏起来，下次想吃直接做",
+        "card3_step": "鸡块裹粉下锅炸至金黄，复炸30秒更脆，最后趁热撒椒盐拌匀即可上桌",
+        "card3_cta": "收藏起来，下次想吃直接做；关注@阿叶造新菜，开店家用都不赖！",
         "caption": f"{dish_name}，家常快手，适合{content_track}内容方向。",
         "hashtags": ["#电饭煲美食", "#懒人食谱", "#家常菜"],
         "notes_used": notes_text,
@@ -510,7 +511,11 @@ def generate_three_card_script(
 要求：
 - 必须适配任意菜名，不能写死具体菜。
 - 语言口语化、简短、强行动导向。
+- 三张图必须是同一套视觉体系：同一菜品、同一色温与配色倾向、同一字体风格、同一版式骨架。
+- card3_step 必须是具体可执行做法，包含关键动作/火候或时间，不能空泛。
+- card3_step 禁止出现“步骤1/步骤2/步骤3”“Step 1/2/3”这类编号前缀。
 - card3_cta 必须包含“收藏”语义。
+- card3_cta 末尾必须追加固定文案：“关注@阿叶造新菜，开店家用都不赖！”
 - 仅输出 JSON，不要解释。
 """.strip()
 
@@ -572,9 +577,17 @@ def generate_three_card_script(
     if not hashtags:
         hashtags = ["#电饭煲美食", "#懒人食谱", "#家常菜"]
 
+    card3_step = str(payload.get("card3_step", "")).strip()
+    card3_step = STEP_PREFIX_PATTERN.sub("", card3_step).strip(" ，。；;")
+    if not card3_step:
+        card3_step = "食材处理好后大火快炒上色，转中火焖3分钟，收汁后立刻出锅"
+
     card3_cta = str(payload.get("card3_cta", "")).strip() or "收藏起来，下次想吃直接做"
     if "收藏" not in card3_cta:
         card3_cta = f"{card3_cta}，收藏起来下次做"
+    fixed_ad = "关注@阿叶造新菜，开店家用都不赖！"
+    if fixed_ad not in card3_cta:
+        card3_cta = f"{card3_cta}；{fixed_ad}"
 
     return {
         "content_track": str(payload.get("content_track", "")).strip() or content_track,
@@ -582,7 +595,7 @@ def generate_three_card_script(
         "card1_sub": str(payload.get("card1_sub", "")).strip() or "零失败，拌米饭能吃三碗",
         "card2_title": str(payload.get("card2_title", "")).strip() or "食材清单",
         "card2_items": card2_items[:10],
-        "card3_step": str(payload.get("card3_step", "")).strip() or "所有食材处理好后入锅，一键烹饪，收汁后即可开吃",
+        "card3_step": card3_step,
         "card3_cta": card3_cta,
         "caption": str(payload.get("caption", "")).strip() or f"{dish_name}，家常快手，零失败。",
         "hashtags": hashtags[:5],

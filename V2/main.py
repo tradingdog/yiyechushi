@@ -107,6 +107,11 @@ def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) 
     if not card2_lines:
         card2_lines = ["- 主料适量", "- 常规调味料适量"]
     card2_text = "\n".join(card2_lines[:10])
+    visual_consistency_block = (
+        "三张图必须是同一套系列视觉：同一菜品、同一拍摄场景与器皿、同一暖色调、同一字体风格、同一排版骨架。"
+        "可理解为同一模板拆成3页，不允许每页像不同账号/不同模板。"
+    )
+    fixed_ad_slogan = "关注@阿叶造新菜，开店家用都不赖！"
 
     card1_prompt = (
         f"为菜品“{dish_name}”生成竖版2:3图文第1张（6秒钩子页）。"
@@ -114,24 +119,39 @@ def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) 
         f"顶部大字标题：{script_payload.get('card1_hook','')}"
         f"；副标题：{script_payload.get('card1_sub','')}。"
         "文字要粗大清晰，排版稳定，突出“看完还想继续滑”的视觉冲击力。"
+        f"{visual_consistency_block}"
         "禁止品牌logo和无关英文。"
     )
 
     card2_prompt = (
         f"为菜品“{dish_name}”生成竖版2:3图文第2张（食材清单页，6秒）。"
         f"标题：{script_payload.get('card2_title','食材清单')}。"
+        "必须严格继承图解01的视觉设计（色温、配色、字体、装饰元素、边框样式、阴影强度）。"
         "画面采用两列清单布局，文字清晰易读，留白合理。"
         f"食材内容如下：\n{card2_text}\n"
         "这一页只做食材信息，不要步骤，不要大段营销文案。"
+        f"{visual_consistency_block}"
         "真实手机拍摄风格，无品牌logo。"
     )
 
+    card3_step_text = str(script_payload.get("card3_step", "")).strip()
+    if not card3_step_text:
+        card3_step_text = "食材处理好后大火快炒上色，转中火焖3分钟，收汁后立刻出锅"
+    card3_cta_text = str(script_payload.get("card3_cta", "")).strip()
+    if "收藏" not in card3_cta_text:
+        card3_cta_text = f"{card3_cta_text}，收藏起来下次做".strip("，")
+    if fixed_ad_slogan not in card3_cta_text:
+        card3_cta_text = f"{card3_cta_text}；{fixed_ad_slogan}".strip("；")
+
     card3_prompt = (
         f"为菜品“{dish_name}”生成竖版2:3图文第3张（步骤与转化页，6秒）。"
-        f"一句话步骤：{script_payload.get('card3_step','')}。"
-        f"底部小字引导：{script_payload.get('card3_cta','收藏起来，下次想吃直接做')}。"
+        f"一句话做法（必须具体可执行，不要'步骤1/步骤2/步骤3'编号）：{card3_step_text}。"
+        f"底部两行引导文案：第一行“收藏起来，下次想吃直接做”；第二行“{fixed_ad_slogan}”。"
+        f"若需要补充口吻，可参考：{card3_cta_text}。"
+        "必须严格继承图解01/图解02的视觉设计（同色调、同字体、同版式系统）。"
         "画面主体为成品拌饭/出锅场景，突出食欲和可执行性。"
-        "步骤文案要短，强调零失败；底部收藏引导必须清晰可见。"
+        "底部引导文案必须完整可见，不可裁切，不可改字。"
+        f"{visual_consistency_block}"
         "真实手机拍摄风格，无品牌logo。"
     )
 
