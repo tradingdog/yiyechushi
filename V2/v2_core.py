@@ -46,6 +46,10 @@ META_COPY_PATTERN = re.compile(
     r"(图解教程|图解\s*\d+\s*/\s*\d+|步骤与转化页|教程页|转化页|第\s*[一二三123]\s*张|第\s*[一二三123]\s*步)",
     re.IGNORECASE,
 )
+MEASURE_UNIT_PATTERN = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(g|克|kg|千克|ml|毫升|l|升|汤匙|茶匙|勺|大勺|小勺|个|根|片|块|瓣|碗|杯)",
+    re.IGNORECASE,
+)
 
 
 def strip_inline_env_comment(raw_value: str) -> str:
@@ -486,7 +490,7 @@ def build_three_card_script_fallback(dish_name: str, notes: str, content_track: 
         "card1_hook": f"不用开火不用炒！{dish_name}",
         "card1_sub": "零失败，拌米饭能吃三碗",
         "card2_title": "食材清单",
-        "card2_items": [dish_name, "主料适量", "常规调味料", "米饭搭配更下饭"],
+        "card2_items": [f"{dish_name} 300g", "豆腐 300g", "食用油 15ml", "盐 1茶匙", "糖 1茶匙", "清水 200ml"],
         "card3_step": "鸡块裹粉下锅炸至金黄，复炸30秒更脆，最后趁热撒椒盐拌匀即可上桌",
         "card3_cta": "收藏起来，下次想吃直接做；关注@阿叶造新菜，开店家用都不赖！",
         "caption": f"{dish_name}，家常快手，适合{content_track}内容方向。",
@@ -533,6 +537,7 @@ def generate_three_card_script(
 - card3_cta 必须包含“收藏”语义。
 - card3_cta 末尾必须追加固定文案：“关注@阿叶造新菜，开店家用都不赖！”
 - 全局视觉语气必须更“人做饭”而非“AI模板”：允许自然不完美，禁止机械化设计感。
+- card2_items 每一项都必须包含明确计量单位（如 g/ml/汤匙/茶匙/个），禁止只写“适量/少许”。
 - 仅输出 JSON，不要解释。
 """.strip()
 
@@ -585,8 +590,35 @@ def generate_three_card_script(
     if not isinstance(card2_items_raw, list):
         card2_items_raw = []
     card2_items = [str(item).strip() for item in card2_items_raw if str(item).strip()]
+
+    def has_measure_unit(item_text: str) -> bool:
+        return bool(MEASURE_UNIT_PATTERN.search(item_text))
+
+    def normalize_item_with_unit(item_text: str) -> str:
+        cleaned = item_text.strip()
+        cleaned = re.sub(r"(适量|少许|若干)\s*$", "", cleaned).strip(" ，。;；")
+        if not cleaned:
+            return "食材 50g"
+        if has_measure_unit(cleaned):
+            return cleaned
+        liquid_keywords = ("油", "生抽", "老抽", "料酒", "醋", "水", "高汤", "牛奶", "酱")
+        powder_keywords = ("盐", "糖", "胡椒", "淀粉", "鸡精", "味精", "孜然", "辣椒粉")
+        garnish_keywords = ("葱", "姜", "蒜", "香菜", "辣椒", "芝麻")
+        if any(keyword in cleaned for keyword in liquid_keywords):
+            return f"{cleaned} 15ml"
+        if any(keyword in cleaned for keyword in powder_keywords):
+            return f"{cleaned} 1茶匙"
+        if any(keyword in cleaned for keyword in garnish_keywords):
+            return f"{cleaned} 10g"
+        if "豆腐" in cleaned:
+            return f"{cleaned} 300g"
+        if dish_name and (dish_name in cleaned or cleaned in dish_name):
+            return f"{cleaned} 300g"
+        return f"{cleaned} 50g"
+
+    card2_items = [normalize_item_with_unit(item) for item in card2_items]
     if not card2_items:
-        card2_items = [dish_name, "主料适量", "常规调味料", "米饭搭配更下饭"]
+        card2_items = [f"{dish_name} 300g", "豆腐 300g", "食用油 15ml", "盐 1茶匙", "糖 1茶匙", "清水 200ml"]
 
     hashtags_raw = payload.get("hashtags", [])
     if not isinstance(hashtags_raw, list):

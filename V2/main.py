@@ -139,7 +139,7 @@ def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) 
         card2_items = []
     card2_lines = [f"- {str(item).strip()}" for item in card2_items if str(item).strip()]
     if not card2_lines:
-        card2_lines = ["- 主料适量", "- 常规调味料适量"]
+        card2_lines = ["- 主料 300g", "- 辅料 200g", "- 食用油 15ml", "- 盐 1茶匙"]
     card2_text = "\n".join(card2_lines[:10])
     try:
         cankao_text = load_cankao_template()
@@ -181,6 +181,7 @@ def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) 
         f"标题：{script_payload.get('card2_title','食材清单')}。"
         "必须严格继承图解01的视觉设计（色温、配色、字体、装饰元素、边框样式、阴影强度）。"
         "画面采用两列清单布局，文字清晰易读，留白合理。"
+        "每个食材条目都必须带明确计量单位（g/ml/汤匙/茶匙/个等），禁止只写“适量/少许”。"
         f"食材内容如下：\n{card2_text}\n"
         "这一页只做食材信息，不要步骤，不要大段营销文案。"
         f"{realism_anchor}"
