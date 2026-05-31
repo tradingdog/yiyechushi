@@ -39,7 +39,7 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.32"
+PANEL_VERSION = "v0.33"
 
 RUN_LOCK = threading.Lock()
 RUNNING = False
@@ -1119,11 +1119,18 @@ def list_history(limit: int = 12, offset: int = 0) -> list[dict[str, Any]]:
     dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     rows: list[dict[str, Any]] = []
     sliced = dirs[offset : offset + limit]
+
+    def collect_images(folder_path: Path) -> list[str]:
+        image_paths: list[Path] = []
+        for pattern in ("*.png", "*.jpg", "*.jpeg"):
+            image_paths.extend(folder_path.glob(pattern))
+        return [str(path) for path in sorted(image_paths, key=lambda item: item.name.lower())]
+
     for folder in sliced:
-        images = [str(image) for image in sorted(folder.glob("*.png"))]
+        images = collect_images(folder)
         publish_dir = folder / "publish"
         if publish_dir.exists() and publish_dir.is_dir():
-            images.extend(str(image) for image in sorted(publish_dir.glob("*.png")))
+            images.extend(collect_images(publish_dir))
         preview = ""
         if images:
             preview = images[0]
