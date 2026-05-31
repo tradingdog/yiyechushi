@@ -50,6 +50,14 @@ MEASURE_UNIT_PATTERN = re.compile(
     r"(\d+(?:\.\d+)?)\s*(g|克|kg|千克|ml|毫升|l|升|汤匙|茶匙|勺|大勺|小勺|个|根|片|块|瓣|碗|杯)",
     re.IGNORECASE,
 )
+TRACK_LITERAL_BAN_LIST = (
+    "电饭煲一锅出",
+    "家常硬菜",
+    "家庭宴客菜",
+    "餐饮店招牌菜",
+    "下酒夜宵菜",
+    "节日年菜",
+)
 
 
 def strip_inline_env_comment(raw_value: str) -> str:
@@ -538,6 +546,7 @@ def generate_three_card_script(
 - card3_cta 末尾必须追加固定文案：“关注@阿叶造新菜，开店家用都不赖！”
 - 全局视觉语气必须更“人做饭”而非“AI模板”：允许自然不完美，禁止机械化设计感。
 - card2_items 每一项都必须包含明确计量单位（如 g/ml/汤匙/茶匙/个），禁止只写“适量/少许”。
+- 内容赛道仅用于风格控制，严禁把赛道名或赛道标签词写进画面文案。
 - 仅输出 JSON，不要解释。
 """.strip()
 
@@ -646,10 +655,21 @@ def generate_three_card_script(
         cleaned = re.sub(r"[·•\-—\s]+$", "", cleaned)
         return cleaned
 
-    card1_hook = clean_meta_copy(str(payload.get("card1_hook", "")).strip()) or f"不用开火不用炒！{dish_name}"
-    card1_sub = clean_meta_copy(str(payload.get("card1_sub", "")).strip()) or "零失败，拌米饭能吃三碗"
-    card2_title = clean_meta_copy(str(payload.get("card2_title", "")).strip()) or "食材清单"
-    card3_cta = clean_meta_copy(card3_cta)
+    def strip_track_literals(raw_text: str) -> str:
+        text = raw_text
+        for track_literal in TRACK_LITERAL_BAN_LIST:
+            if track_literal:
+                text = text.replace(track_literal, " ")
+        if content_track:
+            text = text.replace(content_track, " ")
+        text = re.sub(r"\s{2,}", " ", text)
+        return text.strip()
+
+    card1_hook = strip_track_literals(clean_meta_copy(str(payload.get("card1_hook", "")).strip())) or f"不用开火不用炒！{dish_name}"
+    card1_sub = strip_track_literals(clean_meta_copy(str(payload.get("card1_sub", "")).strip())) or "鲜嫩入味，零失败好做"
+    card2_title = strip_track_literals(clean_meta_copy(str(payload.get("card2_title", "")).strip())) or "食材清单"
+    card3_step = strip_track_literals(card3_step)
+    card3_cta = strip_track_literals(clean_meta_copy(card3_cta))
 
     return {
         "content_track": str(payload.get("content_track", "")).strip() or content_track,

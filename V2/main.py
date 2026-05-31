@@ -102,6 +102,15 @@ def remap_selected_image_path(image_paths: list[str], selected_path: str) -> lis
 
 
 def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) -> list[dict[str, str]]:
+    track_literal_ban_list = (
+        "电饭煲一锅出",
+        "家常硬菜",
+        "家庭宴客菜",
+        "餐饮店招牌菜",
+        "下酒夜宵菜",
+        "节日年菜",
+    )
+    content_track_text = str(script_payload.get("content_track", "")).strip()
     forbidden_overlay_terms = [
         "图解教程",
         "图解1/3",
@@ -122,6 +131,10 @@ def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) 
 
     def clean_text_overlay(raw_text: str) -> str:
         text = meta_text_cleaner.sub("", raw_text).strip()
+        for track_literal in track_literal_ban_list:
+            text = text.replace(track_literal, " ")
+        if content_track_text:
+            text = text.replace(content_track_text, " ")
         text = re.sub(r"\s{2,}", " ", text)
         text = re.sub(r"^[·•\-—\s]+", "", text)
         text = re.sub(r"[·•\-—\s]+$", "", text)
@@ -173,6 +186,7 @@ def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) 
         f"{visual_consistency_block}"
         "文字白名单：只允许出现“菜名、钩子标题、副标题”三类文字。"
         f"文字黑名单：禁止出现“{forbidden_overlay_text}”及任何流程标签。"
+        "赛道词黑名单：禁止把“内容赛道名称或标签词”写到画面文字。"
         "禁止品牌logo和无关英文。"
     )
 
@@ -188,6 +202,7 @@ def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) 
         f"{visual_consistency_block}"
         "文字白名单：只允许出现“菜名（可选）、食材清单标题、食材条目”。"
         f"文字黑名单：禁止出现“{forbidden_overlay_text}”及任何流程标签。"
+        "赛道词黑名单：禁止把“内容赛道名称或标签词”写到画面文字。"
         "真实手机拍摄风格，无品牌logo。"
     )
 
@@ -212,6 +227,7 @@ def build_three_card_prompts(dish_name: str, script_payload: dict[str, object]) 
         f"{visual_consistency_block}"
         "文字白名单：只允许出现“菜名（可选）、一句话做法、收藏引导、关注引导”四类文字。"
         f"文字黑名单：禁止出现“{forbidden_overlay_text}”及任何流程标签。"
+        "赛道词黑名单：禁止把“内容赛道名称或标签词”写到画面文字。"
         "真实手机拍摄风格，无品牌logo。"
     )
 
