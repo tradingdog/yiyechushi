@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 from script_logging import setup_script_logging
 
@@ -42,11 +43,23 @@ def run_v2_first_feature(mode: str | None = None) -> dict[str, object]:
     doubao_client = build_doubao_client()
     image_client = build_openai_image_client()
 
+    raw_auto_flag = os.getenv("AUTO_GENERATE_DISH_IDEA", "").strip()
     auto_generate_enabled = resolve_auto_generate_enabled(mode)
+    print(
+        "自动造菜开关："
+        f"AUTO_GENERATE_DISH_IDEA={raw_auto_flag or '<未设置>'}，"
+        f"命令行模式={mode or '按配置'}，最终模式={'auto' if auto_generate_enabled else 'file'}"
+    )
     if auto_generate_enabled:
         dish_payload = auto_generate_dish_idea(doubao_client)
         write_dish_idea_file(dish_payload["dish_name"], dish_payload["notes"], idea_file=IDEA_FILE)
         print(f"自动造菜完成，已写回：{IDEA_FILE}")
+        if dish_payload.get("region_label"):
+            print(f"本轮菜系范围：{dish_payload['region_label']}")
+        if dish_payload.get("reference_dish"):
+            print(f"本轮参考传统菜：{dish_payload['reference_dish']}")
+        if dish_payload.get("memory_file"):
+            print(f"历史记忆文件：{dish_payload['memory_file']}")
     else:
         dish_payload = load_manual_dish_idea(idea_file=IDEA_FILE)
         print(f"使用手动录入菜名：{dish_payload['dish_name']}")
@@ -88,26 +101,16 @@ def run_v2_first_feature(mode: str | None = None) -> dict[str, object]:
             prompt_text=prompt_result["prompt"],
             settings=image_settings,
         )
-    except Exception as first_image_exc:
-        print(f"首轮生图失败，尝试使用精简降级提示词重试一次：{first_image_exc}")
-        compact_prompt = render_prompt_fallback(template_text=template_text, dish_name=dish_name, notes=notes)
-        save_text_output(compact_prompt, prompt_file)
-        try:
-            image_items = generate_images_by_prompt(
-                client=image_client,
-                prompt_text=compact_prompt,
-                settings=image_settings,
-            )
-        except Exception as second_image_exc:
-            image_error = f"生图两次调用均失败：{second_image_exc}"
-            error_file = run_output_dir / "生图失败原因.txt"
-            save_text_output(
-                "外部图片接口暂时不可用，本轮已完成到生图调用点。\n"
-                f"失败原因：{second_image_exc}\n"
-                "建议：稍后重试，或先检查 OPENAI_API_KEY、网络代理与账号可用区。",
-                error_file,
-            )
-            print(f"生图仍失败，已写入降级说明：{error_file}")
+    except Exception as image_exc:
+        image_error = f"生图失败：{image_exc}"
+        error_file = run_output_dir / "生图失败原因.txt"
+        save_text_output(
+            "外部图片接口暂时不可用，本轮已完成到生图调用点。\n"
+            f"失败原因：{image_exc}\n"
+            "建议：稍后重试，或先检查 OPENAI_API_KEY、网络代理与账号可用区。",
+            error_file,
+        )
+        print(f"生图失败，已写入说明：{error_file}")
 
     saved_images: list[str] = []
     if image_items:
@@ -130,6 +133,9 @@ def run_v2_first_feature(mode: str | None = None) -> dict[str, object]:
     return {
         "dish_name": dish_name,
         "notes": notes,
+        "region_label": dish_payload.get("region_label", ""),
+        "reference_dish": dish_payload.get("reference_dish", ""),
+        "memory_file": dish_payload.get("memory_file", ""),
         "prompt_file": str(prompt_file),
         "output_dir": str(run_output_dir),
         "saved_images": saved_images,
@@ -154,6 +160,12 @@ def main() -> int:
 
     print("V2 第一个功能执行完成。")
     print(f"菜名：{result['dish_name']}")
+    if result.get("region_label"):
+        print(f"菜系范围：{result['region_label']}")
+    if result.get("reference_dish"):
+        print(f"参考传统菜：{result['reference_dish']}")
+    if result.get("memory_file"):
+        print(f"历史记忆文件：{result['memory_file']}")
     print(f"输出目录：{result['output_dir']}")
     print(f"提示词文件：{result['prompt_file']}")
     if result.get("image_error"):

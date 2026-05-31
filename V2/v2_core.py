@@ -4,12 +4,22 @@ import base64
 import json
 import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
-from openai import OpenAI
+from openai import APITimeoutError, OpenAI
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from image_generator import (
+    build_text_client as v1_build_text_client,
+    generate_auto_dish_idea as v1_generate_auto_dish_idea,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -117,6 +127,40 @@ def parse_int_env(env_name: str, default: int) -> int:
     return value
 
 
+def iter_exception_chain(exc: BaseException) -> list[BaseException]:
+    pending: list[BaseException] = [exc]
+    chain: list[BaseException] = []
+    visited: set[int] = set()
+
+    while pending:
+        current = pending.pop(0)
+        marker = id(current)
+        if marker in visited:
+            continue
+        visited.add(marker)
+        chain.append(current)
+
+        cause = current.__cause__
+        context = current.__context__
+        if cause is not None:
+            pending.append(cause)
+        if context is not None:
+            pending.append(context)
+
+    return chain
+
+
+def is_timeout_error(exc: Exception) -> bool:
+    for error in iter_exception_chain(exc):
+        if isinstance(error, (TimeoutError, httpx.TimeoutException, APITimeoutError)):
+            return True
+
+        message = str(error).lower()
+        if "timed out" in message or "timeout" in message:
+            return True
+    return False
+
+
 def get_text_temperature() -> float:
     # 兼容旧配置 DOUBAO_TEXT_TEMPERATURE，同时支持统一的 MODEL_TEMPERATURE。
     raw_value = os.getenv("MODEL_TEMPERATURE", "").strip()
@@ -209,45 +253,34 @@ def load_manual_dish_idea(idea_file: Path = IDEA_FILE) -> dict[str, str]:
 
 
 def auto_generate_dish_idea(client: OpenAI) -> dict[str, str]:
-    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
-    temperature = get_text_temperature()
-    max_retry = parse_int_env("AUTO_DISH_RETRY_COUNT", 3)
+    del client
 
-    system_prompt = (
-        "你是专业菜品研发主厨。你只输出 JSON，不要输出任何额外解释。"
-        '输出格式固定为 {"dish_name":"...","notes":"..."}。'
-    )
-    user_prompt = """
-请自动生成一个适合中国家庭厨房、可真实落地的爆款新菜。
-要求：
-1) dish_name 是自然口语化菜名，6~12 个中文字符，不要花哨词。
-2) notes 是 1 段不超过 120 字的补充说明，包含主口味和关键做法。
-3) 不要出现品牌名。
-""".strip()
+    # 对齐 V1 自动造菜配置，默认把记忆文件落在 V2 目录下。
+    if not os.getenv("AUTO_DISH_MEMORY_FILE", "").strip():
+        os.environ["AUTO_DISH_MEMORY_FILE"] = "V2/dish_idea_memory.jsonl"
+    if not os.getenv("AUTO_DISH_LIBRARY_FILE", "").strip():
+        os.environ["AUTO_DISH_LIBRARY_FILE"] = "chuantongcaipu.txt"
+    if not os.getenv("AUTO_DISH_CUISINE_MODE", "").strip():
+        os.environ["AUTO_DISH_CUISINE_MODE"] = "1"
 
-    last_error: Exception | None = None
-    for _ in range(max_retry):
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                max_tokens=500,
-                temperature=temperature,
-            )
-            raw_text = extract_chat_text_output(response)
-            payload = json.loads(raw_text)
-            dish_name = str(payload.get("dish_name", "")).strip()
-            notes = str(payload.get("notes", "")).strip()
-            if not dish_name:
-                raise ValueError("dish_name 为空。")
-            return {"dish_name": dish_name, "notes": notes}
-        except Exception as exc:
-            last_error = exc
+    v1_client = v1_build_text_client()
+    try:
+        payload = v1_generate_auto_dish_idea(idea_file=IDEA_FILE, client=v1_client)
+    finally:
+        close_method = getattr(v1_client, "close", None)
+        if callable(close_method):
+            close_method()
 
-    raise RuntimeError(f"自动造菜失败：{last_error}")
+    return {
+        "dish_name": payload["dish_idea"],
+        "notes": payload.get("notes", ""),
+        "region_code": payload.get("region_code", ""),
+        "region_label": payload.get("region_label", ""),
+        "reference_dish": payload.get("reference_dish", ""),
+        "memory_file": payload.get("memory_file", ""),
+        "library_file": payload.get("library_file", ""),
+        "generation_model": payload.get("generation_model", ""),
+    }
 
 
 def write_dish_idea_file(dish_name: str, notes: str, idea_file: Path = IDEA_FILE) -> None:
@@ -267,6 +300,48 @@ def load_cankao_template(template_file: Path = REFERENCE_FILE) -> str:
     return template
 
 
+def collect_template_placeholders(template_text: str) -> list[str]:
+    placeholders: list[str] = []
+    for match in TEMPLATE_PLACEHOLDER_PATTERN.finditer(template_text):
+        placeholders.append(match.group(0))
+    return placeholders
+
+
+def extract_json_object_from_text(raw_text: str) -> dict[str, Any]:
+    text = raw_text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+
+    if text.startswith("{") and text.endswith("}"):
+        return json.loads(text)
+
+    match = re.search(r"\{[\s\S]*\}", text)
+    if not match:
+        raise ValueError("模型返回中未找到 JSON 对象。")
+    return json.loads(match.group(0))
+
+
+def render_template_by_replacements(template_text: str, replacements: list[str]) -> str:
+    replaced_count = 0
+
+    def _replace(match: re.Match[str]) -> str:
+        nonlocal replaced_count
+        if replaced_count >= len(replacements):
+            raise ValueError("变量替换数量不足，无法覆盖模板中的所有变量位。")
+        value = str(replacements[replaced_count]).strip()
+        replaced_count += 1
+        if not value:
+            raise ValueError("变量替换值不能为空。")
+        return value
+
+    rendered = TEMPLATE_PLACEHOLDER_PATTERN.sub(_replace, template_text)
+    if replaced_count != len(replacements):
+        raise ValueError("变量替换数量超出模板需求。")
+    if TEMPLATE_PLACEHOLDER_PATTERN.search(rendered):
+        raise ValueError("模板仍存在未替换的变量占位符。")
+    return rendered.strip()
+
+
 def generate_doubao_prompt_by_template(
     client: OpenAI,
     dish_name: str,
@@ -275,16 +350,20 @@ def generate_doubao_prompt_by_template(
 ) -> dict[str, str]:
     model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
     temperature = get_text_temperature()
+    placeholders = collect_template_placeholders(template_text)
+    if not placeholders:
+        return {"model": model, "prompt": template_text.strip()}
 
     system_prompt = """
-你是菜谱视觉策划总监。你的任务是把用户给的模板改写成可直接喂给 gpt-image-2 的高质量中文生图提示词。
+你是菜谱视觉策划总监。你的任务是只为模板里的变量位提供替换值。
 强制要求：
-1) 必须基于模板完整改写，不要丢字段。
-2) 把模板中出现的 {变量} 都替换成贴合当前菜名的具体内容，不允许保留任何花括号占位符。
-3) 输出纯文本提示词，不要 Markdown，不要解释。
-4) 必须体现真实家庭餐桌场景、真实拍摄质感、食欲感和可执行步骤。
+1) 你不能改写模板任何固定文本，只输出变量替换值。
+2) 你必须按“变量位从上到下顺序”给出 replacement 数组。
+3) replacement 数组长度必须与变量位数量完全一致。
+4) 输出 JSON：{"replacements":["值1","值2",...]}，不要输出其它内容。
 """.strip()
 
+    placeholder_lines = "\n".join(f"{index + 1}. {placeholder}" for index, placeholder in enumerate(placeholders))
     user_prompt = f"""
 菜名：{dish_name}
 补充说明：{notes or "无"}
@@ -292,7 +371,10 @@ def generate_doubao_prompt_by_template(
 模板如下：
 {template_text}
 
-请输出最终可直接给 gpt-image-2 的完整提示词。
+变量位清单（按顺序）：
+{placeholder_lines}
+
+请只返回 replacements JSON。
 """.strip()
 
     max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
@@ -315,11 +397,17 @@ def generate_doubao_prompt_by_template(
     if response is None:
         raise RuntimeError(f"豆包模板改写失败：{last_error}")
 
-    prompt_text = extract_chat_text_output(response).strip()
-    if not prompt_text:
-        raise ValueError("豆包未返回有效提示词。")
-    if TEMPLATE_PLACEHOLDER_PATTERN.search(prompt_text):
-        raise ValueError("豆包提示词仍包含未替换占位符。")
+    raw_text = extract_chat_text_output(response).strip()
+    if not raw_text:
+        raise ValueError("豆包未返回有效内容。")
+    payload = extract_json_object_from_text(raw_text)
+    replacements_raw = payload.get("replacements")
+    if not isinstance(replacements_raw, list):
+        raise ValueError("豆包返回 JSON 缺少 replacements 数组。")
+    replacements = [str(item).strip() for item in replacements_raw]
+    if len(replacements) != len(placeholders):
+        raise ValueError(f"变量替换数量不匹配：需要 {len(placeholders)} 个，实际 {len(replacements)} 个。")
+    prompt_text = render_template_by_replacements(template_text=template_text, replacements=replacements)
     return {"model": model, "prompt": prompt_text}
 
 
@@ -335,11 +423,14 @@ def render_prompt_fallback(template_text: str, dish_name: str, notes: str) -> st
         "整张图像必须真实手机实拍风，禁止品牌名与logo",
     ]
 
-    rendered = template_text
-    for replacement in replacements:
-        rendered = TEMPLATE_PLACEHOLDER_PATTERN.sub(replacement, rendered, count=1)
-    rendered = TEMPLATE_PLACEHOLDER_PATTERN.sub(dish_name, rendered)
-    return rendered
+    placeholders = collect_template_placeholders(template_text)
+    if not placeholders:
+        return template_text.strip()
+
+    fill_values = replacements[:]
+    if len(fill_values) < len(placeholders):
+        fill_values.extend([dish_name] * (len(placeholders) - len(fill_values)))
+    return render_template_by_replacements(template_text=template_text, replacements=fill_values[: len(placeholders)])
 
 
 def get_image_settings() -> dict[str, Any]:
@@ -380,9 +471,9 @@ def extract_image_items(response: Any) -> list[dict[str, str]]:
 
 def generate_images_by_prompt(client: OpenAI, prompt_text: str, settings: dict[str, Any]) -> list[dict[str, str]]:
     max_retry = parse_int_env("IMAGE_REQUEST_RETRY_COUNT", 2)
+    request_timeout = parse_float_env("OPENAI_IMAGE_REQUEST_TIMEOUT_SECONDS", 900.0)
     response = None
-    last_error: Exception | None = None
-    for _ in range(max_retry):
+    for attempt in range(1, max_retry + 1):
         try:
             response = client.images.generate(
                 model=settings["model"],
@@ -390,12 +481,15 @@ def generate_images_by_prompt(client: OpenAI, prompt_text: str, settings: dict[s
                 size=settings["size"],
                 quality=settings["quality"],
                 n=settings["image_count"],
+                timeout=request_timeout,
             )
             break
         except Exception as exc:
-            last_error = exc
+            if attempt >= max_retry or not is_timeout_error(exc):
+                raise RuntimeError(f"生图失败：{exc}") from exc
+            print(f"生图请求超时，正在重试第 {attempt + 1}/{max_retry} 次...")
     if response is None:
-        raise RuntimeError(f"生图失败：{last_error}")
+        raise RuntimeError("生图失败：接口未返回有效响应。")
 
     image_items = extract_image_items(response)
     if not image_items:
