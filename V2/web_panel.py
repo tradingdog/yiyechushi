@@ -38,7 +38,7 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.32"
+PANEL_VERSION = "v0.33"
 
 RUN_LOCK = threading.Lock()
 RUNNING = False
@@ -439,11 +439,13 @@ HTML_PAGE = """<!doctype html>
       currentResult: null,
       logNextIndex: 0,
       pollTimer: null,
+      autoRefreshTimer: null,
       logOnlyErrors: false,
       historyOffset: 0,
       historyLimit: 12,
       historyHasMore: true,
       historyLoading: false,
+      historySnapshot: "",
       running: false,
       colLeft: 320,
       colMid: 430
@@ -791,6 +793,10 @@ HTML_PAGE = """<!doctype html>
       return div;
     }
 
+    function buildHistorySnapshot(items){
+      return (items || []).map((item) => String(item?.name || "")).join("|");
+    }
+
     async function loadHistory(reset=false){
       if(state.historyLoading){ return; }
       state.historyLoading = true;
@@ -805,6 +811,9 @@ HTML_PAGE = """<!doctype html>
         const res = await fetch(url);
         const data = await res.json();
         const items = data.items || [];
+        if(reset){
+          state.historySnapshot = buildHistorySnapshot(items);
+        }
         if(items.length < state.historyLimit){ state.historyHasMore = false; }
         items.forEach((item) => $("history").appendChild(createHistoryCard(item)));
         state.historyOffset += items.length;
@@ -829,7 +838,17 @@ HTML_PAGE = """<!doctype html>
       state.pollTimer = null;
     }
 
-    async function fetchRunStatus(){
+    function startAutoRefresh(){
+      if(state.autoRefreshTimer){ return; }
+      state.autoRefreshTimer = setInterval(() => {
+        if(document.hidden){ return; }
+        if(state.running){ return; }
+        fetchRunStatus({silent: true});
+      }, 5000);
+    }
+
+    async function fetchRunStatus(options = {}){
+      const silent = Boolean(options?.silent);
       try{
         const res = await fetch(`/api/run_status?from=${state.logNextIndex}`);
         const data = await res.json();
@@ -842,7 +861,9 @@ HTML_PAGE = """<!doctype html>
           const percent = Math.max(1, Math.min(95, Math.floor((elapsed / 120) * 100)));
           setRunState(true, percent);
           const queueText = data.queue_length ? `，队列待执行 ${data.queue_length} 个` : "";
-          setStatus(`运行中 ${percent}%（已等待 ${elapsed}s${queueText}）`);
+          if(!silent){
+            setStatus(`运行中 ${percent}%（已等待 ${elapsed}s${queueText}）`);
+          }
           startPolling();
           return;
         }
@@ -853,14 +874,21 @@ HTML_PAGE = """<!doctype html>
           renderResult(data.result);
         }
         if(data.history){
-          await loadHistory(true);
+          const nextSnapshot = buildHistorySnapshot(data.history);
+          if(nextSnapshot !== state.historySnapshot){
+            await loadHistory(true);
+          }
         }
         if(data.error){
-          setStatus("失败：" + data.error, "warn");
+          if(!silent){
+            setStatus("失败：" + data.error, "warn");
+          }
           return;
         }
         if(data.result && data.result.output_dir){
-          setStatus("运行完成。", "ok");
+          if(!silent || wasRunning){
+            setStatus("运行完成。", "ok");
+          }
           if(wasRunning){
             try{
               if("Notification" in window){
@@ -874,9 +902,11 @@ HTML_PAGE = """<!doctype html>
           }
         }
       }catch(err){
-        stopPolling();
-        setRunState(false, 0);
-        setStatus("读取运行状态失败：" + err.message, "warn");
+        if(!silent){
+          stopPolling();
+          setRunState(false, 0);
+          setStatus("读取运行状态失败：" + err.message, "warn");
+        }
       }
     }
 
@@ -1053,6 +1083,12 @@ HTML_PAGE = """<!doctype html>
     加载三栏宽度();
     初始化拖拽分栏();
     loadState();
+    startAutoRefresh();
+    document.addEventListener("visibilitychange", () => {
+      if(!document.hidden){
+        fetchRunStatus({silent: true});
+      }
+    });
   </script>
 </body>
 </html>
