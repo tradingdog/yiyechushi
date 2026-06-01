@@ -310,6 +310,65 @@ def run_v2_first_feature(mode: str | None = None) -> dict[str, object]:
             except Exception as cover_select_exc:
                 print(f"封面评分失败，跳过自动首选：{cover_select_exc}")
 
+    # 兜底补偿：主图已入选但封面缺失时，自动补跑一次封面流程，避免出现“目录只落一张图”的半成品结果。
+    if primary_selected_image and not cover_selected_image:
+        try:
+            print("检测到封面缺失，开始自动补偿封面生成 ...")
+            cover_template = load_cover_template()
+            cover_prompt = render_cover_prompt_by_template(template_text=cover_template, dish_name=dish_name)
+            if not cover_prompt_file:
+                cover_group_key = f"{timestamp}_{sanitize_file_name(dish_name)}封面补偿"
+                cover_prompt_path = run_output_dir / f"{cover_group_key}_文生图prompt.txt"
+                save_text_output(cover_prompt, cover_prompt_path)
+                cover_prompt_file = str(cover_prompt_path)
+                print(f"封面补偿提示词已生成：{cover_prompt_file}")
+
+            image_settings = get_image_settings()
+            cover_settings = {
+                "model": image_settings["model"],
+                "size": image_settings["size"],
+                "quality": image_settings["quality"],
+                "image_count": max(1, get_cover_image_count()),
+            }
+            cover_items = generate_cover_images_from_reference(
+                image_client=image_client,
+                reference_image_path=primary_selected_image,
+                cover_prompt=cover_prompt,
+                cover_settings=cover_settings,
+            )
+            compensated_cover_images = save_generated_images(
+                image_items=cover_items,
+                output_dir=run_output_dir,
+                timestamp=timestamp,
+                dish_name=f"{dish_name}封面补偿",
+            )
+            if len(compensated_cover_images) == 1:
+                cover_selected_image = move_image_to_publish(compensated_cover_images[0], publish_dir)
+                cover_selection_mode = "direct"
+                cover_saved_images = [cover_selected_image]
+            elif compensated_cover_images:
+                cover_publish_selection = select_publish_images(
+                    input_dir=run_output_dir,
+                    include_page_types=("cover",),
+                )
+                cover_selected_image = find_selected_output_path(cover_publish_selection, page_type="cover")
+                if cover_selected_image:
+                    cover_selection_mode = "scored"
+                    cover_saved_images = remap_selected_image_path(compensated_cover_images, cover_selected_image)
+            if cover_selected_image:
+                print(f"封面补偿成功，首选封面：{cover_selected_image}")
+            else:
+                print("封面补偿结束：未选出封面首选图。")
+        except Exception as cover_retry_exc:
+            retry_text = f"封面补偿失败：{cover_retry_exc}"
+            cover_image_error = f"{cover_image_error}；{retry_text}".strip("；")
+            print(retry_text)
+            save_text_output(
+                "检测到主图已完成但封面缺失，已触发自动补偿封面流程。\n"
+                f"补偿失败原因：{cover_retry_exc}",
+                run_output_dir / "封面补偿失败原因.txt",
+            )
+
     selected_for_publish = [path for path in [primary_selected_image, cover_selected_image] if path]
     if len(selected_for_publish) >= 2:
         try:
