@@ -390,6 +390,10 @@ def generate_doubao_prompt_by_template(
 2) 你必须按“变量位从上到下顺序”给出 replacement 数组。
 3) replacement 数组长度必须与变量位数量完全一致。
 4) 输出 JSON：{"replacements":["值1","值2",...]}，不要输出其它内容。
+5) 关于“米饭”与“互动”的变量必须满足：
+   - 菜是菜、饭是饭：米饭必须是单独一碗，不与主菜混炒或混拌成一道。
+   - 可在米饭表面点缀少量主菜，表达“夹菜盖饭前”的状态，但主菜主体仍在主盘中。
+   - 互动餐具需在米饭前方形成“准备入口”的生活化动作，不要描述成菜饭已经混合。
 """.strip()
 
     placeholder_lines = "\n".join(f"{index + 1}. {placeholder}" for index, placeholder in enumerate(placeholders))
@@ -436,6 +440,23 @@ def generate_doubao_prompt_by_template(
     replacements = [str(item).strip() for item in replacements_raw]
     if len(replacements) != len(placeholders):
         raise ValueError(f"变量替换数量不匹配：需要 {len(placeholders)} 个，实际 {len(replacements)} 个。")
+
+    if len(replacements) >= 4:
+        rice_text = replacements[2]
+        interaction_text = replacements[3]
+        replacements[2] = (
+            "要，米饭与主菜必须分离呈现：单独一碗白米饭放在主菜旁，"
+            "仅少量主菜自然点缀在饭面，体现准备入口状态，不与整盘主菜混成一道"
+        )
+        if rice_text:
+            replacements[2] = f"{replacements[2]}；{rice_text}"
+        replacements[3] = (
+            "使用最适合这道菜的餐具放在米饭前方，与主菜形成准备夹取入口的互动，"
+            "生活化、像人在开吃前，不要表现成菜饭混合"
+        )
+        if interaction_text:
+            replacements[3] = f"{replacements[3]}；{interaction_text}"
+
     prompt_text = render_template_by_replacements(template_text=template_text, replacements=replacements)
     return {"model": model, "prompt": prompt_text}
 
@@ -445,8 +466,8 @@ def render_prompt_fallback(template_text: str, dish_name: str, notes: str) -> st
     replacements = [
         "暖棕米白家常配色",
         dish_name,
-        "要配上一碗热米饭，主菜覆盖部分米饭提升食欲",
-        "使用最适合这道菜的餐具与主菜互动，动作自然像正在吃",
+        "要，米饭与主菜分离：单独一碗热米饭在旁，仅少量主菜点缀在饭面，不与主菜混成一道",
+        "使用最适合这道菜的餐具放在米饭前方，与主菜形成准备入口的互动，像人在开吃前",
         "鲜香微辣酱香",
         notes_text,
         "整张图像必须真实手机实拍风，禁止品牌名与logo",
