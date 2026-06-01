@@ -29,7 +29,6 @@ from v2_core import (
     ensure_runtime_config_loaded,
     generate_images_by_prompt,
     get_cover_image_count,
-    get_content_track,
     get_image_settings,
     get_timestamp,
     save_generated_images,
@@ -39,7 +38,7 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.38"
+PANEL_VERSION = "v0.31"
 
 RUN_LOCK = threading.Lock()
 RUNNING = False
@@ -289,7 +288,6 @@ HTML_PAGE = """<!doctype html>
         <span id="envQuality" class="chip">画质：-</span>
         <span id="envCount" class="chip">出图数：-</span>
         <span id="envCoverCount" class="chip">封面数：-</span>
-        <span id="envTrack" class="chip">赛道：-</span>
         <span id="envMode" class="chip">模式：-</span>
         <span class="version-tag">版本：__PANEL_VERSION__</span>
       </div>
@@ -320,16 +318,6 @@ HTML_PAGE = """<!doctype html>
           </div>
           <label style="margin-top:8px">手动菜名（仅手动点名生效）</label>
           <input id="dishName" placeholder="例如：蒜香煎嫩鸡胸肉" />
-          <label style="margin-top:8px">内容赛道（影响三图脚本）</label>
-          <select id="contentTrack">
-            <option value="电饭煲一锅出">电饭煲一锅出</option>
-            <option value="懒人下饭快手菜">懒人下饭快手菜</option>
-            <option value="家常硬菜">家常硬菜</option>
-            <option value="家庭宴客菜">家庭宴客菜（家里请客）</option>
-            <option value="餐饮店招牌菜">餐饮店招牌菜（重摆盘）</option>
-            <option value="下酒夜宵菜">下酒夜宵菜</option>
-            <option value="节日年菜">节日年菜</option>
-          </select>
         </div>
 
         <div class="section-card">
@@ -413,7 +401,6 @@ HTML_PAGE = """<!doctype html>
             <div class="overlay-line"><div class="overlay-k">目录</div><div id="rOut" class="overlay-v mono">-</div></div>
             <div class="overlay-line"><div class="overlay-k">主图首选</div><div id="rBestMain" class="overlay-v mono">暂无</div></div>
             <div class="overlay-line"><div class="overlay-k">封面首选</div><div id="rBestCover" class="overlay-v mono">暂无</div></div>
-            <div class="overlay-line"><div class="overlay-k">三图进度</div><div id="rCardProgress" class="overlay-v">0 / 3</div></div>
             <div class="overlay-line"><div class="overlay-k">选图方式</div><div id="rPickMode" class="overlay-v">暂无</div></div>
             <div class="overlay-line"><div class="overlay-k">PS合成</div><div id="rPsStatus" class="overlay-v">暂无</div></div>
           </div>
@@ -677,14 +664,13 @@ HTML_PAGE = """<!doctype html>
       return "未执行";
     }
 
-    function 更新结果信息(菜名, 参考菜, 菜系, 输出目录, 主图首选="", 封面首选="", 主图方式="", 封面方式="", psFiles=[], psError="", cardProgress="0 / 3"){
+    function 更新结果信息(菜名, 参考菜, 菜系, 输出目录, 主图首选="", 封面首选="", 主图方式="", 封面方式="", psFiles=[], psError=""){
       $("rDish").textContent = 菜名 || "暂无";
       $("rRef").textContent = 参考菜 || "暂无";
       $("rRegion").textContent = 菜系 || "暂无";
       $("rOut").textContent = 输出目录 || "-";
       $("rBestMain").textContent = 文件名(主图首选) || "暂无";
       $("rBestCover").textContent = 文件名(封面首选) || "暂无";
-      $("rCardProgress").textContent = cardProgress;
       $("rPickMode").textContent = 选图方式文案(主图方式, 封面方式);
       $("rPsStatus").textContent = PS状态文案(psFiles, psError);
       state.currentOutputPath = 输出目录 || "";
@@ -737,8 +723,7 @@ HTML_PAGE = """<!doctype html>
         result?.primary_selection_mode,
         result?.cover_selection_mode,
         result?.photoshop_processed_files || [],
-        result?.photoshop_error || "",
-        `${(result?.saved_images || []).length} / 3`
+        result?.photoshop_error || ""
       );
       const coverImages = result?.cover_saved_images || [];
       renderGallery((result?.saved_images || []).concat(coverImages));
@@ -788,7 +773,7 @@ HTML_PAGE = """<!doctype html>
       div.onclick = () => {
         const 历史参考菜 = item.reference_dish || "未记录参考菜";
         const 历史菜系 = item.region_label || "未记录菜系";
-        更新结果信息(item.dish_name, 历史参考菜, 历史菜系, item.path, "", "", "", "", [], "", "历史记录");
+        更新结果信息(item.dish_name, 历史参考菜, 历史菜系, item.path, "", "", "", "", [], "");
         renderGallery(item.images || (item.preview_image ? [item.preview_image] : []));
         $("resultMsg").textContent = "已切换为历史预览。";
         $("resultMsg").className = "status";
@@ -901,7 +886,6 @@ HTML_PAGE = """<!doctype html>
       $("envQuality").textContent = `画质：${画质文案(data.config.OPENAI_IMAGE_QUALITY)}`;
       $("envCount").textContent = `出图数：${data.config.OPENAI_IMAGE_COUNT}`;
       $("envCoverCount").textContent = `封面数：${data.config.COVER_IMAGE_COUNT || "-"}`;
-      $("envTrack").textContent = `赛道：${data.config.CONTENT_TRACK || "电饭煲一锅出"}`;
       $("envMode").textContent = `模式：${data.config.AUTO_GENERATE_DISH_IDEA === "1" ? "自动造菜" : "手动点名"}`;
       $("temperature").value = data.config.MODEL_TEMPERATURE;
       $("imageCount").value = data.config.OPENAI_IMAGE_COUNT;
@@ -909,7 +893,6 @@ HTML_PAGE = """<!doctype html>
       $("imageQuality").value = data.config.OPENAI_IMAGE_QUALITY;
       $("dishName").value = data.idea.dish_name || "";
       $("dishNotes").value = data.idea.notes || "";
-      $("contentTrack").value = data.config.CONTENT_TRACK || "电饭煲一锅出";
       setMode(data.config.AUTO_GENERATE_DISH_IDEA === "1" ? "auto" : "file");
       同步参数滑块();
       if(data.last_result){ renderResult(data.last_result); }
@@ -945,15 +928,13 @@ HTML_PAGE = """<!doctype html>
               source_output_dir: state.currentOutputPath,
               image_quality: $("imageQuality").value.trim(),
               image_count: $("imageCount").value.trim(),
-              cover_count: $("coverCount").value.trim(),
-              content_track: $("contentTrack").value.trim()
+              cover_count: $("coverCount").value.trim()
             }
           : {
               action: "run",
               mode: state.mode,
               dish_name: $("dishName").value.trim(),
               notes: $("dishNotes").value.trim(),
-              content_track: $("contentTrack").value.trim(),
               model_temperature: $("temperature").value.trim(),
               image_quality: $("imageQuality").value.trim(),
               image_count: $("imageCount").value.trim(),
@@ -1251,7 +1232,6 @@ def current_config_snapshot() -> dict[str, str]:
         "OPENAI_IMAGE_QUALITY": os.getenv("OPENAI_IMAGE_QUALITY", "low").strip() or "low",
         "OPENAI_IMAGE_COUNT": os.getenv("OPENAI_IMAGE_COUNT", "1").strip() or "1",
         "COVER_IMAGE_COUNT": str(get_cover_image_count()),
-        "CONTENT_TRACK": get_content_track(),
     }
 
 
@@ -1267,8 +1247,6 @@ def apply_runtime_overrides(payload: dict[str, Any]) -> None:
         os.environ["OPENAI_IMAGE_COUNT"] = str(payload["image_count"]).strip()
     if str(payload.get("cover_count", "")).strip():
         os.environ["COVER_IMAGE_COUNT"] = str(payload["cover_count"]).strip()
-    if str(payload.get("content_track", "")).strip():
-        os.environ["CONTENT_TRACK"] = str(payload["content_track"]).strip()
 
 
 def resolve_output_path(raw_path: str) -> Path:
@@ -1507,7 +1485,6 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 "image_quality": str(payload.get("image_quality", "")).strip(),
                 "image_count": str(payload.get("image_count", "")).strip(),
                 "cover_count": str(payload.get("cover_count", "")).strip(),
-                "content_track": str(payload.get("content_track", "")).strip(),
                 "source_output_dir": str(source_dir) if action == "regenerate_image" else "",
                 "queued_at": time.time(),
             }
