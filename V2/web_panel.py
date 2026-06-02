@@ -38,7 +38,7 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.35"
+PANEL_VERSION = "v0.36"
 
 RUN_LOCK = threading.Lock()
 RUNNING = False
@@ -51,6 +51,7 @@ MAX_LOG_LINES = 2000
 TASK_QUEUE: list[dict[str, Any]] = []
 CURRENT_TASK: dict[str, Any] | None = None
 TASK_SEQ = 0
+RUN_META_FILE_NAME = "_run_meta.json"
 
 
 def append_run_log(text: str) -> None:
@@ -1114,6 +1115,47 @@ def infer_dish_name_from_folder(folder_name: str) -> str:
     return folder_name.strip()
 
 
+def build_run_meta(result: dict[str, Any]) -> dict[str, str]:
+    return {
+        "dish_name": str(result.get("dish_name", "")).strip(),
+        "region_label": str(result.get("region_label", "")).strip(),
+        "reference_dish": str(result.get("reference_dish", "")).strip(),
+        "output_dir": str(result.get("output_dir", "")).strip(),
+        "run_kind": str(result.get("run_kind", "run")).strip() or "run",
+    }
+
+
+def write_run_meta(result: dict[str, Any]) -> None:
+    output_dir_text = str(result.get("output_dir", "")).strip()
+    if not output_dir_text:
+        return
+    output_dir = Path(output_dir_text)
+    if not output_dir.exists() or not output_dir.is_dir():
+        return
+    meta_file = output_dir / RUN_META_FILE_NAME
+    meta_file.write_text(
+        json.dumps(build_run_meta(result), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def read_run_meta(folder: Path) -> dict[str, str]:
+    meta_file = folder / RUN_META_FILE_NAME
+    if not meta_file.exists() or not meta_file.is_file():
+        return {}
+    try:
+        payload = json.loads(meta_file.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        "dish_name": str(payload.get("dish_name", "")).strip(),
+        "region_label": str(payload.get("region_label", "")).strip(),
+        "reference_dish": str(payload.get("reference_dish", "")).strip(),
+    }
+
+
 def format_folder_time(folder_name: str) -> str:
     parts = folder_name.split("_", 2)
     if len(parts) < 2:
@@ -1148,13 +1190,25 @@ def list_history(limit: int = 12, offset: int = 0) -> list[dict[str, Any]]:
         publish_dir = folder / "publish"
         if publish_dir.exists() and publish_dir.is_dir():
             images.extend(collect_images(publish_dir))
+        meta = read_run_meta(folder)
+        dish_name = meta.get("dish_name", "") or infer_dish_name_from_folder(folder.name)
+        region_label = meta.get("region_label", "")
+        reference_dish = meta.get("reference_dish", "")
+        # 兜底：当前会话里最新结果尚未落盘时，优先用内存结果补上关键字段。
+        if (not region_label or not reference_dish) and isinstance(LAST_RESULT, dict):
+            current_output_dir = str(LAST_RESULT.get("output_dir", "")).strip()
+            if current_output_dir and Path(current_output_dir).resolve() == folder.resolve():
+                region_label = region_label or str(LAST_RESULT.get("region_label", "")).strip()
+                reference_dish = reference_dish or str(LAST_RESULT.get("reference_dish", "")).strip()
         preview = ""
         if images:
             preview = images[0]
         rows.append(
             {
                 "name": folder.name,
-                "dish_name": infer_dish_name_from_folder(folder.name),
+                "dish_name": dish_name,
+                "region_label": region_label,
+                "reference_dish": reference_dish,
                 "created_at": format_folder_time(folder.name),
                 "path": str(folder),
                 "preview_image": preview,
@@ -1348,6 +1402,10 @@ def run_task_worker(task: dict[str, Any]) -> None:
         with RUN_LOCK:
             LAST_RESULT = result
             LAST_ERROR = ""
+            try:
+                write_run_meta(result)
+            except Exception as meta_exc:  # noqa: BLE001
+                append_run_log(f"[{time.strftime('%H:%M:%S')}] 写入运行元数据失败：{meta_exc}")
         append_run_log(f"[{time.strftime('%H:%M:%S')}] 任务 #{task.get('task_id', '-')} 完成。")
     except Exception as exc:  # noqa: BLE001
         with RUN_LOCK:
