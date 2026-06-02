@@ -241,8 +241,17 @@ def run_v2_first_feature(mode: str | None = None) -> dict[str, object]:
                     primary_selection_mode = "scored"
                     saved_images = remap_selected_image_path(saved_images, primary_selected_image)
                     print(f"主图评分完成，首选图：{primary_selected_image}")
+                else:
+                    primary_selected_image = move_image_to_publish(saved_images[0], publish_dir)
+                    primary_selection_mode = "fallback_direct"
+                    saved_images = [primary_selected_image]
+                    print(f"主图评分未产出首选，回退直通首图：{primary_selected_image}")
             except Exception as select_exc:
-                print(f"主图评分失败，跳过自动首选：{select_exc}")
+                print(f"主图评分失败，回退直通首图：{select_exc}")
+                primary_selected_image = move_image_to_publish(saved_images[0], publish_dir)
+                primary_selection_mode = "fallback_direct"
+                saved_images = [primary_selected_image]
+                print(f"主图回退入 publish：{primary_selected_image}")
 
     if primary_selected_image:
         try:
@@ -307,8 +316,17 @@ def run_v2_first_feature(mode: str | None = None) -> dict[str, object]:
                     cover_selection_mode = "scored"
                     cover_saved_images = remap_selected_image_path(cover_saved_images, cover_selected_image)
                     print(f"封面评分完成，首选封面：{cover_selected_image}")
+                else:
+                    cover_selected_image = move_image_to_publish(cover_saved_images[0], publish_dir)
+                    cover_selection_mode = "fallback_direct"
+                    cover_saved_images = [cover_selected_image]
+                    print(f"封面评分未产出首选，回退直通首图：{cover_selected_image}")
             except Exception as cover_select_exc:
-                print(f"封面评分失败，跳过自动首选：{cover_select_exc}")
+                print(f"封面评分失败，回退直通首图：{cover_select_exc}")
+                cover_selected_image = move_image_to_publish(cover_saved_images[0], publish_dir)
+                cover_selection_mode = "fallback_direct"
+                cover_saved_images = [cover_selected_image]
+                print(f"封面回退入 publish：{cover_selected_image}")
 
     # 兜底补偿：主图已入选但封面缺失时，自动补跑一次封面流程，避免出现“目录只落一张图”的半成品结果。
     if primary_selected_image and not cover_selected_image:
