@@ -10,6 +10,7 @@ import json
 import os
 import random
 import re
+import shutil
 import ssl
 from datetime import datetime
 from pathlib import Path
@@ -179,122 +180,15 @@ GUIDE_LINE_STALE_KEYWORDS = (
     "超有面子",
     "有面子",
 )
-AUTO_DISH_BANNED_NAME_TOKENS = (
-    "玉珠",
-    "金汤",
-    "翡翠",
-    "云朵",
-    "星空",
-    "火焰",
-    "雪顶",
-    "琥珀",
-    "神仙",
-    "灵感",
-)
-AUTO_DISH_NAME_ACTION_TOKENS = (
-    "夹饼",
-    "夹馍",
-    "火烧",
-    "盖饭",
-    "拌饭",
-    "炒饭",
-    "烩饭",
-    "焗饭",
-    "汤面",
-    "拌面",
-    "炒面",
-    "焖面",
-    "米线",
-    "河粉",
-    "年糕塔",
-    "清蒸",
-    "慢煮",
-    "酱焖",
-    "红烧",
-    "香煎",
-    "干煸",
-    "煲",
-    "锅",
-    "汤",
-    "卷",
-    "塔",
-    "蒸",
-    "焗",
-    "煎",
-    "烧",
-    "焖",
-    "拌",
-    "炒",
-    "炸",
-    "烤",
-    "卤",
-    "炖",
-    "煮",
-    "酿",
-    "夹",
-    "浇",
-)
-AUTO_DISH_STRUCTURE_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("夹饼夹馍类", ("肉夹馍", "夹馍", "夹饼", "火烧", "烧饼", "馍夹", "饼夹", "口袋饼", "荷叶饼", "汉堡", "三明治", "贝果", "法棍", "塔可")),
-    ("盖饭拌饭类", ("盖饭", "拌饭", "炒饭", "烩饭", "鸡饭", "丼", "抓饭", "焗饭", "饭团")),
-    ("面粉主食类", ("拉面", "汤面", "拌面", "炒面", "焖面", "面条", "米线", "河粉", "乌冬", "意面", "米粉", "炒粉", "粉丝")),
-    ("汤煲锅类", ("火锅", "锅仔", "砂锅", "陶煲", "煲", "羹", "浓汤", "清汤", "炖汤", "炖")),
-    ("包卷点心类", ("春卷", "卷饼", "肠粉", "可丽饼", "馄饨", "抄手", "锅贴", "烧麦", "饺")),
-    ("串烤铁板类", ("烤串", "肉串", "串烧", "烧烤", "铁板")),
-    ("披萨派塔类", ("披萨", "馅饼", "派", "塔")),
-)
-AUTO_DISH_MAIN_INGREDIENT_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("驴", ("驴腿", "驴腱", "驴肉", "驴")),
-    ("牛", ("牛腩", "牛肋", "牛舌", "牛排", "肥牛", "牛肉", "牛")),
-    ("羊", ("羊排", "羊腿", "羊蝎子", "羊肉", "羊")),
-    ("猪", ("五花肉", "排骨", "里脊", "猪蹄", "猪脚", "猪肉", "猪")),
-    ("鸡", ("鸡腿", "鸡翅", "鸡胸", "鸡柳", "鸡杂", "鸡肉", "鸡")),
-    ("鸭", ("鸭腿", "鸭胸", "鸭肉", "鸭")),
-    ("鹅", ("鹅肉", "鹅")),
-    ("海参", ("海参",)),
-    ("鱼", ("鱼头", "鱼片", "鱼柳", "鱼肉", "鱼")),
-    ("虾", ("虾仁", "虾滑", "大虾", "鲜虾", "虾")),
-    ("蟹", ("蟹肉", "蟹柳", "蟹")),
-    ("贝", ("扇贝", "生蚝", "蛤蜊", "贝肉", "贝")),
-    ("鱿墨章", ("鱿鱼", "墨鱼", "章鱼")),
-    ("蛙", ("牛蛙", "田鸡", "蛙")),
-    ("豆腐", ("豆腐", "豆干", "豆皮", "腐竹")),
-    ("豆类", ("扁豆", "豌豆", "荷兰豆", "四季豆", "芸豆", "豆角")),
-    ("蛋", ("鸡蛋", "鹌鹑蛋", "蛋")),
-    ("土豆", ("土豆", "马铃薯")),
-    ("茄子", ("茄子",)),
-    ("山药", ("山药",)),
-    ("笋", ("鲜笋", "春笋", "冬笋", "竹笋", "笋")),
-    ("年糕", ("年糕",)),
-    ("菌菇", ("菌菇", "蘑菇", "香菇", "杏鲍菇", "金针菇", "口蘑")),
-)
-AUTO_DISH_FLAVOR_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("酸香", ("酸香", "酸辣", "酸汤", "醋椒", "酸椒")),
-    ("葱香", ("葱香", "葱烧")),
-    ("椒麻", ("椒麻", "椒香", "青花椒")),
-    ("孜然", ("孜然",)),
-    ("柠香", ("柠香",)),
-    ("柚香", ("柚香",)),
-    ("酱香", ("酱焖", "酱煎", "酱香")),
-    ("糟香", ("糟香",)),
-    ("橄榄", ("橄榄",)),
-)
-AUTO_DISH_PRIMARY_METHOD_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("煎", ("香煎", "煎")),
-    ("烤", ("烤",)),
-    ("蒸", ("清蒸", "蒸")),
-    ("焖", ("酱焖", "焖")),
-    ("卤", ("卤",)),
-    ("炖", ("炖",)),
-    ("炒", ("炒",)),
-    ("炸", ("炸", "干煸")),
-    ("煮", ("慢煮", "煮")),
-    ("拌", ("拌",)),
-    ("焗", ("焗",)),
-    ("烧", ("红烧", "烧")),
-    ("酿", ("酿",)),
-    ("煲", ("煲",)),
-)
+AUTO_DISH_BANNED_NAME_TOKENS: tuple[str, ...] = ()
+AUTO_DISH_NAME_MIN_CHARS = 3
+AUTO_DISH_NAME_MAX_CHARS = 8
+# 用户要求：不使用这批本地限制词表去约束豆包发挥。
+AUTO_DISH_NAME_ACTION_TOKENS: tuple[str, ...] = ()
+AUTO_DISH_STRUCTURE_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = ()
+AUTO_DISH_MAIN_INGREDIENT_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = ()
+AUTO_DISH_FLAVOR_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = ()
+AUTO_DISH_PRIMARY_METHOD_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = ()
 AUTO_DISH_REGION_PROFILES: dict[str, dict[str, Any]] = {
     "0": {
         "label": "全球随机",
@@ -677,28 +571,7 @@ def build_recipe_user_prompt(dish_idea: str, notes: str) -> str:
 
 
 def build_auto_dish_generation_system_prompt(region_label: str) -> str:
-    return f"""
-你是专业菜品研发师，擅长把传统菜的风味逻辑重构成真实可落地的新菜。
-
-程序已经先读取本地传统菜库和历史生成记录，并会自动拦截以下问题：
-1. 与传统菜库重名或近似名。
-2. 与历史已生成新菜重名或近似名。
-3. 与参考菜或传统菜在“主料 + 成菜结构”上过近，例如仍然是同类夹饼、盖饭、汤面、锅物、卷物，只换一个口味词。
-4. 再次使用已经用过的传统参考菜。
-
-你只需要专注做一件事：基于本轮给定的参考菜和菜系范围，创造一道写实、可执行、不会像网红噱头的原创新菜。
-
-强制约束：
-1. 只输出两行，不要标题，不要解释，不要代码块。
-2. 第一行只能输出全新原创菜品名，必须是 4 到 7 个汉字，优先 4 到 6 个字；只有在读起来仍然顺口自然时才允许 7 个字。只能使用写实名，不要象征词、比喻词、玄学词，例如“玉珠”“金汤”“翡翠”“云朵”“星空”。
-3. 菜名是给人点单、记忆和复述的，不是把配方压缩成一句话。第一行最多保留 2 到 3 个记忆点，优先结构是“风味/状态 + 主料 + 做法或载体”或“主料 + 做法或载体”。
-4. 辅料、塞馅方式、次要配菜、调味细节和工艺补充都放到第二行，不要堆进第一行。像“鲜笋鸡丝蒸酿腐皮”这种把辅料、主料、工艺和载体全塞进一行的名字不合格，应压缩成更顺口、更像人会叫的名字。
-5. 第二行只能输出一个连续段落，必须以第一行菜名开头，不能分点，不能换段，不能出现“参考菜”“灵感来源”“改良自”“像某某菜”这类表述。
-6. 第二行必须完整写出主料和关键辅料的预处理、核心酱汁的用料与比例、完整烹饪流程、火候时间、装盘方式、成品口感和上桌体验。
-7. 新菜必须保持“{region_label}”范围内可成立的调味与技法逻辑，但结构上必须是新组合，不得照抄传统菜。
-8. 新菜至少要同时改掉下面四项里的两项：承载主食或出餐结构、核心酱汁体系、关键技法终点、主料搭配关系；不能只在原菜上换一个口味词或改一个工序词。
-9. 如果参考菜本身已经是固定经典结构，例如夹饼、夹馍、火烧、盖饭、面、汤、锅、卷、串、披萨、汉堡，新菜必须换掉这个结构，不能继续沿用同类吃法。
-""".strip()
+    return ""
 
 
 def build_auto_dish_generation_user_prompt(
@@ -710,38 +583,14 @@ def build_auto_dish_generation_user_prompt(
     recent_history_restrictions: dict[str, tuple[str, ...]],
     retry_feedback: str = "",
 ) -> str:
-    sample_text = "、".join(region_samples) if region_samples else "无"
-    used_reference_text = "、".join(used_reference_dishes[-8:]) if used_reference_dishes else "无"
     used_generated_text = join_auto_dish_history_items(recent_history_restrictions.get("recent_generated_dishes", ()))
     banned_ingredient_text = join_auto_dish_history_items(recent_history_restrictions.get("banned_ingredients", ()))
     banned_flavor_text = join_auto_dish_history_items(recent_history_restrictions.get("banned_flavors", ()))
     banned_method_text = join_auto_dish_history_items(recent_history_restrictions.get("banned_methods", ()))
-    retry_block = ""
-    if retry_feedback:
-        retry_block = f"\n上一轮被程序拦截的原因：{retry_feedback}\n这一次必须彻底避开上面的错误。"
 
     return f"""
-本轮菜系范围：{region_label}
-本轮传统参考菜：{reference_dish}
-同区域已有菜名样本：{sample_text}
-历史已用参考菜：{used_reference_text}
-近10条历史新菜名：{used_generated_text}
-近10条历史禁用主食材：{banned_ingredient_text}
-近10条历史禁用口味：{banned_flavor_text}
-近10条历史禁用主烹饪方式：{banned_method_text}
-
-生成要求：
-1. 参考菜只用于判断风味方向和工艺边界，绝不能直接改字照抄。
-2. 新菜必须适合真实厨房落地，不能写成广告标题或概念菜名。
-3. 第一行新菜名要像人会自然说出口、菜单上看着顺、用户愿意记住的短名字，不要像“主料 + 辅料 + 工艺 + 结构”的机械堆词。
-4. 如果你想表达的点太多，优先保留一个最有记忆点的风味词和一个核心主料或载体，其他信息全部放到第二行描述里。
-5. 第二行必须是一整段专业厨师视角描述，并以第一行新菜名开头。
-6. 必须先判断参考菜最核心的成菜结构，例如夹入饼、盖在饭上、浸在汤里、连锅上桌、卷进皮里、串起来烤；生成新菜时必须主动换结构，不能沿用同一吃法。
-7. 如果参考菜已经是市面上非常成熟的经典结构，新菜必须像真正研发新菜那样换承载方式、换入口形态或换最终上桌结构，不能做成同类商品再加一个新口味名。
-8. 近10条历史里已经出现过的主食材、口味和主烹饪方式，这次从第一行菜名到第二行整段描述都不能再碰；如果禁用列表里已经有“鱼、豆腐、煎”之类元素，就必须整道菜换到别的原料和做法。
-9. 全程不要提及参考菜名字，也不要拿任何传统菜做对比。{retry_block}
-
-现在严格按两行格式输出结果。
+参考传统菜“{reference_dish}（这里从@chuantongcaipu.txt 里提取）”，生成全新的市场上没有的新菜名并用简短的语言描述这道新菜的做法（食材，配菜，酱汁，烹饪流程和出菜摆盘），满足近10条的禁用规则（近10条历史新菜名：{used_generated_text}；近10条历史禁用主食材：{banned_ingredient_text}；近10条历史禁用口味：{banned_flavor_text}；近10条历史禁用主烹饪方式：{banned_method_text}），你创造的菜名必须搜索确保市面上是没有的，你可以更换食材，口味和烹饪流程来创造全新菜，要求跟关联的文件里的菜品没有重复，生成的菜名控制在3至8个汉子以内，食材要用大众有认知度的，不能太离谱和偏离大众的认知，同时杜绝象征式的比喻式的隐喻式的菜名。
+输出格式：第一行为菜名。第二行为描述（不要空行也不要空段）。
 """.strip()
 
 
@@ -2545,14 +2394,17 @@ def extract_non_overlapping_auto_dish_name_tokens(text: str, tokens: tuple[str, 
 
 
 def find_mechanical_auto_dish_name_reason(dish_name: str) -> str:
-    if len(dish_name) > 7:
-        return "自动生成的新菜名太长，像把主料、辅料、做法和载体一起塞进了标题。请压缩到 4 到 7 个字，只保留最有记忆点的 2 到 3 段信息。"
+    if len(dish_name) > AUTO_DISH_NAME_MAX_CHARS:
+        return (
+            "自动生成的新菜名太长，像把主料、辅料、做法和载体一起塞进了标题。"
+            f"请压缩到 {AUTO_DISH_NAME_MIN_CHARS} 到 {AUTO_DISH_NAME_MAX_CHARS} 个字，只保留最有记忆点的 2 到 3 段信息。"
+        )
 
     action_matches = extract_non_overlapping_auto_dish_name_tokens(dish_name, AUTO_DISH_NAME_ACTION_TOKENS)
     if len(action_matches) >= 3:
         return f"自动生成的新菜名工艺和结构词堆得太多，读起来不顺口：{dish_name}。请压缩成更像人会说出口的短名字。"
 
-    if len(dish_name) >= 7 and len(action_matches) >= 2 and action_matches[0][0] >= 4:
+    if len(dish_name) >= AUTO_DISH_NAME_MAX_CHARS and len(action_matches) >= 2 and action_matches[0][0] >= 4:
         return (
             f"自动生成的新菜名信息塞得过满，读起来像配方摘要，不像人会点单的菜名：{dish_name}。"
             "请按‘风味/状态 + 主料 + 做法或载体’重写，辅料和细节全部放到第二行。"
@@ -2743,75 +2595,13 @@ def validate_auto_generated_dish_idea(
 ) -> dict[str, str]:
     dish_name = idea_payload["dish_idea"].strip()
     notes = re.sub(r"\s+", "", idea_payload["notes"]).strip()
-    combined_text = f"{dish_name}{notes}"
 
-    if not re.fullmatch(r"[\u4e00-\u9fff]{4,7}", dish_name):
-        raise ValueError("自动生成的新菜名必须是 4 到 7 个纯中文汉字，优先 4 到 6 个字。")
-
-    if any(token in dish_name for token in AUTO_DISH_BANNED_NAME_TOKENS):
-        raise ValueError("自动生成的新菜名仍带有比喻或概念化词汇。")
-
-    mechanical_name_reason = find_mechanical_auto_dish_name_reason(dish_name)
-    if mechanical_name_reason:
-        raise ValueError(mechanical_name_reason)
-
-    traditional_conflict = find_conflicting_dish_name(dish_name, traditional_dish_names)
-    if traditional_conflict:
-        raise ValueError(f"自动生成的新菜名与传统菜库冲突：{traditional_conflict}")
-
-    historical_conflict = find_conflicting_dish_name(dish_name, historical_generated_dish_names)
-    if historical_conflict:
-        raise ValueError(f"自动生成的新菜名与历史新菜重复：{historical_conflict}")
-
-    recent_history_conflicts = find_recent_auto_dish_history_conflicts(
-        candidate_text=combined_text,
-        recent_history_restrictions=recent_history_restrictions or {},
-    )
-    conflict_parts: list[str] = []
-    if recent_history_conflicts["ingredients"]:
-        conflict_parts.append(f"主食材 {join_auto_dish_history_items(recent_history_conflicts['ingredients'])}")
-    if recent_history_conflicts["flavors"]:
-        conflict_parts.append(f"口味 {join_auto_dish_history_items(recent_history_conflicts['flavors'])}")
-    if recent_history_conflicts["methods"]:
-        conflict_parts.append(f"主烹饪方式 {join_auto_dish_history_items(recent_history_conflicts['methods'])}")
-    if conflict_parts:
+    if not re.fullmatch(rf"[\u4e00-\u9fff]{{{AUTO_DISH_NAME_MIN_CHARS},{AUTO_DISH_NAME_MAX_CHARS}}}", dish_name):
         raise ValueError(
-            "自动生成的新菜仍复用了近10条历史菜名里的禁用元素："
-            + "；".join(conflict_parts)
-            + "。这次必须整体换掉这些食材方向、风味方向和主做法。"
+            f"自动生成的新菜名必须是 {AUTO_DISH_NAME_MIN_CHARS} 到 {AUTO_DISH_NAME_MAX_CHARS} 个纯中文汉字。"
         )
-
-    reference_structure_conflict = find_structural_dish_conflict(
-        candidate_name=dish_name,
-        candidate_text=combined_text,
-        existing_names=[reference_dish],
-    )
-    if reference_structure_conflict:
-        raise ValueError(
-            f"自动生成的新菜仍沿用了参考菜的同主料同结构框架：{reference_structure_conflict}。必须换掉承载主食或最终上桌结构，不能只是换口味词。"
-        )
-
-    traditional_structure_conflict = find_structural_dish_conflict(
-        candidate_name=dish_name,
-        candidate_text=combined_text,
-        existing_names=traditional_dish_names,
-    )
-    if traditional_structure_conflict:
-        raise ValueError(
-            f"自动生成的新菜与传统菜库中的现有菜过于接近：{traditional_structure_conflict}。请换掉主料承载方式或成菜结构后再生成。"
-        )
-
-    if not notes.startswith(dish_name):
-        raise ValueError("自动生成的菜品描述必须以新菜名开头。")
-
-    if reference_dish in notes:
-        raise ValueError("自动生成的菜品描述不允许直接提到参考传统菜名。")
-
-    if any(keyword in notes for keyword in ("参考菜", "灵感来源", "改良自", "像", "复刻")):
-        raise ValueError("自动生成的菜品描述仍在对比或引用传统菜。")
-
-    if len(notes) < 140:
-        raise ValueError("自动生成的菜品描述过短，未覆盖完整制作逻辑。")
+    if not notes:
+        raise ValueError("自动生成的第二行描述不能为空。")
 
     return {
         "dish_idea": dish_name,
@@ -2922,6 +2712,34 @@ def sanitize_file_name(name: str) -> str:
 
 def build_run_output_dir(timestamp: str, dish_name: str) -> Path:
     return OUTPUT_ROOT_DIR / f"{timestamp}_{sanitize_file_name(dish_name)}"
+
+
+def backup_dish_idea_file(source_file: Path, output_dir: Path, timestamp: str, dish_name: str) -> Path | None:
+    """
+    备份菜谱创意灵感文件到输出目录。
+    
+    Args:
+        source_file: 源菜谱灵感文件路径
+        output_dir: 输出目录路径
+        timestamp: 时间戳
+        dish_name: 菜品名称
+    
+    Returns:
+        备份文件路径，如果备份失败则返回 None
+    """
+    if not source_file.exists():
+        return None
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    backup_file_name = f"{timestamp}_{sanitize_file_name(dish_name)}_菜谱创意灵感.txt"
+    backup_file_path = output_dir / backup_file_name
+    
+    try:
+        shutil.copy2(source_file, backup_file_path)
+        return backup_file_path
+    except Exception as exc:
+        print(f"[警告] 菜谱灵感备份失败：{exc}")
+        return None
 
 
 def get_text_model() -> str:
@@ -3546,6 +3364,7 @@ def normalize_page01_prompt_phrasing(prompt_text: str) -> str:
         r"有人手持餐具与主菜互动，\1，并\2",
         normalized,
     )
+    normalized = re.sub(r"(?<=[\u4e00-\u9fff”’」》）】])[:：]", " ", normalized)
     return normalized
 
 
@@ -4598,6 +4417,11 @@ def generate_recipe_text_assets_from_idea_file(
 
     generated_dish_name = idea_payload["dish_idea"]
     run_output_dir = build_run_output_dir(timestamp, generated_dish_name)
+    
+    idea_backup_file = backup_dish_idea_file(idea_file, run_output_dir, timestamp, generated_dish_name)
+    if idea_backup_file:
+        print(f"菜谱创意灵感已备份：{idea_backup_file}")
+    
     guide_bundle = build_recipe_bundle_from_recipe_text(
         recipe_text=recipe_text,
         fixed_dish_name=generated_dish_name,
@@ -4805,6 +4629,11 @@ def generate_page01_prompt_only_from_idea_file(
 
     generated_dish_name = idea_payload["dish_idea"]
     run_output_dir = build_run_output_dir(timestamp, generated_dish_name)
+    
+    idea_backup_file = backup_dish_idea_file(idea_file, run_output_dir, timestamp, generated_dish_name)
+    if idea_backup_file:
+        print(f"菜谱创意灵感已备份：{idea_backup_file}")
+    
     guide_bundle = build_recipe_bundle_from_recipe_text(
         recipe_text=recipe_text,
         fixed_dish_name=generated_dish_name,
