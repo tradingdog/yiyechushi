@@ -39,7 +39,7 @@ from tools.douyin_publish import (  # noqa: E402
     type_text_humanly,
     wait_for_locator,
 )
-from tools.weixin_mp_publish import confirm_windows_open_dialog  # noqa: E402
+from tools.weixin_mp_publish import confirm_windows_open_dialog, paste_text_to_clipboard  # noqa: E402
 
 
 DEFAULT_URL_KEYWORD = "cp.kuaishou.com"
@@ -478,18 +478,39 @@ def upload_main_images(page: Page, assets: KuaishouPublishAssets, settings: Kuai
     print(f"快手图文上传完成，共 {len(assets.image_paths)} 张。")
 
 
-def type_hashtag_topic_humanly(editor: Locator, topic_text: str, *, delay_ms: int) -> None:
-    """在作品描述框内逐字敲 #话题，触发下拉（insert_text 不会弹出下拉）。"""
-    editor.press_sequentially(f"#{topic_text}", delay=max(0, delay_ms))
+def _normalize_topic_tag(topic_tag: str) -> str:
+    text = str(topic_tag or "").strip()
+    if not text:
+        raise ValueError("话题标签不能为空。")
+    return text if text.startswith("#") else f"#{text}"
 
 
-def confirm_topic_with_main_enter(page: Page, topic_tag: str, settings: KuaishouPublishSettings) -> None:
-    """用主键盘区 Enter 确认话题（Shift 上方那颗；勿用 NumpadEnter，否则会空行不变蓝）。"""
-    page.wait_for_timeout(settings.after_topic_confirm_wait_ms)
+def paste_topic_tags_via_clipboard(
+    page: Page,
+    editor: Locator,
+    topic_tags: Sequence[str],
+    settings: KuaishouPublishSettings,
+) -> None:
+    """逐个复制话题到剪贴板后 Ctrl+V 粘贴；第 2 个起先按空格再粘贴。"""
+    if not topic_tags:
+        return
+
     page.bring_to_front()
-    time.sleep(0.2)
-    pyautogui.press("enter")
-    print(f"已等待 {settings.after_topic_confirm_wait_ms}ms 后系统主键盘 Enter 确认话题：{topic_tag}")
+    editor.click()
+    page.wait_for_timeout(200)
+
+    for index, topic_tag in enumerate(topic_tags):
+        tag = _normalize_topic_tag(topic_tag)
+        paste_text_to_clipboard(tag)
+        time.sleep(0.15)
+        if index > 0:
+            pyautogui.press("space")
+            time.sleep(0.1)
+        pyautogui.hotkey("ctrl", "v")
+        page.wait_for_timeout(settings.after_topic_confirm_wait_ms)
+        print(f"已粘贴快手话题（{'首项' if index == 0 else '空格后'}）：{tag}")
+        if index < len(topic_tags) - 1:
+            page.wait_for_timeout(settings.between_topics_wait_ms)
 
 
 def fill_work_description(page: Page, assets: KuaishouPublishAssets, settings: KuaishouPublishSettings) -> None:
@@ -512,13 +533,8 @@ def fill_work_description(page: Page, assets: KuaishouPublishAssets, settings: K
     page.wait_for_timeout(settings.typing_delay_ms)
     print(f"已输入快手作品描述正文（第 1 行），长度 {len(assets.description_body)}。")
 
-    for topic_tag in assets.topic_tags:
-        topic_text = topic_tag.lstrip("#")
-        type_hashtag_topic_humanly(editor, topic_text, delay_ms=settings.topic_typing_delay_ms)
-        confirm_topic_with_main_enter(page, topic_tag, settings)
-        page.wait_for_timeout(settings.between_topics_wait_ms)
-
-    print(f"已输入快手 {len(assets.topic_tags)} 个话题。")
+    paste_topic_tags_via_clipboard(page, editor, assets.topic_tags, settings)
+    print(f"已粘贴快手 {len(assets.topic_tags)} 个话题。")
 
 
 def upload_cover_image(page: Page, assets: KuaishouPublishAssets, settings: KuaishouPublishSettings) -> None:

@@ -1,17 +1,15 @@
 """
-临时脚本：仅测试快手作品描述里「话题变蓝」的按键方式。
+临时脚本：测试快手作品描述里「剪贴板粘贴话题变蓝」。
 
-用法（请先打开 Chrome 9222，并进入图文编辑页，或让脚本打开 publish/video）：
+用法（请先打开 Chrome 9222，并进入快手图文编辑页）：
   python V2/kuaishou_topic_enter_test.py
-  python V2/kuaishou_topic_enter_test.py --method main_enter
-  python V2/kuaishou_topic_enter_test.py --method all
+  python V2/kuaishou_topic_enter_test.py --topics "#美食教程 #美食分享"
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
-import time
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -27,70 +25,49 @@ from script_logging import setup_script_logging  # noqa: E402
 if __name__ == "__main__":
     setup_script_logging(__file__)
 
-import pyautogui  # noqa: E402
-from playwright.sync_api import Locator, Page, sync_playwright  # noqa: E402
+from playwright.sync_api import sync_playwright  # noqa: E402
 
-from tools.douyin_publish import (  # noqa: E402
-    DEFAULT_CDP_URL,
-    find_optional_locator,
-    type_text_humanly,
-    wait_for_locator,
+from tools.douyin_publish import DEFAULT_CDP_URL, wait_for_locator  # noqa: E402
+from tools.kuaishou_publish import (  # noqa: E402
+    DEFAULT_AFTER_TOPIC_CONFIRM_WAIT_MS,
+    DEFAULT_BETWEEN_TOPICS_WAIT_MS,
+    KuaishouPublishSettings,
+    description_editor_locators,
+    paste_topic_tags_via_clipboard,
 )
-from tools.kuaishou_publish import description_editor_locators, type_hashtag_topic_humanly  # noqa: E402
 
 
 DEFAULT_PUBLISH_VIDEO_URL = "https://cp.kuaishou.com/article/publish/video"
-DEFAULT_TOPIC_TEXT = "美食教程"
-DEFAULT_TYPING_DELAY_MS = 180
-DEFAULT_AFTER_TYPE_WAIT_MS = 1_500
+DEFAULT_TOPICS = ("#美食教程", "#美食分享")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="快手话题变蓝：单独测试回车确认方式")
+    parser = argparse.ArgumentParser(description="快手话题：剪贴板逐个粘贴测试")
     parser.add_argument("--cdp-url", default=DEFAULT_CDP_URL)
-    parser.add_argument("--url", default=DEFAULT_PUBLISH_VIDEO_URL, help="目标页面 URL（含此关键字即可）")
-    parser.add_argument("--topic", default=DEFAULT_TOPIC_TEXT, help="不含 # 的话题文字")
-    parser.add_argument("--typing-delay-ms", type=int, default=DEFAULT_TYPING_DELAY_MS)
-    parser.add_argument("--after-type-wait-ms", type=int, default=DEFAULT_AFTER_TYPE_WAIT_MS)
+    parser.add_argument("--url", default=DEFAULT_PUBLISH_VIDEO_URL)
     parser.add_argument(
-        "--insert-text",
-        action="store_true",
-        help="用 insert_text 输入（对照组，通常无法弹出话题下拉）",
+        "--topics",
+        default=" ".join(DEFAULT_TOPICS),
+        help='空格分隔，如 "#美食教程 #美食分享"',
     )
-    parser.add_argument(
-        "--method",
-        default="main_enter",
-        choices=(
-            "main_enter",
-            "numpad_enter",
-            "keydown_enter",
-            "arrow_enter",
-            "click_first",
-            "pyautogui_enter",
-            "all",
-        ),
-        help=(
-            "main_enter/pyautogui_enter=系统主键盘 Enter；numpad_enter=小键盘 Enter（对照）；"
-            "keydown_enter=Playwright Enter；arrow_enter=下箭头+Enter；"
-            "click_first=点下拉首项；all=依次全试"
-        ),
-    )
+    parser.add_argument("--after-paste-wait-ms", type=int, default=DEFAULT_AFTER_TOPIC_CONFIRM_WAIT_MS)
+    parser.add_argument("--between-topics-wait-ms", type=int, default=DEFAULT_BETWEEN_TOPICS_WAIT_MS)
     return parser.parse_args()
 
 
-def topic_suggestion_first_locators(page: Page, topic_text: str) -> tuple:
-    hash_label = f"#{topic_text}"
-    return (
-        page.locator(".ant-select-dropdown:visible").get_by_text(hash_label, exact=False).first,
-        page.locator("[class*='popover']:visible").get_by_text(hash_label, exact=False).first,
-        page.locator(".d-popover:visible").get_by_text(hash_label, exact=False).first,
-        page.locator("[class*='suggest']:visible").filter(has_text="人浏览").first,
-        page.locator("[class*='mention']:visible [class*='item']").first,
-        page.get_by_role("listbox").locator("[role='option']").first,
-    )
+def parse_topic_tags(raw: str) -> tuple[str, ...]:
+    tags = []
+    for part in str(raw or "").split():
+        text = part.strip()
+        if not text:
+            continue
+        tags.append(text if text.startswith("#") else f"#{text}")
+    if not tags:
+        raise ValueError("至少需要一个话题，例如：#美食教程 #美食分享")
+    return tuple(tags)
 
 
-def find_publish_video_page(browser, url_keyword: str) -> Page:
+def find_publish_video_page(browser, url_keyword: str):
     matched = [
         page
         for context in browser.contexts
@@ -112,150 +89,67 @@ def find_publish_video_page(browser, url_keyword: str) -> Page:
     return page
 
 
-def focus_editor(page: Page) -> Locator:
-    editor = wait_for_locator(page, description_editor_locators(page), description="作品描述输入框", timeout_ms=60_000)
-    editor.click()
-    page.keyboard.press("Control+A")
-    page.keyboard.press("Backspace")
-    page.wait_for_timeout(300)
-    print("已清空并聚焦作品描述输入框。")
-    return editor
-
-
-def type_topic_prefix(
-    editor: Locator,
-    topic_text: str,
-    *,
-    typing_delay_ms: int,
-    use_insert_text: bool = False,
-) -> None:
-    if use_insert_text:
-        editor.click()
-        editor.page.keyboard.insert_text("#")
-        editor.page.wait_for_timeout(typing_delay_ms)
-        type_text_humanly(editor.page, topic_text, delay_ms=typing_delay_ms)
-        mode = "insert_text"
-    else:
-        type_hashtag_topic_humanly(editor, topic_text, delay_ms=typing_delay_ms)
-        mode = "press_sequentially"
-    print(f"已逐字输入：#{topic_text}（{mode}）")
-
-
-def confirm_main_enter(page: Page) -> None:
-    """与正式发布脚本一致：系统级主键盘 Enter（字母区右侧，非小键盘）。"""
-    confirm_pyautogui_enter(page)
-
-
-def confirm_numpad_enter(page: Page) -> None:
-    page.keyboard.press("NumpadEnter")
-    print("已发送：NumpadEnter（小键盘回车）")
-
-
-def confirm_keydown_enter(page: Page) -> None:
-    page.keyboard.down("Enter")
-    page.wait_for_timeout(80)
-    page.keyboard.up("Enter")
-    print("已发送：keydown + keyup Enter（模拟短按主回车）")
-
-
-def confirm_arrow_enter(page: Page) -> None:
-    page.keyboard.press("ArrowDown")
-    page.wait_for_timeout(200)
-    page.keyboard.press("Enter")
-    print("已发送：ArrowDown + Enter")
-
-
-def confirm_click_first(page: Page, topic_text: str) -> None:
-    suggestion = find_optional_locator(
-        page,
-        topic_suggestion_first_locators(page, topic_text),
-        timeout_ms=4_000,
+def build_test_settings(args: argparse.Namespace) -> KuaishouPublishSettings:
+    return KuaishouPublishSettings(
+        output_dir=ROOT_DIR,
+        cdp_url=str(args.cdp_url),
+        url_keyword="cp.kuaishou.com",
+        chrome_path=None,
+        automation_profile_dir=ROOT_DIR / "tools" / "chrome_automation_profile",
+        auto_launch_browser=False,
+        cdp_ready_timeout_ms=30_000,
+        typing_delay_ms=0,
+        topic_typing_delay_ms=0,
+        after_publish_work_wait_ms=0,
+        after_graphic_tab_wait_ms=0,
+        after_upload_button_wait_ms=0,
+        after_main_upload_wait_ms=0,
+        after_open_cover_wait_ms=0,
+        after_cover_upload_wait_ms=0,
+        after_cover_confirm_wait_ms=0,
+        after_author_select_wait_ms=0,
+        after_location_open_wait_ms=0,
+        after_topic_confirm_wait_ms=max(0, int(args.after_paste_wait_ms)),
+        between_topics_wait_ms=max(0, int(args.between_topics_wait_ms)),
+        publish_location="成都市",
+        windows_open_dialog_wait_ms=0,
+        upload_step_screenshot=ROOT_DIR / "tools" / "kuaishou_publish_upload_step.png",
+        debug_screenshot=ROOT_DIR / "tools" / "kuaishou_publish_last_error.png",
+        dry_run=False,
     )
-    if suggestion is None:
-        raise RuntimeError("未找到话题下拉首项，无法点击确认。")
-    suggestion.click()
-    print("已点击：话题下拉首项")
-
-
-def confirm_pyautogui_enter(page: Page) -> None:
-    page.bring_to_front()
-    time.sleep(0.2)
-    pyautogui.press("enter")
-    print("已发送：pyautogui 系统级 enter（主键盘）")
-
-
-def run_one_method(
-    page: Page,
-    method: str,
-    topic_text: str,
-    *,
-    typing_delay_ms: int,
-    after_type_wait_ms: int,
-    use_insert_text: bool,
-) -> None:
-    print(f"\n========== 测试方式：{method} ==========")
-    editor = focus_editor(page)
-    type_topic_prefix(editor, topic_text, typing_delay_ms=typing_delay_ms, use_insert_text=use_insert_text)
-    page.wait_for_timeout(after_type_wait_ms)
-    print(f"已等待 {after_type_wait_ms}ms，准备确认话题…")
-
-    if method == "main_enter":
-        confirm_main_enter(page)
-    elif method == "numpad_enter":
-        confirm_numpad_enter(page)
-    elif method == "keydown_enter":
-        confirm_keydown_enter(page)
-    elif method == "arrow_enter":
-        confirm_arrow_enter(page)
-    elif method == "click_first":
-        confirm_click_first(page, topic_text)
-    elif method == "pyautogui_enter":
-        confirm_pyautogui_enter(page)
-    else:
-        raise RuntimeError(f"未知方式：{method}")
-
-    page.wait_for_timeout(2_000)
-    print("请查看编辑器里该话题是否已变蓝。按回车继续…")
-    input()
 
 
 def main() -> int:
     args = parse_args()
-    topic_text = str(args.topic or "").strip().lstrip("#")
-    if not topic_text:
-        print("话题不能为空。")
+    try:
+        topic_tags = parse_topic_tags(args.topics)
+    except ValueError as exc:
+        print(exc)
         return 1
 
-    methods = (
-        "main_enter",
-        "numpad_enter",
-        "keydown_enter",
-        "arrow_enter",
-        "click_first",
-        "pyautogui_enter",
-    )
-    if args.method == "all":
-        run_methods = methods
-    else:
-        run_methods = (args.method,)
-
-    print("说明：press_sequentially 输入 #话题 → 等下拉 → 主键盘 Enter（Shift 上方，勿用小键盘 Enter）。")
-    print("默认 main_enter（pyautogui 系统主回车）；可用 --method all 对比。")
+    print("说明：每个话题单独复制到剪贴板，在作品描述框 Ctrl+V 粘贴；第 2 个起先按空格再粘贴。")
+    print(f"待测话题：{' '.join(topic_tags)}")
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(str(args.cdp_url))
         page = find_publish_video_page(browser, str(args.url))
         print(f"已锁定页面：{page.url}")
 
-        for method in run_methods:
-            run_one_method(
-                page,
-                method,
-                topic_text,
-                typing_delay_ms=max(0, int(args.typing_delay_ms)),
-                after_type_wait_ms=max(0, int(args.after_type_wait_ms)),
-                use_insert_text=bool(args.insert_text),
-            )
+        editor = wait_for_locator(page, description_editor_locators(page), description="作品描述输入框", timeout_ms=60_000)
+        editor.click()
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Backspace")
+        page.wait_for_timeout(300)
+        print("已清空并聚焦作品描述输入框。")
+
+        settings = build_test_settings(args)
+        paste_topic_tags_via_clipboard(page, editor, topic_tags, settings)
+
+        page.wait_for_timeout(1_500)
+        html = editor.evaluate("el => el.innerHTML")
+        print(f"粘贴后编辑器 HTML 片段：{html[:500]}")
+        print("请目视检查话题是否均已变蓝。确认后按回车结束…")
+        input()
 
     print("测试结束。")
     return 0
