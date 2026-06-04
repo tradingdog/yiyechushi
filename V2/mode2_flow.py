@@ -25,11 +25,10 @@ from v2_core import (
     persist_v2_common_text_assets,
     load_cankao_group_template,
     load_manual_dish_idea,
-    move_image_to_publish,
     parse_bool_env,
     save_generated_images,
     save_text_output,
-    select_douyin_poster_image,
+    select_and_publish_image_group,
     write_dish_idea_file,
 )
 
@@ -184,40 +183,39 @@ def run_v2_mode2(mode: str | None = None) -> dict[str, object]:
         errors.append(poster_error)
     all_saved_images.extend(poster_saved_images)
 
+    detail_selection_mode = ""
+    detail_selection_result: dict[str, Any] = {}
+    detail_selected_image = ""
+    recipe_selection_mode = ""
+    recipe_selection_result: dict[str, Any] = {}
+    recipe_selected_image = ""
+    cover_selection_mode = ""
+    cover_selection_result: dict[str, Any] = {}
+    cover_selected_image = ""
+
     if poster_saved_images:
-        if len(poster_saved_images) == 1:
-            poster_selected_image = move_image_to_publish(poster_saved_images[0], publish_dir)
-            poster_selection_mode = "direct"
+        poster_selected_image, poster_selection_mode, poster_selection_result = select_and_publish_image_group(
+            doubao_client,
+            publish_dir=publish_dir,
+            candidate_paths=poster_saved_images,
+            image_kind="图文海报",
+            selection_report_name="海报筛选结果.json",
+        )
+        if poster_selected_image:
             poster_saved_images = [poster_selected_image]
-            print(f"海报数量=1，直接入 publish：{poster_selected_image}")
-        else:
-            try:
-                poster_paths = [Path(path) for path in poster_saved_images]
-                poster_selection_result = select_douyin_poster_image(doubao_client, poster_paths)
-                winner_index = int(poster_selection_result.get("winner_index", 1))
-                winner_path = poster_paths[max(0, min(winner_index - 1, len(poster_paths) - 1))]
-                poster_selected_image = move_image_to_publish(str(winner_path), publish_dir)
-                poster_selection_mode = "scored"
-                poster_saved_images = [poster_selected_image]
-                save_text_output(
-                    json_dumps_safe(poster_selection_result),
-                    publish_dir / "海报筛选结果.json",
-                )
-                print(f"海报筛选完成：{poster_selected_image}，理由：{poster_selection_result.get('winner_reason', '')}")
-            except Exception as select_exc:
-                poster_selected_image = move_image_to_publish(poster_saved_images[0], publish_dir)
-                poster_selection_mode = "fallback_direct"
-                poster_saved_images = [poster_selected_image]
-                errors.append(f"海报筛选失败，已回退首图：{select_exc}")
-                print(f"海报筛选失败，回退直通首图：{poster_selected_image}")
+        elif poster_selection_mode == "fallback_direct":
+            errors.append("海报筛选失败，已回退首图。")
 
     bubble_text_file = ""
     detail_prompt_file = ""
     detail_saved_images: list[str] = []
+    detail_candidate_images: list[str] = []
     recipe_prompt_file = ""
     recipe_saved_images: list[str] = []
+    recipe_candidate_images: list[str] = []
     cover_prompt_file = ""
     cover_saved_images: list[str] = []
+    cover_candidate_images: list[str] = []
 
     if poster_selected_image:
         poster_path = Path(poster_selected_image)
@@ -271,6 +269,7 @@ def run_v2_mode2(mode: str | None = None) -> dict[str, object]:
                 if detail_error:
                     errors.append(detail_error)
                 all_saved_images.extend(detail_saved_images)
+                detail_candidate_images = list(detail_saved_images)
             except Exception as detail_exc:
                 errors.append(f"细节图流程失败：{detail_exc}")
                 print(f"细节图流程失败：{detail_exc}")
@@ -304,6 +303,7 @@ def run_v2_mode2(mode: str | None = None) -> dict[str, object]:
             if recipe_error:
                 errors.append(recipe_error)
             all_saved_images.extend(recipe_saved_images)
+            recipe_candidate_images = list(recipe_saved_images)
         except Exception as recipe_exc:
             errors.append(f"菜谱图流程失败：{recipe_exc}")
             print(f"菜谱图流程失败：{recipe_exc}")
@@ -337,9 +337,74 @@ def run_v2_mode2(mode: str | None = None) -> dict[str, object]:
             if cover_error:
                 errors.append(cover_error)
             all_saved_images.extend(cover_saved_images)
+            cover_candidate_images = list(cover_saved_images)
         except Exception as cover_exc:
             errors.append(f"封面图流程失败：{cover_exc}")
             print(f"封面图流程失败：{cover_exc}")
+
+    if detail_candidate_images:
+        detail_selected_image, detail_selection_mode, detail_selection_result = select_and_publish_image_group(
+            doubao_client,
+            publish_dir=publish_dir,
+            candidate_paths=detail_candidate_images,
+            image_kind="细节图",
+            selection_report_name="细节图筛选结果.json",
+        )
+        if detail_selection_mode == "fallback_direct":
+            errors.append("细节图筛选失败，已回退首图。")
+
+    if recipe_candidate_images:
+        recipe_selected_image, recipe_selection_mode, recipe_selection_result = select_and_publish_image_group(
+            doubao_client,
+            publish_dir=publish_dir,
+            candidate_paths=recipe_candidate_images,
+            image_kind="菜谱图",
+            selection_report_name="菜谱图筛选结果.json",
+        )
+        if recipe_selection_mode == "fallback_direct":
+            errors.append("菜谱图筛选失败，已回退首图。")
+
+    if cover_candidate_images:
+        cover_selected_image, cover_selection_mode, cover_selection_result = select_and_publish_image_group(
+            doubao_client,
+            publish_dir=publish_dir,
+            candidate_paths=cover_candidate_images,
+            image_kind="封面图",
+            selection_report_name="封面图筛选结果.json",
+        )
+        if cover_selection_mode == "fallback_direct":
+            errors.append("封面图筛选失败，已回退首图。")
+
+    photoshop_processed_files: list[str] = []
+    photoshop_error = ""
+    publish_final_dir = publish_dir / "final"
+    publish_selected_for_ps = [
+        path
+        for path in [poster_selected_image, detail_selected_image, recipe_selected_image, cover_selected_image]
+        if path
+    ]
+    if publish_selected_for_ps:
+        try:
+            from tools.apply_photoshop_template_batch import apply_photoshop_template_batch_to_dir
+
+            print(
+                f"publish 已选入 {len(publish_selected_for_ps)} 张图，"
+                f"开始 Photoshop 合成到 {publish_final_dir}（不覆盖 publish 原图）..."
+            )
+            processed_file_map = apply_photoshop_template_batch_to_dir(
+                input_dir=publish_dir,
+                output_dir=publish_final_dir,
+            )
+            photoshop_processed_files = list(processed_file_map.values())
+            print(f"Photoshop 合成完成：{len(photoshop_processed_files)} 张 -> publish/final")
+        except Exception as ps_exc:
+            photoshop_error = f"Photoshop 合成失败：{ps_exc}"
+            save_text_output(
+                f"Photoshop 合成失败。\n失败原因：{ps_exc}",
+                run_output_dir / "Photoshop合成失败原因.txt",
+            )
+            errors.append(photoshop_error)
+            print(photoshop_error)
 
     close_doubao = getattr(doubao_client, "close", None)
     if callable(close_doubao):
@@ -366,18 +431,28 @@ def run_v2_mode2(mode: str | None = None) -> dict[str, object]:
         "bubble_text_file": bubble_text_file,
         "detail_prompt_file": detail_prompt_file,
         "detail_saved_images": detail_saved_images,
+        "detail_selected_image": detail_selected_image,
+        "detail_selection_mode": detail_selection_mode,
+        "detail_selection_result": detail_selection_result,
         "recipe_prompt_file": recipe_prompt_file,
         "recipe_saved_images": recipe_saved_images,
+        "recipe_selected_image": recipe_selected_image,
+        "recipe_selection_mode": recipe_selection_mode,
+        "recipe_selection_result": recipe_selection_result,
         "cover_prompt_file": cover_prompt_file,
         "cover_saved_images": cover_saved_images,
+        "cover_selected_image": cover_selected_image,
+        "cover_selection_mode": cover_selection_mode,
+        "cover_selection_result": cover_selection_result,
+        "publish_final_dir": str(publish_final_dir),
+        "photoshop_processed_files": photoshop_processed_files,
+        "photoshop_error": photoshop_error,
         "saved_images": all_saved_images,
         "image_error": image_error,
         # 兼容模式1前端字段
         "prompt_file": poster_prompt_file,
         "primary_selected_image": poster_selected_image,
         "primary_selection_mode": poster_selection_mode,
-        "cover_selected_image": cover_saved_images[0] if cover_saved_images else "",
-        "cover_saved_images": cover_saved_images,
         "cover_image_error": "",
         "dish_idea_record_file": common_text_assets.get("dish_idea_record_file", ""),
         "publish_title_file": common_text_assets.get("publish_title_file", ""),
@@ -388,8 +463,3 @@ def run_v2_mode2(mode: str | None = None) -> dict[str, object]:
         "publish_copy_error": publish_copy_error,
     }
 
-
-def json_dumps_safe(payload: dict[str, Any]) -> str:
-    import json
-
-    return json.dumps(payload, ensure_ascii=False, indent=2)

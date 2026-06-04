@@ -721,16 +721,21 @@ def generate_poster_bubble_copy(client: OpenAI, poster_image_path: Path) -> dict
     return {"model": model, "content": content}
 
 
-def select_douyin_poster_image(client: OpenAI, image_paths: list[Path]) -> dict[str, Any]:
+def select_douyin_publish_image(
+    client: OpenAI,
+    image_paths: list[Path],
+    *,
+    image_kind: str = "图文",
+) -> dict[str, Any]:
     if not image_paths:
-        raise ValueError("没有可筛选的海报候选图。")
+        raise ValueError(f"没有可筛选的{image_kind}候选图。")
     if len(image_paths) == 1:
         only_path = image_paths[0]
         return {
             "auto_selected": True,
             "winner_index": 1,
             "winner_image_name": only_path.name,
-            "winner_reason": "仅 1 张候选，直接入 publish。",
+            "winner_reason": f"仅 1 张{image_kind}候选，直接入 publish。",
         }
 
     model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
@@ -738,7 +743,7 @@ def select_douyin_poster_image(client: OpenAI, image_paths: list[Path]) -> dict[
         {
             "type": "text",
             "text": (
-                "选出最适合在抖音发布的图文海报。"
+                f"选出最适合在抖音发布的{image_kind}。"
                 "只输出 JSON：{\"winner_index\": 1, \"winner_reason\": \"一句话理由\"}，"
                 "winner_index 从 1 开始，对应下面候选顺序。"
             ),
@@ -756,7 +761,7 @@ def select_douyin_poster_image(client: OpenAI, image_paths: list[Path]) -> dict[
     )
     raw_text = extract_chat_text_output(response).strip()
     if not raw_text:
-        raise ValueError("豆包未返回海报筛选结果。")
+        raise ValueError(f"豆包未返回{image_kind}筛选结果。")
     payload = extract_json_object_from_text(raw_text)
     winner_index = int(payload.get("winner_index", 1))
     if winner_index < 1 or winner_index > len(image_paths):
@@ -766,8 +771,61 @@ def select_douyin_poster_image(client: OpenAI, image_paths: list[Path]) -> dict[
         "auto_selected": False,
         "winner_index": winner_index,
         "winner_image_name": winner_path.name,
-        "winner_reason": str(payload.get("winner_reason", "")).strip() or "豆包已选出抖音图文海报。",
+        "winner_reason": str(payload.get("winner_reason", "")).strip() or f"豆包已选出抖音{image_kind}。",
     }
+
+
+def select_douyin_poster_image(client: OpenAI, image_paths: list[Path]) -> dict[str, Any]:
+    return select_douyin_publish_image(client, image_paths, image_kind="图文海报")
+
+
+def select_and_publish_image_group(
+    client: OpenAI,
+    *,
+    publish_dir: Path,
+    candidate_paths: list[str],
+    image_kind: str,
+    selection_report_name: str,
+) -> tuple[str, str, dict[str, Any]]:
+    paths = [Path(path) for path in candidate_paths if str(path).strip() and Path(path).exists()]
+    if not paths:
+        return "", "", {}
+
+    publish_dir.mkdir(parents=True, exist_ok=True)
+    if len(paths) == 1:
+        selected = move_image_to_publish(str(paths[0]), publish_dir)
+        result = {
+            "auto_selected": True,
+            "winner_index": 1,
+            "winner_image_name": paths[0].name,
+            "winner_reason": f"仅 1 张{image_kind}，直接入 publish。",
+        }
+        print(f"{image_kind}数量=1，直接入 publish：{selected}")
+        return selected, "direct", result
+
+    try:
+        selection_result = select_douyin_publish_image(client, paths, image_kind=image_kind)
+        winner_index = int(selection_result.get("winner_index", 1))
+        winner_path = paths[max(0, min(winner_index - 1, len(paths) - 1))]
+        selected = move_image_to_publish(str(winner_path), publish_dir)
+        save_text_output(
+            json.dumps(selection_result, ensure_ascii=False, indent=2),
+            publish_dir / selection_report_name,
+        )
+        print(
+            f"{image_kind}筛选完成：{selected}，理由：{selection_result.get('winner_reason', '')}"
+        )
+        return selected, "scored", selection_result
+    except Exception as select_exc:
+        selected = move_image_to_publish(str(paths[0]), publish_dir)
+        fallback_result = {
+            "auto_selected": False,
+            "winner_index": 1,
+            "winner_image_name": paths[0].name,
+            "winner_reason": f"筛选失败，回退首图：{select_exc}",
+        }
+        print(f"{image_kind}筛选失败，回退直通首图：{selected}")
+        return selected, "fallback_direct", fallback_result
 
 
 def get_mode2_group_settings(group: str) -> dict[str, Any]:

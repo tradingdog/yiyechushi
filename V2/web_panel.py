@@ -39,7 +39,7 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.38"
+PANEL_VERSION = "v0.39"
 
 RUN_LOCK = threading.Lock()
 RUNNING = False

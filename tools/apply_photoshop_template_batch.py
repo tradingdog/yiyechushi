@@ -131,6 +131,7 @@ try {
 @dataclass
 class LocalPhotoshopSettings:
     input_dir: Path | None
+    output_dir: Path | None
     template_file: Path
     smart_object_layer: str
     local_photoshop_exe: Path
@@ -174,6 +175,7 @@ def resolve_path(path_text: str | Path) -> Path:
 def resolve_local_photoshop_settings(
     *,
     input_dir: str | Path | None = None,
+    output_dir: str | Path | None = None,
     template_file: str | Path | None = None,
     smart_object_layer: str | None = None,
     local_photoshop_exe: str | Path | None = None,
@@ -184,6 +186,7 @@ def resolve_local_photoshop_settings(
     ensure_runtime_config_loaded()
 
     resolved_input_dir = resolve_path(input_dir) if input_dir else None
+    resolved_output_dir = resolve_path(output_dir) if output_dir else None
     resolved_template_file = resolve_path(template_file or os.getenv("PHOTOSHOP_TEMPLATE_FILE") or DEFAULT_TEMPLATE_FILE)
     resolved_smart_layer = (smart_object_layer or os.getenv("PHOTOSHOP_TEMPLATE_SMART_OBJECT_LAYER") or DEFAULT_SMART_OBJECT_LAYER).strip()
     local_photoshop_exe_text = str(local_photoshop_exe or os.getenv("PHOTOSHOP_LOCAL_EXE") or "").strip()
@@ -192,6 +195,7 @@ def resolve_local_photoshop_settings(
 
     settings = LocalPhotoshopSettings(
         input_dir=resolved_input_dir,
+        output_dir=resolved_output_dir,
         template_file=resolved_template_file,
         smart_object_layer=resolved_smart_layer,
         local_photoshop_exe=resolve_path(local_photoshop_exe_text),
@@ -239,14 +243,20 @@ def resolve_local_output_path(source_file: Path) -> Path:
     return source_file.with_suffix(".jpg")
 
 
+def write_jpeg_to_target_path(target_file: Path, rendered_jpeg_file: Path) -> Path:
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    temp_output_path = target_file.with_name(f"{target_file.stem}__ps_tmp.jpg")
+    temp_output_path.write_bytes(rendered_jpeg_file.read_bytes())
+    temp_output_path.replace(target_file)
+    return target_file
+
+
 def overwrite_local_file_with_jpeg(source_file: Path, rendered_jpeg_file: Path) -> Path:
     final_output_path = resolve_local_output_path(source_file)
-    temp_output_path = final_output_path.with_name(f"{final_output_path.stem}__ps_tmp.jpg")
-    temp_output_path.write_bytes(rendered_jpeg_file.read_bytes())
-    temp_output_path.replace(final_output_path)
+    result_path = write_jpeg_to_target_path(final_output_path, rendered_jpeg_file)
     if source_file != final_output_path and source_file.exists():
         source_file.unlink()
-    return final_output_path
+    return result_path
 
 
 def is_local_photoshop_running() -> bool:
@@ -313,6 +323,7 @@ def run_local_photoshop_job(
     input_file: Path | None,
     output_file: Path,
     should_process_image: bool,
+    output_target: Path | None = None,
 ) -> Path | None:
     with tempfile.TemporaryDirectory(prefix="yiye_ps_local_") as temp_dir_text:
         temp_dir = Path(temp_dir_text)
@@ -354,6 +365,8 @@ def run_local_photoshop_job(
         rendered_file = Path(rendered_output_path) if rendered_output_path else output_file
         if not rendered_file.exists():
             raise RuntimeError("本地 Photoshop 已返回成功，但没有找到导出的 JPG 文件。")
+        if output_target is not None:
+            return write_jpeg_to_target_path(output_target, rendered_file)
         return overwrite_local_file_with_jpeg(source_file=input_file or output_file, rendered_jpeg_file=rendered_file)
 
 
@@ -386,6 +399,9 @@ def validate_local_photoshop_setup(
 
 def process_single_image_local(image_file: Path, index: int, total: int, settings: LocalPhotoshopSettings) -> Path:
     print(f"[{index}/{total}] 本地 Photoshop 替换模板：{image_file.name}")
+    output_target: Path | None = None
+    if settings.output_dir is not None:
+        output_target = settings.output_dir / resolve_local_output_path(image_file).name
     with tempfile.TemporaryDirectory(prefix="yiye_ps_render_") as temp_dir_text:
         output_file = Path(temp_dir_text) / f"{image_file.stem}.jpg"
         final_output_path = run_local_photoshop_job(
@@ -393,10 +409,14 @@ def process_single_image_local(image_file: Path, index: int, total: int, setting
             input_file=image_file,
             output_file=output_file,
             should_process_image=True,
+            output_target=output_target,
         )
     if final_output_path is None:
         raise RuntimeError("本地 Photoshop 没有返回输出文件路径。")
-    print(f"[{index}/{total}] 已覆盖本地文件：{final_output_path.name}")
+    if settings.output_dir is not None:
+        print(f"[{index}/{total}] 已导出到 final：{final_output_path.name}")
+    else:
+        print(f"[{index}/{total}] 已覆盖本地文件：{final_output_path.name}")
     return final_output_path
 
 
@@ -446,6 +466,7 @@ def apply_photoshop_template_to_image(
 def apply_photoshop_template_batch_to_dir(
     input_dir: str | Path,
     *,
+    output_dir: str | Path | None = None,
     template_file: str | Path | None = None,
     smart_object_layer: str | None = None,
     local_photoshop_exe: str | Path | None = None,
@@ -455,6 +476,7 @@ def apply_photoshop_template_batch_to_dir(
 ) -> dict[str, str]:
     settings = resolve_local_photoshop_settings(
         input_dir=input_dir,
+        output_dir=output_dir,
         template_file=template_file,
         smart_object_layer=smart_object_layer,
         local_photoshop_exe=local_photoshop_exe,
@@ -473,6 +495,8 @@ def apply_photoshop_template_batch_to_dir(
     print(f"已找到 {len(input_files)} 个待处理文件，开始校验本地 Photoshop 模板。")
     print(f"当前 PSD 模板：{settings.template_file}")
     print(f"当前图片目录：{settings.input_dir}")
+    if settings.output_dir is not None:
+        print(f"当前导出目录：{settings.output_dir}")
     print(f"当前本地 Photoshop：{settings.local_photoshop_exe}")
     print(f"当前 JPG 输出质量：{settings.jpeg_quality}")
     validate_local_photoshop_setup(
