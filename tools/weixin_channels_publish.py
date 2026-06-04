@@ -186,6 +186,25 @@ def _read_editor_text(editor: Locator) -> str:
         return str(editor.inner_text(timeout=2_000) or "").strip()
 
 
+def _text_mostly_present(current: str, expected: str, *, min_ratio: float = 0.85) -> bool:
+    expected_text = expected.strip()
+    current_text = current.strip()
+    if not expected_text:
+        return True
+    if len(current_text) < len(expected_text) * min_ratio:
+        return False
+    head = expected_text[:12]
+    tail = expected_text[-12:] if len(expected_text) >= 12 else expected_text
+    return head in current_text and tail in current_text
+
+
+def move_cursor_to_editor_end(page: Page, editor: Locator) -> None:
+    editor.click(force=True)
+    page.wait_for_timeout(150)
+    page.keyboard.press("Control+End")
+    page.wait_for_timeout(200)
+
+
 def paste_into_contenteditable(
     page: Page,
     editor: Locator,
@@ -205,21 +224,28 @@ def paste_into_contenteditable(
     time.sleep(0.15)
     editor.click(force=True)
     pyautogui.hotkey("ctrl", "v")
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(800)
     current = _read_editor_text(editor)
-    snippet = text.strip()[:12]
-    if snippet and snippet in current:
-        print(f"已向图文描述输入框粘贴{description}。")
+    if _text_mostly_present(current, text):
+        print(f"已向图文描述输入框粘贴{description}（长度 {len(current)}/{len(text.strip())}）。")
         return
 
-    print(f"剪贴板粘贴未检测到正文（当前长度 {len(current)}），改用逐字输入。")
+    print(f"剪贴板粘贴不完整（当前长度 {len(current)}），改用 press_sequentially 输入。")
     editor.click(force=True)
-    type_text_humanly(page, text, delay_ms=typing_delay_ms)
-    page.wait_for_timeout(300)
+    page.keyboard.press("Control+A")
+    page.keyboard.press("Backspace")
+    page.wait_for_timeout(100)
+    editor.press_sequentially(text, delay=max(20, min(typing_delay_ms, 80)))
+    page.wait_for_timeout(500)
     current = _read_editor_text(editor)
-    if snippet and snippet not in current:
-        raise RuntimeError(f"{description}输入失败，编辑器内容：{current[:80]!r}")
-    print(f"已向图文描述输入框写入{description}。")
+    if _text_mostly_present(current, text):
+        print(f"已向图文描述输入框写入{description}（长度 {len(current)}/{len(text.strip())}）。")
+        return
+
+    raise RuntimeError(
+        f"{description}输入不完整：期望约 {len(text.strip())} 字，实际 {len(current)} 字；"
+        f"内容片段：{current[:60]!r}…{current[-40:]!r}"
+    )
 
 
 def parse_topic_tags(topics_text: str) -> tuple[str, ...]:
@@ -534,7 +560,7 @@ def fill_description_and_topics(
         description="图文描述正文",
         typing_delay_ms=settings.typing_delay_ms,
     )
-    editor.click(force=True)
+    move_cursor_to_editor_end(page, editor)
     page.keyboard.press("Enter")
     page.wait_for_timeout(settings.typing_delay_ms)
     page.keyboard.press("Enter")
@@ -545,7 +571,7 @@ def fill_description_and_topics(
         print("未配置话题标签，跳过话题粘贴。")
         return
 
-    editor.click()
+    move_cursor_to_editor_end(page, editor)
     page.wait_for_timeout(200)
     paste_topic_tags_via_clipboard(
         page,
@@ -554,6 +580,7 @@ def fill_description_and_topics(
         after_paste_wait_ms=settings.after_topic_paste_wait_ms,
         between_topics_wait_ms=settings.between_topics_wait_ms,
         platform_label="视频号",
+        cursor_at_end=True,
     )
     save_flow_step_screenshot(page, settings, "07", "描述与话题输入后")
     print(f"已粘贴视频号 {len(assets.topic_tags)} 个话题。")

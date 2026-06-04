@@ -492,6 +492,7 @@ def paste_topic_tags_via_clipboard(
     after_paste_wait_ms: int,
     between_topics_wait_ms: int,
     platform_label: str = "快手",
+    cursor_at_end: bool = False,
 ) -> None:
     """逐个复制话题到剪贴板后 Ctrl+V 粘贴；第 2 个起先按空格再粘贴。"""
     if not topic_tags:
@@ -500,6 +501,9 @@ def paste_topic_tags_via_clipboard(
     page.bring_to_front()
     editor.click()
     page.wait_for_timeout(200)
+    if cursor_at_end:
+        page.keyboard.press("Control+End")
+        page.wait_for_timeout(200)
 
     for index, topic_tag in enumerate(topic_tags):
         tag = _normalize_topic_tag(topic_tag)
