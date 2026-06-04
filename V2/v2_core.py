@@ -51,6 +51,17 @@ _RUNTIME_CONFIG_LOADED = False
 TEMPLATE_PLACEHOLDER_PATTERN = re.compile(r"\{变量(?:[：:,，][^{}]*)?\}")
 CANKAO_PLACEHOLDER_PATTERN = re.compile(r"\{[^{}]+\}")
 MODE2_GROUP_KEYS = ("poster", "detail", "recipe", "cover")
+AUTO_DISH_CUISINE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("1", "中华料理"),
+    ("0", "全部随机"),
+    ("2", "新马泰"),
+    ("3", "日韩"),
+    ("4", "西餐"),
+    ("5", "中东北非"),
+    ("6", "东欧"),
+    ("7", "拉美"),
+)
+DEFAULT_AUTO_DISH_CUISINE_MODE = "1"
 STEP_PREFIX_PATTERN = re.compile(r"^\s*(?:第?\s*\d+\s*[步段]|步骤\s*\d+|step\s*\d+)\s*[:：、.．-]?\s*", re.IGNORECASE)
 META_COPY_PATTERN = re.compile(
     r"(图解教程|图解\s*\d+\s*/\s*\d+|步骤与转化页|教程页|转化页|第\s*[一二三123]\s*张|第\s*[一二三123]\s*步)",
@@ -291,7 +302,7 @@ def auto_generate_dish_idea(client: OpenAI) -> dict[str, str]:
     if not os.getenv("AUTO_DISH_LIBRARY_FILE", "").strip():
         os.environ["AUTO_DISH_LIBRARY_FILE"] = "chuantongcaipu.txt"
     if not os.getenv("AUTO_DISH_CUISINE_MODE", "").strip():
-        os.environ["AUTO_DISH_CUISINE_MODE"] = "1"
+        os.environ["AUTO_DISH_CUISINE_MODE"] = DEFAULT_AUTO_DISH_CUISINE_MODE
 
     v1_client = v1_build_text_client()
     try:

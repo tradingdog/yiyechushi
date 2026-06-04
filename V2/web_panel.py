@@ -39,7 +39,7 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.39"
+PANEL_VERSION = "v0.40"
 
 RUN_LOCK = threading.Lock()
 RUNNING = False
@@ -328,6 +328,20 @@ HTML_PAGE = """<!doctype html>
               <button id="workflowMode1Btn" type="button">模式1</button>
             </div>
           </div>
+          <div id="cuisineCard" style="margin-top:8px">
+            <label>自动造菜菜系</label>
+            <select id="cuisineMode">
+              <option value="1" selected>中华料理</option>
+              <option value="0">全部随机</option>
+              <option value="2">新马泰</option>
+              <option value="3">日韩</option>
+              <option value="4">西餐</option>
+              <option value="5">中东北非</option>
+              <option value="6">东欧</option>
+              <option value="7">拉美</option>
+            </select>
+            <div class="sec-desc">仅「自动造菜」生效，将写入 AUTO_DISH_CUISINE_MODE。</div>
+          </div>
           <label style="margin-top:8px">手动菜名（仅手动点名生效）</label>
           <input id="dishName" placeholder="例如：蒜香煎嫩鸡胸肉" />
         </div>
@@ -513,11 +527,26 @@ HTML_PAGE = """<!doctype html>
       return "/api/file?path=" + encodeURIComponent(path);
     }
 
+    function 菜系文案(code){
+      const map = {
+        "0": "全部随机",
+        "1": "中华料理",
+        "2": "新马泰",
+        "3": "日韩",
+        "4": "西餐",
+        "5": "中东北非",
+        "6": "东欧",
+        "7": "拉美"
+      };
+      return map[String(code)] || code || "-";
+    }
+
     function setMode(mode){
       state.mode = mode;
       $("modeAutoBtn").classList.toggle("active", mode === "auto");
       $("modeFileBtn").classList.toggle("active", mode === "file");
       const manual = mode === "file";
+      $("cuisineCard").style.display = manual ? "none" : "block";
       $("dishName").disabled = !manual;
       $("dishName").classList.toggle("input-disabled", !manual);
       $("dishNotes").disabled = !manual;
@@ -1003,7 +1032,13 @@ HTML_PAGE = """<!doctype html>
       $("envCount").textContent = `出图数：${data.config.OPENAI_IMAGE_COUNT}`;
       $("envCoverCount").textContent = `封面数：${data.config.COVER_IMAGE_COUNT || "-"}`;
       const wf = data.config.V2_WORKFLOW_MODE === "mode1" ? "模式1" : "模式2";
-      $("envMode").textContent = `${data.config.AUTO_GENERATE_DISH_IDEA === "1" ? "自动造菜" : "手动点名"} / ${wf}`;
+      const cuisineText = data.config.AUTO_GENERATE_DISH_IDEA === "1"
+        ? 菜系文案(data.config.AUTO_DISH_CUISINE_MODE || "1")
+        : "";
+      $("envMode").textContent = data.config.AUTO_GENERATE_DISH_IDEA === "1"
+        ? `自动造菜 / ${cuisineText} / ${wf}`
+        : `手动点名 / ${wf}`;
+      $("cuisineMode").value = data.config.AUTO_DISH_CUISINE_MODE || "1";
       setWorkflow(data.config.V2_WORKFLOW_MODE === "mode1" ? "mode1" : "mode2");
       if(data.config.V2_WORKFLOW_MODE === "mode2"){
         $("posterCount").value = data.config.MODE2_POSTER_IMAGE_COUNT || data.config.OPENAI_IMAGE_COUNT;
@@ -1061,6 +1096,7 @@ HTML_PAGE = """<!doctype html>
           : {
               action: "run",
               mode: state.mode,
+              cuisine_mode: $("cuisineMode").value.trim(),
               workflow: state.workflow,
               dish_name: $("dishName").value.trim(),
               notes: $("dishNotes").value.trim(),
@@ -1426,6 +1462,7 @@ def current_config_snapshot() -> dict[str, str]:
     ensure_runtime_config_loaded()
     return {
         "AUTO_GENERATE_DISH_IDEA": os.getenv("AUTO_GENERATE_DISH_IDEA", "0").strip() or "0",
+        "AUTO_DISH_CUISINE_MODE": os.getenv("AUTO_DISH_CUISINE_MODE", "1").strip() or "1",
         "V2_WORKFLOW_MODE": resolve_workflow_mode(os.getenv("V2_WORKFLOW_MODE")),
         "MODEL_TEMPERATURE": os.getenv("MODEL_TEMPERATURE", "0.3").strip() or "0.3",
         "OPENAI_IMAGE_MODEL": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2").strip() or "gpt-image-2",
@@ -1447,6 +1484,9 @@ def apply_runtime_overrides(payload: dict[str, Any]) -> None:
     mode = str(payload.get("mode", "")).strip().lower()
     if mode in {"auto", "file"}:
         os.environ["AUTO_GENERATE_DISH_IDEA"] = "1" if mode == "auto" else "0"
+    cuisine_mode = str(payload.get("cuisine_mode", "")).strip()
+    if cuisine_mode in {"0", "1", "2", "3", "4", "5", "6", "7"}:
+        os.environ["AUTO_DISH_CUISINE_MODE"] = cuisine_mode
     workflow = str(payload.get("workflow", "")).strip().lower()
     if workflow in {"mode1", "mode2"}:
         os.environ["V2_WORKFLOW_MODE"] = workflow
@@ -1715,6 +1755,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 "task_id": TASK_SEQ,
                 "action": action if action in {"run", "regenerate_image"} else "run",
                 "mode": mode if mode in {"auto", "file"} else "",
+                "cuisine_mode": str(payload.get("cuisine_mode", "")).strip(),
                 "dish_name": dish_name,
                 "notes": str(payload.get("notes", "")).strip(),
                 "model_temperature": str(payload.get("model_temperature", "")).strip(),

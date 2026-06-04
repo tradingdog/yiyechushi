@@ -49,6 +49,8 @@ def prepare_dish_payload(mode: str | None, doubao_client) -> dict[str, str]:
         f"AUTO_GENERATE_DISH_IDEA={raw_auto_flag or '<未设置>'}，"
         f"命令行模式={mode or '按配置'}，最终模式={'auto' if auto_generate_enabled else 'file'}"
     )
+    cuisine_mode = os.getenv("AUTO_DISH_CUISINE_MODE", "1").strip() or "1"
+    print(f"自动造菜菜系模式：AUTO_DISH_CUISINE_MODE={cuisine_mode}")
     if auto_generate_enabled:
         dish_payload = auto_generate_dish_idea(doubao_client)
         write_dish_idea_file(dish_payload["dish_name"], dish_payload["notes"], idea_file=IDEA_FILE)
