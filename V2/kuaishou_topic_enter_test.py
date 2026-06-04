@@ -29,7 +29,7 @@ from playwright.sync_api import sync_playwright  # noqa: E402
 
 from tools.douyin_publish import DEFAULT_CDP_URL, wait_for_locator  # noqa: E402
 from tools.kuaishou_publish import (  # noqa: E402
-    DEFAULT_AFTER_TOPIC_CONFIRM_WAIT_MS,
+    DEFAULT_AFTER_TOPIC_PASTE_WAIT_MS,
     DEFAULT_BETWEEN_TOPICS_WAIT_MS,
     KuaishouPublishSettings,
     description_editor_locators,
@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
         default=" ".join(DEFAULT_TOPICS),
         help='空格分隔，如 "#美食教程 #美食分享"',
     )
-    parser.add_argument("--after-paste-wait-ms", type=int, default=DEFAULT_AFTER_TOPIC_CONFIRM_WAIT_MS)
+    parser.add_argument("--after-paste-wait-ms", type=int, default=DEFAULT_AFTER_TOPIC_PASTE_WAIT_MS)
     parser.add_argument("--between-topics-wait-ms", type=int, default=DEFAULT_BETWEEN_TOPICS_WAIT_MS)
     return parser.parse_args()
 
@@ -99,7 +99,6 @@ def build_test_settings(args: argparse.Namespace) -> KuaishouPublishSettings:
         auto_launch_browser=False,
         cdp_ready_timeout_ms=30_000,
         typing_delay_ms=0,
-        topic_typing_delay_ms=0,
         after_publish_work_wait_ms=0,
         after_graphic_tab_wait_ms=0,
         after_upload_button_wait_ms=0,
@@ -109,7 +108,7 @@ def build_test_settings(args: argparse.Namespace) -> KuaishouPublishSettings:
         after_cover_confirm_wait_ms=0,
         after_author_select_wait_ms=0,
         after_location_open_wait_ms=0,
-        after_topic_confirm_wait_ms=max(0, int(args.after_paste_wait_ms)),
+        after_topic_paste_wait_ms=max(0, int(args.after_paste_wait_ms)),
         between_topics_wait_ms=max(0, int(args.between_topics_wait_ms)),
         publish_location="成都市",
         windows_open_dialog_wait_ms=0,

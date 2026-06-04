@@ -52,10 +52,10 @@ DEFAULT_AFTER_COVER_UPLOAD_WAIT_MS = 3_000
 DEFAULT_AFTER_COVER_CONFIRM_WAIT_MS = 2_000
 DEFAULT_AFTER_AUTHOR_SELECT_WAIT_MS = 1_500
 DEFAULT_AFTER_LOCATION_OPEN_WAIT_MS = 1_500
-DEFAULT_AFTER_TOPIC_CONFIRM_WAIT_MS = 1_000
+DEFAULT_AFTER_TOPIC_PASTE_WAIT_MS = 1_000
+DEFAULT_AFTER_TOPIC_CONFIRM_WAIT_MS = DEFAULT_AFTER_TOPIC_PASTE_WAIT_MS  # 兼容旧名
 DEFAULT_BETWEEN_TOPICS_WAIT_MS = 2_000
 DEFAULT_WINDOWS_OPEN_DIALOG_WAIT_MS = 3_500
-DEFAULT_TOPIC_TYPING_DELAY_MS = 150
 DEFAULT_PUBLISH_LOCATION = "成都市"
 DEFAULT_DEBUG_SCREENSHOT = ROOT_DIR / "tools" / "kuaishou_publish_last_error.png"
 DEFAULT_UPLOAD_STEP_SCREENSHOT = ROOT_DIR / "tools" / "kuaishou_publish_upload_step.png"
@@ -85,7 +85,6 @@ class KuaishouPublishSettings:
     auto_launch_browser: bool
     cdp_ready_timeout_ms: int
     typing_delay_ms: int
-    topic_typing_delay_ms: int
     after_publish_work_wait_ms: int
     after_graphic_tab_wait_ms: int
     after_upload_button_wait_ms: int
@@ -95,7 +94,7 @@ class KuaishouPublishSettings:
     after_cover_confirm_wait_ms: int
     after_author_select_wait_ms: int
     after_location_open_wait_ms: int
-    after_topic_confirm_wait_ms: int
+    after_topic_paste_wait_ms: int
     between_topics_wait_ms: int
     publish_location: str
     windows_open_dialog_wait_ms: int
@@ -507,7 +506,7 @@ def paste_topic_tags_via_clipboard(
             pyautogui.press("space")
             time.sleep(0.1)
         pyautogui.hotkey("ctrl", "v")
-        page.wait_for_timeout(settings.after_topic_confirm_wait_ms)
+        page.wait_for_timeout(settings.after_topic_paste_wait_ms)
         print(f"已粘贴快手话题（{'首项' if index == 0 else '空格后'}）：{tag}")
         if index < len(topic_tags) - 1:
             page.wait_for_timeout(settings.between_topics_wait_ms)
@@ -533,8 +532,10 @@ def fill_work_description(page: Page, assets: KuaishouPublishAssets, settings: K
     page.wait_for_timeout(settings.typing_delay_ms)
     print(f"已输入快手作品描述正文（第 1 行），长度 {len(assets.description_body)}。")
 
+    editor.click()
+    page.wait_for_timeout(200)
     paste_topic_tags_via_clipboard(page, editor, assets.topic_tags, settings)
-    print(f"已粘贴快手 {len(assets.topic_tags)} 个话题。")
+    print(f"已用剪贴板粘贴快手 {len(assets.topic_tags)} 个话题（Ctrl+V，第 2 个起先空格）。")
 
 
 def upload_cover_image(page: Page, assets: KuaishouPublishAssets, settings: KuaishouPublishSettings) -> None:

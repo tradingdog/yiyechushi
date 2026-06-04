@@ -41,12 +41,11 @@ from tools.kuaishou_publish import (  # noqa: E402
     DEFAULT_AFTER_MAIN_UPLOAD_WAIT_MS,
     DEFAULT_AFTER_OPEN_COVER_WAIT_MS,
     DEFAULT_AFTER_PUBLISH_WORK_WAIT_MS,
-    DEFAULT_AFTER_TOPIC_CONFIRM_WAIT_MS,
+    DEFAULT_AFTER_TOPIC_PASTE_WAIT_MS,
     DEFAULT_AFTER_UPLOAD_BUTTON_WAIT_MS,
     DEFAULT_BETWEEN_TOPICS_WAIT_MS,
     DEFAULT_DEBUG_SCREENSHOT,
     DEFAULT_PUBLISH_LOCATION,
-    DEFAULT_TOPIC_TYPING_DELAY_MS,
     DEFAULT_UPLOAD_STEP_SCREENSHOT,
     DEFAULT_URL_KEYWORD,
     DEFAULT_WINDOWS_OPEN_DIALOG_WAIT_MS,
@@ -71,7 +70,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "V2 快手发布测试脚本：读取 output 子目录里的快手标题/图文描述，"
-            "上传 final 内 01/02/03 三张图与 04 封面，填写标题与 4 个话题。"
+            "上传 final 内 01/02/03 三张图与 04 封面；作品描述填标题、正文，"
+            "4 个话题用剪贴板逐个 Ctrl+V 粘贴（第 2 个起先空格）。"
         )
     )
     parser.add_argument(
@@ -88,7 +88,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cdp-ready-timeout-ms", type=int, default=DEFAULT_CDP_READY_TIMEOUT_MS)
     parser.add_argument("--allow-auto-launch-browser", action="store_true", help="允许脚本自动拉起 Chrome（默认不自动拉起）。")
     parser.add_argument("--typing-delay-ms", type=int, default=DEFAULT_TYPING_DELAY_MS)
-    parser.add_argument("--topic-typing-delay-ms", type=int, default=DEFAULT_TOPIC_TYPING_DELAY_MS)
+    parser.add_argument(
+        "--after-topic-paste-wait-ms",
+        type=int,
+        default=DEFAULT_AFTER_TOPIC_PASTE_WAIT_MS,
+        help="每个话题粘贴后的等待毫秒数。",
+    )
     parser.add_argument("--between-topics-wait-ms", type=int, default=DEFAULT_BETWEEN_TOPICS_WAIT_MS)
     parser.add_argument("--publish-location", default=DEFAULT_PUBLISH_LOCATION)
     parser.add_argument("--windows-open-dialog-wait-ms", type=int, default=DEFAULT_WINDOWS_OPEN_DIALOG_WAIT_MS)
@@ -168,7 +173,6 @@ def resolve_settings(args: argparse.Namespace) -> KuaishouPublishSettings:
         auto_launch_browser=bool(args.allow_auto_launch_browser),
         cdp_ready_timeout_ms=max(0, int(args.cdp_ready_timeout_ms)),
         typing_delay_ms=max(0, int(args.typing_delay_ms)),
-        topic_typing_delay_ms=max(0, int(args.topic_typing_delay_ms)),
         after_publish_work_wait_ms=DEFAULT_AFTER_PUBLISH_WORK_WAIT_MS,
         after_graphic_tab_wait_ms=DEFAULT_AFTER_GRAPHIC_TAB_WAIT_MS,
         after_upload_button_wait_ms=DEFAULT_AFTER_UPLOAD_BUTTON_WAIT_MS,
@@ -178,7 +182,7 @@ def resolve_settings(args: argparse.Namespace) -> KuaishouPublishSettings:
         after_cover_confirm_wait_ms=DEFAULT_AFTER_COVER_CONFIRM_WAIT_MS,
         after_author_select_wait_ms=DEFAULT_AFTER_AUTHOR_SELECT_WAIT_MS,
         after_location_open_wait_ms=DEFAULT_AFTER_LOCATION_OPEN_WAIT_MS,
-        after_topic_confirm_wait_ms=DEFAULT_AFTER_TOPIC_CONFIRM_WAIT_MS,
+        after_topic_paste_wait_ms=max(0, int(args.after_topic_paste_wait_ms)),
         between_topics_wait_ms=max(0, int(args.between_topics_wait_ms)),
         publish_location=str(args.publish_location or DEFAULT_PUBLISH_LOCATION).strip() or DEFAULT_PUBLISH_LOCATION,
         windows_open_dialog_wait_ms=max(0, int(args.windows_open_dialog_wait_ms)),
