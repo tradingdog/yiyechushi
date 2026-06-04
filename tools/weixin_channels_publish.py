@@ -227,6 +227,20 @@ def parse_topic_tags(topics_text: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(tags))
 
 
+def _channels_page_priority(url: str) -> int:
+    if "finderNewLifeCreate" in url:
+        return 0
+    if "finderNewLifePostList" in url:
+        return 1
+    if "/platform/post" in url:
+        return 2
+    if re.fullmatch(r"https://channels\.weixin\.qq\.com/platform/?", url.rstrip("/")):
+        return 4
+    if url.rstrip("/").endswith("/platform"):
+        return 3
+    return 5
+
+
 def find_channels_page(browser, url_keyword: str) -> Page:
     matched_pages = [
         page
@@ -239,7 +253,7 @@ def find_channels_page(browser, url_keyword: str) -> Page:
             f"未在已打开的 Chrome 标签页里找到包含 {url_keyword} 的页面。"
             "请先自行打开微信视频号助手并登录，然后重新运行脚本。"
         )
-    page = matched_pages[-1]
+    page = min(matched_pages, key=lambda item: (_channels_page_priority(item.url), item.url))
     page.bring_to_front()
     page.wait_for_load_state("domcontentloaded")
     print(f"已锁定视频号页面：{page.url}")
@@ -271,12 +285,21 @@ def is_publish_graphic_entry_visible(page: Page) -> bool:
 
 
 def is_graphic_compose_page(page: Page) -> bool:
-    if find_optional_locator(page, upload_file_input_locators(page), state="attached", timeout_ms=1_500):
+    if "finderNewLifeCreate" in page.url:
+        return True
+    if find_optional_locator(page, upload_click_target_locators(page), timeout_ms=2_000):
+        return True
+    if find_optional_locator(page, upload_file_input_locators(page), state="attached", timeout_ms=2_000):
         return True
     if _find_visible_title_input(page) is not None:
         return True
-    if find_optional_locator(page, description_editor_locators(page), timeout_ms=1_500):
+    if find_optional_locator(page, description_editor_locators(page), timeout_ms=2_000):
         return True
+    try:
+        if page.get_by_text("发表动态", exact=True).first.is_visible(timeout=500):
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -389,25 +412,41 @@ def open_graphic_publish_editor(page: Page, settings: WeixinChannelsPublishSetti
     save_flow_step_screenshot(page, settings, "01", "登录检测通过")
 
     if is_graphic_compose_page(page):
-        print("当前已在发表图文编辑页，跳过导航。")
+        print("当前已在发表图文编辑页（发表动态），跳过导航。")
         save_flow_step_screenshot(page, settings, "04", "已在发表编辑页")
         return
 
     if is_publish_graphic_entry_visible(page):
-        print("当前已在图文管理列表页，跳过侧边栏「内容管理/图文」。")
+        print("当前在图文管理列表页，直接点击「发表图文」。")
         save_flow_step_screenshot(page, settings, "02", "已在图文管理列表")
-    else:
-        _click_sidebar_menu(page, content_manage_menu_locators(page), description="内容管理")
+        click_locator(page, publish_graphic_button_locators(page), description="发表图文", timeout_ms=20_000)
         page.wait_for_timeout(settings.step_wait_ms)
-        save_flow_step_screenshot(page, settings, "02", "点击内容管理后")
+        save_flow_step_screenshot(page, settings, "04", "点击发表图文后")
+        return
 
-        _click_sidebar_menu(page, graphic_menu_locators(page), description="图文")
-        page.wait_for_timeout(settings.step_wait_ms)
-        save_flow_step_screenshot(page, settings, "03", "点击图文后")
-
-    click_locator(page, publish_graphic_button_locators(page), description="发表图文", timeout_ms=20_000)
+    _click_sidebar_menu(page, content_manage_menu_locators(page), description="内容管理")
     page.wait_for_timeout(settings.step_wait_ms)
-    save_flow_step_screenshot(page, settings, "04", "点击发表图文后")
+    save_flow_step_screenshot(page, settings, "02", "点击内容管理后")
+
+    _click_sidebar_menu(page, graphic_menu_locators(page), description="图文")
+    page.wait_for_timeout(settings.step_wait_ms)
+    save_flow_step_screenshot(page, settings, "03", "点击图文后")
+
+    if is_graphic_compose_page(page):
+        print("点击「图文」后已进入发表编辑页，无需再点「发表图文」。")
+        save_flow_step_screenshot(page, settings, "04", "点击图文后进入编辑页")
+        return
+
+    if is_publish_graphic_entry_visible(page):
+        click_locator(page, publish_graphic_button_locators(page), description="发表图文", timeout_ms=20_000)
+        page.wait_for_timeout(settings.step_wait_ms)
+        save_flow_step_screenshot(page, settings, "04", "点击发表图文后")
+        return
+
+    raise RuntimeError(
+        "点击「图文」后未进入发表编辑页，也未找到「发表图文」按钮。"
+        f"当前 URL：{page.url}"
+    )
 
 
 def _upload_via_dom_input(page: Page, image_paths: Sequence[Path]) -> bool:
