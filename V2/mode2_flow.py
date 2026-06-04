@@ -129,7 +129,7 @@ def run_v2_mode2(mode: str | None = None) -> dict[str, object]:
     run_output_dir = build_run_output_dir(timestamp, dish_name)
     publish_dir = run_output_dir / "publish"
     print(f"输出目录：{run_output_dir}")
-    print("流程模式：mode2（海报 -> 细节图 -> 菜谱图 -> 封面图）")
+    print("流程：海报 -> 细节图 -> 菜谱图 -> 封面图")
 
     dish_idea_record_file = persist_v2_dish_record(run_output_dir, dish_payload)
     publish_copy_assets: dict[str, Any] = {}
@@ -403,8 +403,19 @@ def run_v2_mode2(mode: str | None = None) -> dict[str, object]:
                 input_dir=publish_dir,
                 output_dir=publish_final_dir,
             )
-            photoshop_processed_files = list(processed_file_map.values())
-            print(f"Photoshop 合成完成：{len(photoshop_processed_files)} 张 -> publish/final")
+            from publish_final_assets import apply_final_image_sequence_names
+
+            photoshop_processed_files = apply_final_image_sequence_names(
+                publish_final_dir=publish_final_dir,
+                timestamp=timestamp,
+                dish_name=dish_name,
+                processed_file_map=processed_file_map,
+                poster_source=poster_selected_image,
+                detail_source=detail_selected_image,
+                recipe_source=recipe_selected_image,
+                cover_source=cover_selected_image,
+            )
+            print(f"Photoshop 合成完成：{len(photoshop_processed_files)} 张 -> publish/final（已加 01-04 序列号）")
         except Exception as ps_exc:
             photoshop_error = f"Photoshop 合成失败：{ps_exc}"
             save_text_output(

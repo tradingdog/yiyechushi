@@ -1236,14 +1236,14 @@ def save_dish_idea_record_file(output_dir: Path, dish_payload: dict[str, str]) -
 V2_PUBLISH_PLATFORM_SPECS: tuple[tuple[str, str, int], ...] = (
     ("douyin", "抖音", 4),
     ("xiaohongshu", "小红书", 10),
-    ("wechat", "微信视频号和公众号", 30),
+    ("wechat", "微信视频号和公众号", 10),
     ("kuaishou", "快手", 4),
 )
 
 V2_PUBLISH_PLATFORM_TASKS: dict[str, str] = {
     "douyin": "为这个新菜写抖音的标题、描述和 4 个话题。要有钩子，符合抖音爆款思路。",
     "xiaohongshu": "为这个新菜写小红书的标题、描述和 10 个话题。要有钩子，符合小红书图文用户的爆款思路。",
-    "wechat": "为这个新菜写微信视频号和公众号的标题、描述和 30 个话题。要有钩子，符合公众号/视频号图文用户的爆款思路。",
+    "wechat": "为这个新菜写微信视频号和公众号的标题、描述和 10 个话题（不超过 10 个）。要有钩子，符合公众号/视频号图文用户的爆款思路。",
     "kuaishou": "为这个新菜写快手的标题、描述和 4 个话题。要有钩子，符合快手爆款思路。",
 }
 

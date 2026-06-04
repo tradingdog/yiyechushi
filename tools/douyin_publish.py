@@ -17,6 +17,9 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from tools.runtime_deps import ensure_project_runtime_dependencies  # noqa: E402
+
+ensure_project_runtime_dependencies()
 
 from script_logging import setup_script_logging
 
@@ -26,7 +29,9 @@ if __name__ == "__main__":
 try:
     from playwright.sync_api import Browser, Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 except ImportError as exc:
-    raise SystemExit("未安装 playwright，请先执行 pip install -r requirements.txt。") from exc
+    raise SystemExit(
+        f"导入发布依赖失败：{exc}\n请执行：{sys.executable} -m pip install -r requirements.txt"
+    ) from exc
 
 
 from image_generator import ensure_runtime_config_loaded, get_required_publish_topics, split_description_body_and_tags  # noqa: E402
@@ -42,6 +47,8 @@ DEFAULT_AFTER_UPLOAD_WAIT_MS = 10_000
 DEFAULT_AFTER_OPEN_COVER_WAIT_MS = 5_000
 DEFAULT_AFTER_COVER_CONFIRM_WAIT_MS = 10_000
 DEFAULT_AFTER_DECLARATION_OPEN_WAIT_MS = 2_000
+DEFAULT_AFTER_LOCATION_INPUT_WAIT_MS = 1_500
+DEFAULT_PUBLISH_LOCATION = "成都市"
 DEFAULT_DEBUG_SCREENSHOT = ROOT_DIR / "tools" / "douyin_publish_last_error.png"
 DEFAULT_AUTOMATION_PROFILE_DIR = ROOT_DIR / "tools" / "chrome_automation_profile"
 DEFAULT_CDP_READY_TIMEOUT_MS = 20_000
@@ -106,7 +113,7 @@ def parse_non_negative_int(value: object, *, field_name: str, default: int) -> i
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="接管已开启远程调试的 Chrome 抖音创作者页，自动上传 publish 图片并填写标题、描述、封面与自主声明，默认停在待人工发布状态。",
+        description="接管已开启远程调试的 Chrome 抖音创作者页，自动上传 publish 图片并填写标题、描述、封面、自主声明与发布位置，默认停在待人工发布状态。",
     )
     parser.add_argument(
         "output_dir",
@@ -693,6 +700,25 @@ def personal_view_radio_locators(page: Page) -> tuple[Locator, ...]:
     )
 
 
+def location_select_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.get_by_text("输入相关位置，让更多人看到你的作品", exact=True),
+        page.locator("span.semi-select-selection-placeholder").filter(
+            has_text="输入相关位置，让更多人看到你的作品"
+        ),
+        page.locator("div.semi-select-selection").filter(has_text="输入相关位置，让更多人看到你的作品"),
+        page.locator("div.form-container-MDtobK .semi-select-selection").first,
+    )
+
+
+def location_option_locators(page: Page, location_name: str) -> tuple[Locator, ...]:
+    return (
+        page.locator("div.collection-v2-mrP_OU div.name-TgOwA3").filter(has_text=location_name, exact=True),
+        page.locator("div.detail-v2-uZaTIm div.name-TgOwA3").filter(has_text=location_name, exact=True),
+        page.locator("div.name-TgOwA3").filter(has_text=location_name, exact=True),
+    )
+
+
 def publish_editor_resume_locators(page: Page) -> tuple[Locator, ...]:
     return declaration_select_locators(page) + title_input_locators(page)
 
@@ -842,6 +868,20 @@ def submit_declaration(page: Page, settings: PublishSettings) -> None:
     click_locator(page, confirm_button_locators(page), description="自主声明确认按钮", timeout_ms=30_000)
 
 
+def select_publish_location(page: Page, settings: PublishSettings) -> None:
+    location_name = DEFAULT_PUBLISH_LOCATION
+    click_locator(page, location_select_locators(page), description="位置选择输入框", timeout_ms=30_000)
+    type_text_humanly(page, location_name, delay_ms=settings.typing_delay_ms)
+    page.wait_for_timeout(DEFAULT_AFTER_LOCATION_INPUT_WAIT_MS)
+    click_locator(
+        page,
+        location_option_locators(page, location_name),
+        description=f"位置选项「{location_name}」",
+        timeout_ms=10_000,
+    )
+    print(f"已选择发布位置：{location_name}。")
+
+
 def submit_final_publish(page: Page) -> None:
     click_locator(page, final_publish_button_locators(page), description="最终发布按钮", timeout_ms=30_000)
     try:
@@ -891,6 +931,7 @@ def run_publish(settings: PublishSettings, assets: PublishAssets) -> None:
             input_publish_description(page, assets, settings)
             upload_cover(page, assets, settings)
             submit_declaration(page, settings)
+            select_publish_location(page, settings)
             if settings.auto_submit_publish:
                 submit_final_publish(page)
             else:

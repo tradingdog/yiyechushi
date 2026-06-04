@@ -72,7 +72,7 @@ PUBLISH_BANNED_TOPIC_TOKENS: tuple[str, ...] = (
 PUBLISH_PLATFORM_TOPIC_SPECS: tuple[tuple[str, str, int], ...] = (
     ("douyin", "抖音", 5),
     ("xiaohongshu", "小红书", 10),
-    ("wechat", "微信视频号和公众号", 30),
+    ("wechat", "微信视频号和公众号", 10),
     ("kuaishou", "快手", 4),
 )
 PUBLISH_PLATFORM_REQUIRED_TOPIC_ENV: dict[str, str] = {
@@ -3707,7 +3707,7 @@ def build_platform_topic_prompt_user(
 请按下面数量输出四个平台的话题（热门优先，再补潜力）：
 1. 抖音：5 个
 2. 小红书：10 个
-3. 微信视频号和公众号：30 个
+3. 微信视频号和公众号：10 个
 4. 快手：4 个
 
 各平台指定必带话题（如为“无”则不强制）：
