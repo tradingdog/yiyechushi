@@ -22,7 +22,8 @@ from v2_core import (
     generate_poster_bubble_copy,
     get_mode2_group_settings,
     get_timestamp,
-    persist_v2_common_text_assets,
+    persist_v2_dish_record,
+    persist_v2_publish_copy_assets,
     load_cankao_group_template,
     load_manual_dish_idea,
     parse_bool_env,
@@ -130,17 +131,10 @@ def run_v2_mode2(mode: str | None = None) -> dict[str, object]:
     print(f"输出目录：{run_output_dir}")
     print("流程模式：mode2（海报 -> 细节图 -> 菜谱图 -> 封面图）")
 
-    common_text_assets = persist_v2_common_text_assets(
-        client=doubao_client,
-        output_dir=run_output_dir,
-        timestamp=timestamp,
-        dish_payload=dish_payload,
-    )
+    dish_idea_record_file = persist_v2_dish_record(run_output_dir, dish_payload)
+    publish_copy_assets: dict[str, Any] = {}
 
     errors: list[str] = []
-    publish_copy_error = str(common_text_assets.get("publish_copy_error", "")).strip()
-    if publish_copy_error:
-        errors.append(f"平台文案生成失败：{publish_copy_error}")
     all_saved_images: list[str] = []
 
     # 1) 海报提示词 + 生图
@@ -207,6 +201,18 @@ def run_v2_mode2(mode: str | None = None) -> dict[str, object]:
             poster_saved_images = [poster_selected_image]
         elif poster_selection_mode == "fallback_direct":
             errors.append("海报筛选失败，已回退首图。")
+
+    if poster_selected_image:
+        publish_copy_assets = persist_v2_publish_copy_assets(
+            client=doubao_client,
+            output_dir=run_output_dir,
+            timestamp=timestamp,
+            dish_payload=dish_payload,
+            poster_image_path=poster_selected_image,
+        )
+        publish_copy_error = str(publish_copy_assets.get("publish_copy_error", "")).strip()
+        if publish_copy_error:
+            errors.append(f"平台文案生成失败：{publish_copy_error}")
 
     bubble_text_file = ""
     detail_prompt_file = ""
@@ -456,12 +462,13 @@ def run_v2_mode2(mode: str | None = None) -> dict[str, object]:
         "primary_selected_image": poster_selected_image,
         "primary_selection_mode": poster_selection_mode,
         "cover_image_error": "",
-        "dish_idea_record_file": common_text_assets.get("dish_idea_record_file", ""),
-        "publish_title_file": common_text_assets.get("publish_title_file", ""),
-        "publish_description_file": common_text_assets.get("publish_description_file", ""),
-        "publish_description_body_file": common_text_assets.get("publish_description_body_file", ""),
-        "publish_platform_topic_files": common_text_assets.get("publish_platform_topic_files", {}),
-        "publish_platform_description_files": common_text_assets.get("publish_platform_description_files", {}),
-        "publish_copy_error": publish_copy_error,
+        "dish_idea_record_file": dish_idea_record_file,
+        "publish_title_file": publish_copy_assets.get("publish_title_file", ""),
+        "publish_description_file": publish_copy_assets.get("publish_description_file", ""),
+        "publish_description_body_file": publish_copy_assets.get("publish_description_body_file", ""),
+        "publish_platform_topic_files": publish_copy_assets.get("publish_platform_topic_files", {}),
+        "publish_platform_description_files": publish_copy_assets.get("publish_platform_description_files", {}),
+        "publish_copy_prompt_file": publish_copy_assets.get("publish_copy_prompt_file", ""),
+        "publish_copy_error": str(publish_copy_assets.get("publish_copy_error", "")).strip(),
     }
 

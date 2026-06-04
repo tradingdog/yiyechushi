@@ -1233,12 +1233,163 @@ def save_dish_idea_record_file(output_dir: Path, dish_payload: dict[str, str]) -
     return str(output_file)
 
 
-def build_v2_publish_source_text(dish_name: str, notes: str) -> str:
-    lines = [f"菜名：{dish_name.strip()}"]
-    notes_text = notes.strip()
-    if notes_text:
-        lines.append(f"菜名描述：{notes_text}")
+V2_PUBLISH_PLATFORM_SPECS: tuple[tuple[str, str, int], ...] = (
+    ("douyin", "抖音", 4),
+    ("xiaohongshu", "小红书", 10),
+    ("wechat", "微信视频号和公众号", 30),
+    ("kuaishou", "快手", 4),
+)
+
+V2_PUBLISH_PLATFORM_TASKS: dict[str, str] = {
+    "douyin": "为这个新菜写抖音的标题、描述和 4 个话题。要有钩子，符合抖音爆款思路。",
+    "xiaohongshu": "为这个新菜写小红书的标题、描述和 10 个话题。要有钩子，符合小红书图文用户的爆款思路。",
+    "wechat": "为这个新菜写微信视频号和公众号的标题、描述和 30 个话题。要有钩子，符合公众号/视频号图文用户的爆款思路。",
+    "kuaishou": "为这个新菜写快手的标题、描述和 4 个话题。要有钩子，符合快手爆款思路。",
+}
+
+
+def build_v2_publish_context_text(dish_payload: dict[str, str]) -> str:
+    dish_name = str(dish_payload.get("dish_name", "")).strip()
+    notes = str(dish_payload.get("notes", "")).strip()
+    region_label = str(dish_payload.get("region_label", "")).strip()
+    reference_dish = str(dish_payload.get("reference_dish", "")).strip()
+    lines = [f"菜名：{dish_name}"]
+    if notes:
+        lines.append(f"做法与菜品描述：{notes}")
+    if region_label:
+        lines.append(f"参考菜系：{region_label}")
+    if reference_dish:
+        lines.append(f"参考传统菜：{reference_dish}")
     return "\n".join(lines)
+
+
+def build_v2_publish_multimodal_prompt(dish_payload: dict[str, str]) -> str:
+    platform_lines = "\n".join(
+        f"- {label}：{V2_PUBLISH_PLATFORM_TASKS[key]}" for key, label, _count in V2_PUBLISH_PLATFORM_SPECS
+    )
+    return f"""你是多平台美食图文运营。请结合附件里的「入选海报图」和下方菜品信息，为同一道菜写各平台发布文案。
+
+{build_v2_publish_context_text(dish_payload)}
+
+各平台写作要求：
+{platform_lines}
+
+通用要求：
+1) 标题、描述都要口语化、有食欲、有画面感，禁止套话（如“先收藏”“原创融合”“想吃时照着做”）。
+2) 描述 2–4 句，写口感、场景、做法亮点，可自然提菜名，但不要写成说明书。
+3) topics 数组每项以 # 开头，不要菜品全名话题，不要 #阿叶造新菜。
+4) 只输出 JSON，不要 Markdown，不要解释。格式如下：
+{{
+  "douyin": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
+  "xiaohongshu": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
+  "wechat": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
+  "kuaishou": {{"title": "...", "description": "...", "topics": ["#...", "..."]}}
+}}"""
+
+
+def normalize_v2_publish_topics(raw_topics: Any, expected_count: int) -> list[str]:
+    from image_generator import format_topic_tag
+
+    if not isinstance(raw_topics, list):
+        raw_topics = re.findall(r"#[^\s#]+", str(raw_topics))
+    tags: list[str] = []
+    seen: set[str] = set()
+    for item in raw_topics:
+        tag = format_topic_tag(str(item).strip())
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        tags.append(tag)
+        if len(tags) >= expected_count:
+            break
+    if len(tags) < max(1, expected_count // 2):
+        raise ValueError(f"话题数量不足，需要约 {expected_count} 个，实际 {len(tags)} 个。")
+    return tags
+
+
+def parse_v2_publish_platform_payload(raw_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    for platform_key, _label, topic_count in V2_PUBLISH_PLATFORM_SPECS:
+        block = raw_payload.get(platform_key)
+        if not isinstance(block, dict):
+            raise ValueError(f"缺少平台字段：{platform_key}")
+        title = str(block.get("title", "")).strip()
+        description = str(block.get("description", "")).strip()
+        topics = normalize_v2_publish_topics(block.get("topics"), topic_count)
+        if not title:
+            raise ValueError(f"{platform_key} 标题为空。")
+        if not description:
+            raise ValueError(f"{platform_key} 描述为空。")
+        normalized[platform_key] = {
+            "title": title,
+            "description": description,
+            "topics": topics,
+        }
+    return normalized
+
+
+def save_v2_publish_copy_files(
+    *,
+    output_dir: Path,
+    timestamp: str,
+    dish_name: str,
+    platform_payload: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    from image_generator import save_text_output as ig_save_text_output
+
+    safe_name = sanitize_file_name(dish_name)
+    douyin = platform_payload["douyin"]
+    title_file = ig_save_text_output(
+        content=douyin["title"],
+        output_dir=output_dir,
+        timestamp=timestamp,
+        base_name=safe_name,
+        suffix="_图文标题",
+    )
+    description_body_file = ig_save_text_output(
+        content=douyin["description"],
+        output_dir=output_dir,
+        timestamp=timestamp,
+        base_name=safe_name,
+        suffix="_图文描述正文",
+    )
+    platform_topic_files: dict[str, str] = {}
+    platform_description_files: dict[str, str] = {}
+    for platform_key, platform_label, _count in V2_PUBLISH_PLATFORM_SPECS:
+        block = platform_payload[platform_key]
+        topic_line = " ".join(block["topics"])
+        platform_topic_files[platform_key] = ig_save_text_output(
+            content=topic_line,
+            output_dir=output_dir,
+            timestamp=timestamp,
+            base_name=safe_name,
+            suffix=f"_{platform_label}话题",
+        )
+        platform_description_files[platform_key] = ig_save_text_output(
+            content=f"{block['description']}\n{topic_line}".strip(),
+            output_dir=output_dir,
+            timestamp=timestamp,
+            base_name=safe_name,
+            suffix=f"_{platform_label}图文描述",
+        )
+        ig_save_text_output(
+            content=block["title"],
+            output_dir=output_dir,
+            timestamp=timestamp,
+            base_name=safe_name,
+            suffix=f"_{platform_label}标题",
+        )
+    return {
+        "title": douyin["title"],
+        "description": f"{douyin['description']}\n{' '.join(douyin['topics'])}".strip(),
+        "description_body": douyin["description"],
+        "title_file": title_file,
+        "description_file": platform_description_files["douyin"],
+        "description_body_file": description_body_file,
+        "platform_topic_files": platform_topic_files,
+        "platform_description_files": platform_description_files,
+        "platform_payload": platform_payload,
+    }
 
 
 def generate_v2_publish_copy_assets(
@@ -1248,38 +1399,87 @@ def generate_v2_publish_copy_assets(
     notes: str,
     timestamp: str,
     output_dir: Path,
-    topic_reference_text: str = "",
+    dish_payload: dict[str, str],
+    poster_image_path: Path,
 ) -> dict[str, Any]:
-    from image_generator import generate_publish_copy_assets
+    if not poster_image_path.exists():
+        raise FileNotFoundError(f"参考海报图不存在：{poster_image_path}")
 
-    source_text = build_v2_publish_source_text(dish_name=dish_name, notes=notes)
-    return generate_publish_copy_assets(
-        client=client,
-        dish_name=dish_name,
-        source_text=source_text,
-        timestamp=timestamp,
-        notes=notes,
-        topic_reference_text=topic_reference_text or source_text,
-        output_name=dish_name,
-        source_label="V2菜名与描述",
-        output_dir=output_dir,
-    )
+    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    temperature = get_text_temperature()
+    prompt_text = build_v2_publish_multimodal_prompt(dish_payload)
+    prompt_file = output_dir / f"{dish_name}_平台文案生成prompt.txt"
+    save_text_output(prompt_text, prompt_file)
+    print(f"平台文案提示词已保存：{prompt_file}")
+
+    user_content: list[dict[str, Any]] = [
+        {"type": "text", "text": prompt_text},
+        {"type": "text", "text": "参考海报图（已入选 publish 的成品图）："},
+        {"type": "image_url", "image_url": {"url": encode_image_as_data_url(poster_image_path)}},
+    ]
+
+    max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
+    last_error = ""
+    for attempt in range(1, max_retry + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": user_content}],
+                max_tokens=2800,
+                temperature=temperature,
+            )
+            raw_text = extract_chat_text_output(response).strip()
+            if not raw_text:
+                raise ValueError("豆包未返回平台文案。")
+            payload = extract_json_object_from_text(raw_text)
+            platform_payload = parse_v2_publish_platform_payload(payload)
+            saved = save_v2_publish_copy_files(
+                output_dir=output_dir,
+                timestamp=timestamp,
+                dish_name=dish_name,
+                platform_payload=platform_payload,
+            )
+            saved["model"] = model
+            saved["prompt_file"] = str(prompt_file)
+            print(f"图文标题已保存：{saved['title_file']}")
+            print(f"图文描述正文已保存：{saved['description_body_file']}")
+            for platform_key, platform_label, _count in V2_PUBLISH_PLATFORM_SPECS:
+                print(f"{platform_label}话题已保存：{saved['platform_topic_files'][platform_key]}")
+                print(f"{platform_label}图文描述已保存：{saved['platform_description_files'][platform_key]}")
+            return saved
+        except (ValueError, json.JSONDecodeError) as exc:
+            last_error = str(exc)
+            user_content[0] = {
+                "type": "text",
+                "text": prompt_text + f"\n\n上次输出不合格：{last_error}\n请严格按 JSON 格式重写。",
+            }
+        except Exception as exc:
+            last_error = str(exc)
+
+    raise RuntimeError(f"平台文案生成失败：{last_error or '未知错误'}")
 
 
-def persist_v2_common_text_assets(
+def persist_v2_dish_record(output_dir: Path, dish_payload: dict[str, str]) -> str:
+    dish_record_file = save_dish_idea_record_file(output_dir, dish_payload)
+    print(f"造菜信息已保存：{dish_record_file}")
+    return dish_record_file
+
+
+def persist_v2_publish_copy_assets(
     *,
     client: OpenAI,
     output_dir: Path,
     timestamp: str,
     dish_payload: dict[str, str],
+    poster_image_path: str,
 ) -> dict[str, Any]:
-    result: dict[str, Any] = {}
+    result: dict[str, Any] = {"publish_copy_error": ""}
     dish_name = str(dish_payload.get("dish_name", "")).strip()
     notes = str(dish_payload.get("notes", "")).strip()
-
-    dish_record_file = save_dish_idea_record_file(output_dir, dish_payload)
-    result["dish_idea_record_file"] = dish_record_file
-    print(f"造菜信息已保存：{dish_record_file}")
+    poster_path = Path(poster_image_path)
+    if not poster_path.exists():
+        result["publish_copy_error"] = f"参考图不存在：{poster_path}"
+        return result
 
     try:
         publish_copy = generate_v2_publish_copy_assets(
@@ -1288,24 +1488,53 @@ def persist_v2_common_text_assets(
             notes=notes,
             timestamp=timestamp,
             output_dir=output_dir,
-            topic_reference_text=build_dish_idea_record_text(dish_payload),
+            dish_payload=dish_payload,
+            poster_image_path=poster_path,
         )
-        result["publish_title_file"] = publish_copy.get("title_file", "")
-        result["publish_description_file"] = publish_copy.get("description_file", "")
-        result["publish_description_body_file"] = publish_copy.get("description_body_file", "")
-        result["publish_platform_topic_files"] = publish_copy.get("platform_topic_files", {})
-        result["publish_platform_description_files"] = publish_copy.get("platform_description_files", {})
-        result["publish_copy_error"] = ""
+        result.update(
+            {
+                "publish_title_file": publish_copy.get("title_file", ""),
+                "publish_description_file": publish_copy.get("description_file", ""),
+                "publish_description_body_file": publish_copy.get("description_body_file", ""),
+                "publish_platform_topic_files": publish_copy.get("platform_topic_files", {}),
+                "publish_platform_description_files": publish_copy.get("platform_description_files", {}),
+                "publish_copy_prompt_file": publish_copy.get("prompt_file", ""),
+            }
+        )
     except Exception as exc:
         result["publish_copy_error"] = str(exc)
         error_file = output_dir / f"{dish_name}_平台文案生成失败原因.txt"
         save_text_output(
             "平台发布文案（标题/话题/图文描述）生成失败。\n"
             f"失败原因：{exc}\n"
-            "建议：检查豆包文本接口与网络后重试。",
+            "建议：检查豆包文本接口、参考海报图与网络后重试。",
             error_file,
         )
         print(f"平台文案生成失败，已写入说明：{error_file}")
+    return result
+
+
+def persist_v2_common_text_assets(
+    *,
+    client: OpenAI,
+    output_dir: Path,
+    timestamp: str,
+    dish_payload: dict[str, str],
+    poster_image_path: str = "",
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    result["dish_idea_record_file"] = persist_v2_dish_record(output_dir, dish_payload)
+    if poster_image_path.strip():
+        publish_result = persist_v2_publish_copy_assets(
+            client=client,
+            output_dir=output_dir,
+            timestamp=timestamp,
+            dish_payload=dish_payload,
+            poster_image_path=poster_image_path,
+        )
+        result.update(publish_result)
+    else:
+        result["publish_copy_error"] = ""
     return result
 
 
