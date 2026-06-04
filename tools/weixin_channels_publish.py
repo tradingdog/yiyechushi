@@ -40,7 +40,6 @@ from tools.douyin_publish import (  # noqa: E402
     type_text_humanly,
     wait_for_locator,
 )
-from tools.kuaishou_publish import paste_topic_tags_via_clipboard  # noqa: E402
 from tools.screen_template_match import match_template_on_page  # noqa: E402
 from tools.weixin_mp_publish import confirm_windows_open_dialog, paste_text_to_clipboard  # noqa: E402
 
@@ -205,6 +204,95 @@ def move_cursor_to_editor_end(page: Page, editor: Locator) -> None:
     page.wait_for_timeout(200)
 
 
+def _normalize_topic_tag(topic_tag: str) -> str:
+    text = str(topic_tag or "").strip()
+    if not text:
+        raise ValueError("话题标签不能为空。")
+    return text if text.startswith("#") else f"#{text}"
+
+
+def _topics_missing_in_editor(editor: Locator, topic_tags: Sequence[str]) -> list[str]:
+    current = _read_editor_text(editor)
+    return [tag for tag in topic_tags if tag not in current]
+
+
+def _paste_clipboard_with_playwright(
+    page: Page,
+    editor: Locator,
+    *,
+    clipboard_settle_s: float = 0.35,
+    after_paste_wait_ms: int,
+) -> None:
+    page.bring_to_front()
+    editor.click(force=True)
+    page.wait_for_timeout(120)
+    time.sleep(clipboard_settle_s)
+    page.keyboard.press("Control+v")
+    page.wait_for_timeout(max(0, after_paste_wait_ms))
+
+
+def paste_weixin_channels_topic_tags(
+    page: Page,
+    editor: Locator,
+    topic_tags: Sequence[str],
+    settings: WeixinChannelsPublishSettings,
+) -> None:
+    """视频号话题：优先整行 Playwright 粘贴，缺项再逐个补粘并校验。"""
+    normalized = tuple(_normalize_topic_tag(tag) for tag in topic_tags if str(tag or "").strip())
+    if not normalized:
+        return
+
+    move_cursor_to_editor_end(page, editor)
+    page.wait_for_timeout(300)
+
+    topics_line = " ".join(normalized)
+    paste_text_to_clipboard(topics_line)
+    _paste_clipboard_with_playwright(
+        page,
+        editor,
+        after_paste_wait_ms=settings.after_topic_paste_wait_ms,
+    )
+    missing = _topics_missing_in_editor(editor, normalized)
+    if not missing:
+        print(f"已一次性粘贴视频号 {len(normalized)} 个话题（整行）。")
+        return
+
+    print(
+        f"整行粘贴后仍缺 {len(missing)} 个话题，改为逐个补粘："
+        f"{' '.join(missing[:5])}{'…' if len(missing) > 5 else ''}"
+    )
+    for index, tag in enumerate(missing):
+        move_cursor_to_editor_end(page, editor)
+        page.keyboard.press("Space")
+        page.wait_for_timeout(150)
+        paste_text_to_clipboard(tag)
+        _paste_clipboard_with_playwright(
+            page,
+            editor,
+            after_paste_wait_ms=settings.after_topic_paste_wait_ms,
+        )
+        page.wait_for_timeout(max(0, settings.between_topics_wait_ms))
+        if tag not in _read_editor_text(editor):
+            print(f"话题 {tag} 首次未写入，重试一次。")
+            move_cursor_to_editor_end(page, editor)
+            page.keyboard.press("Space")
+            page.wait_for_timeout(150)
+            paste_text_to_clipboard(tag)
+            _paste_clipboard_with_playwright(
+                page,
+                editor,
+                after_paste_wait_ms=settings.after_topic_paste_wait_ms,
+            )
+        print(f"已粘贴视频号话题（补粘 {index + 1}/{len(missing)}）：{tag}")
+
+    still_missing = _topics_missing_in_editor(editor, normalized)
+    if still_missing:
+        raise RuntimeError(
+            f"视频号话题未全部写入，仍缺 {len(still_missing)} 个：{' '.join(still_missing)}"
+        )
+    print(f"已补粘完成，视频号共 {len(normalized)} 个话题。")
+
+
 def paste_into_contenteditable(
     page: Page,
     editor: Locator,
@@ -220,11 +308,7 @@ def paste_into_contenteditable(
     page.wait_for_timeout(100)
 
     paste_text_to_clipboard(text)
-    page.bring_to_front()
-    time.sleep(0.15)
-    editor.click(force=True)
-    pyautogui.hotkey("ctrl", "v")
-    page.wait_for_timeout(800)
+    _paste_clipboard_with_playwright(page, editor, clipboard_settle_s=0.2, after_paste_wait_ms=800)
     current = _read_editor_text(editor)
     if _text_mostly_present(current, text):
         print(f"已向图文描述输入框粘贴{description}（长度 {len(current)}/{len(text.strip())}）。")
@@ -571,19 +655,10 @@ def fill_description_and_topics(
         print("未配置话题标签，跳过话题粘贴。")
         return
 
+    page.wait_for_timeout(500)
     move_cursor_to_editor_end(page, editor)
-    page.wait_for_timeout(200)
-    paste_topic_tags_via_clipboard(
-        page,
-        editor,
-        assets.topic_tags,
-        after_paste_wait_ms=settings.after_topic_paste_wait_ms,
-        between_topics_wait_ms=settings.between_topics_wait_ms,
-        platform_label="视频号",
-        cursor_at_end=True,
-    )
+    paste_weixin_channels_topic_tags(page, editor, assets.topic_tags, settings)
     save_flow_step_screenshot(page, settings, "07", "描述与话题输入后")
-    print(f"已粘贴视频号 {len(assets.topic_tags)} 个话题。")
 
 
 def to_cdp_settings(settings: WeixinChannelsPublishSettings) -> PublishSettings:
