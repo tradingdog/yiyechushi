@@ -29,6 +29,7 @@ from v2_core import (
     parse_bool_env,
     parse_float_env,
     parse_int_env,
+    persist_v2_common_text_assets,
     render_prompt_fallback,
     render_cover_prompt_by_template,
     sanitize_file_name,
@@ -157,6 +158,13 @@ def run_v2_first_feature(mode: str | None = None) -> dict[str, object]:
     timestamp = get_timestamp()
     run_output_dir = build_run_output_dir(timestamp, dish_name)
     print(f"输出目录：{run_output_dir}")
+
+    common_text_assets = persist_v2_common_text_assets(
+        client=doubao_client,
+        output_dir=run_output_dir,
+        timestamp=timestamp,
+        dish_payload=dish_payload,
+    )
 
     template_text = load_cankao_template()
     try:
@@ -428,6 +436,13 @@ def run_v2_first_feature(mode: str | None = None) -> dict[str, object]:
         "cover_selected_image": cover_selected_image,
         "photoshop_processed_files": photoshop_processed_files,
         "photoshop_error": photoshop_error,
+        "dish_idea_record_file": common_text_assets.get("dish_idea_record_file", ""),
+        "publish_title_file": common_text_assets.get("publish_title_file", ""),
+        "publish_description_file": common_text_assets.get("publish_description_file", ""),
+        "publish_description_body_file": common_text_assets.get("publish_description_body_file", ""),
+        "publish_platform_topic_files": common_text_assets.get("publish_platform_topic_files", {}),
+        "publish_platform_description_files": common_text_assets.get("publish_platform_description_files", {}),
+        "publish_copy_error": common_text_assets.get("publish_copy_error", ""),
     }
 
 

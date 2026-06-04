@@ -691,7 +691,10 @@ def generate_poster_bubble_copy(client: OpenAI, poster_image_path: Path) -> dict
     user_content: list[dict[str, Any]] = [
         {
             "type": "text",
-            "text": "为这个菜写角色的气泡框的话语，让抖音用户一看就有食欲！只输出气泡内文案，不要解释、不要加引号外的说明。",
+            "text": (
+                "请根据参考海报中的菜品，用角色第一人称的口吻写一条气泡框内文案，"
+                "让抖音用户一看就有食欲！只输出气泡内要说的话，不要解释、不要加引号外的说明。"
+            ),
         },
         {"type": "image_url", "image_url": {"url": encode_image_as_data_url(poster_image_path)}},
     ]
@@ -1090,6 +1093,102 @@ def build_run_output_dir(timestamp: str, dish_name: str) -> Path:
 def save_text_output(content: str, output_file: Path) -> None:
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_text(content.strip() + "\n", encoding="utf-8")
+
+
+def build_dish_idea_record_text(dish_payload: dict[str, str]) -> str:
+    dish_name = str(dish_payload.get("dish_name", "")).strip()
+    notes = str(dish_payload.get("notes", "")).strip()
+    region_label = str(dish_payload.get("region_label", "")).strip()
+    reference_dish = str(dish_payload.get("reference_dish", "")).strip()
+    return (
+        f"菜名：{dish_name}\n"
+        f"菜名描述：{notes or '无'}\n"
+        f"参考菜系：{region_label or '未记录'}\n"
+        f"参考菜品：{reference_dish or '未记录'}\n"
+    )
+
+
+def save_dish_idea_record_file(output_dir: Path, dish_payload: dict[str, str]) -> str:
+    dish_name = str(dish_payload.get("dish_name", "")).strip() or "新菜"
+    output_file = output_dir / f"{dish_name}_造菜信息.txt"
+    save_text_output(build_dish_idea_record_text(dish_payload), output_file)
+    return str(output_file)
+
+
+def build_v2_publish_source_text(dish_name: str, notes: str) -> str:
+    lines = [f"菜名：{dish_name.strip()}"]
+    notes_text = notes.strip()
+    if notes_text:
+        lines.append(f"菜名描述：{notes_text}")
+    return "\n".join(lines)
+
+
+def generate_v2_publish_copy_assets(
+    client: OpenAI,
+    *,
+    dish_name: str,
+    notes: str,
+    timestamp: str,
+    output_dir: Path,
+    topic_reference_text: str = "",
+) -> dict[str, Any]:
+    from image_generator import generate_publish_copy_assets
+
+    source_text = build_v2_publish_source_text(dish_name=dish_name, notes=notes)
+    return generate_publish_copy_assets(
+        client=client,
+        dish_name=dish_name,
+        source_text=source_text,
+        timestamp=timestamp,
+        notes=notes,
+        topic_reference_text=topic_reference_text or source_text,
+        output_name=dish_name,
+        source_label="V2菜名与描述",
+        output_dir=output_dir,
+    )
+
+
+def persist_v2_common_text_assets(
+    *,
+    client: OpenAI,
+    output_dir: Path,
+    timestamp: str,
+    dish_payload: dict[str, str],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    dish_name = str(dish_payload.get("dish_name", "")).strip()
+    notes = str(dish_payload.get("notes", "")).strip()
+
+    dish_record_file = save_dish_idea_record_file(output_dir, dish_payload)
+    result["dish_idea_record_file"] = dish_record_file
+    print(f"造菜信息已保存：{dish_record_file}")
+
+    try:
+        publish_copy = generate_v2_publish_copy_assets(
+            client=client,
+            dish_name=dish_name,
+            notes=notes,
+            timestamp=timestamp,
+            output_dir=output_dir,
+            topic_reference_text=build_dish_idea_record_text(dish_payload),
+        )
+        result["publish_title_file"] = publish_copy.get("title_file", "")
+        result["publish_description_file"] = publish_copy.get("description_file", "")
+        result["publish_description_body_file"] = publish_copy.get("description_body_file", "")
+        result["publish_platform_topic_files"] = publish_copy.get("platform_topic_files", {})
+        result["publish_platform_description_files"] = publish_copy.get("platform_description_files", {})
+        result["publish_copy_error"] = ""
+    except Exception as exc:
+        result["publish_copy_error"] = str(exc)
+        error_file = output_dir / f"{dish_name}_平台文案生成失败原因.txt"
+        save_text_output(
+            "平台发布文案（标题/话题/图文描述）生成失败。\n"
+            f"失败原因：{exc}\n"
+            "建议：检查豆包文本接口与网络后重试。",
+            error_file,
+        )
+        print(f"平台文案生成失败，已写入说明：{error_file}")
+    return result
 
 
 def extract_image_items(response: Any) -> list[dict[str, str]]:

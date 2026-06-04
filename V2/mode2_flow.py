@@ -22,6 +22,7 @@ from v2_core import (
     generate_poster_bubble_copy,
     get_mode2_group_settings,
     get_timestamp,
+    persist_v2_common_text_assets,
     load_cankao_group_template,
     load_manual_dish_idea,
     move_image_to_publish,
@@ -128,7 +129,17 @@ def run_v2_mode2(mode: str | None = None) -> dict[str, object]:
     print(f"输出目录：{run_output_dir}")
     print("流程模式：mode2（海报 -> 细节图 -> 菜谱图 -> 封面图）")
 
+    common_text_assets = persist_v2_common_text_assets(
+        client=doubao_client,
+        output_dir=run_output_dir,
+        timestamp=timestamp,
+        dish_payload=dish_payload,
+    )
+
     errors: list[str] = []
+    publish_copy_error = str(common_text_assets.get("publish_copy_error", "")).strip()
+    if publish_copy_error:
+        errors.append(f"平台文案生成失败：{publish_copy_error}")
     all_saved_images: list[str] = []
 
     # 1) 海报提示词 + 生图
@@ -368,6 +379,13 @@ def run_v2_mode2(mode: str | None = None) -> dict[str, object]:
         "cover_selected_image": cover_saved_images[0] if cover_saved_images else "",
         "cover_saved_images": cover_saved_images,
         "cover_image_error": "",
+        "dish_idea_record_file": common_text_assets.get("dish_idea_record_file", ""),
+        "publish_title_file": common_text_assets.get("publish_title_file", ""),
+        "publish_description_file": common_text_assets.get("publish_description_file", ""),
+        "publish_description_body_file": common_text_assets.get("publish_description_body_file", ""),
+        "publish_platform_topic_files": common_text_assets.get("publish_platform_topic_files", {}),
+        "publish_platform_description_files": common_text_assets.get("publish_platform_description_files", {}),
+        "publish_copy_error": publish_copy_error,
     }
 
 
