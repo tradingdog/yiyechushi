@@ -124,15 +124,21 @@ def _resolve_kuaishou_title(output_dir: Path) -> tuple[str, Path | None]:
     raise RuntimeError(f"未找到快手标题文件，且无法从目录名解析菜名：{output_dir}")
 
 
-def _resolve_topic_tags(description_text: str, description_file: Path) -> tuple[str, ...]:
-    _body, tags = split_description_body_and_tags(description_text)
-    if not tags:
-        raise RuntimeError(f"未从 {description_file.name} 中解析到快手话题行。")
-    if len(tags) != EXPECTED_TOPIC_COUNT:
+def _resolve_kuaishou_description_parts(description_text: str, description_file: Path) -> tuple[str, tuple[str, ...]]:
+    description_body, topic_tags = split_description_body_and_tags(description_text)
+    if not description_body:
+        lines = [line.strip() for line in description_text.splitlines() if line.strip()]
+        if lines and not lines[0].replace(" ", "").startswith("#"):
+            description_body = lines[0]
+    if not description_body:
+        raise RuntimeError(f"未从 {description_file.name} 中解析到快手描述正文（第 1 行）。")
+    if not topic_tags:
+        raise RuntimeError(f"未从 {description_file.name} 中解析到快手话题（第 2 行）。")
+    if len(topic_tags) != EXPECTED_TOPIC_COUNT:
         raise RuntimeError(
-            f"快手话题必须为 {EXPECTED_TOPIC_COUNT} 个，当前为 {len(tags)} 个：{description_file}"
+            f"快手话题必须为 {EXPECTED_TOPIC_COUNT} 个，当前为 {len(topic_tags)} 个：{description_file}"
         )
-    return tuple(tags)
+    return description_body, tuple(topic_tags)
 
 
 def resolve_final_dir(output_dir: Path, final_dir_text: str) -> Path:
@@ -190,7 +196,7 @@ def resolve_kuaishou_assets(args: argparse.Namespace) -> KuaishouPublishAssets:
     description_file = find_single_file(output_dir, KUAISHOU_DESCRIPTION_SUFFIX)
     title_text, title_file = _resolve_kuaishou_title(output_dir)
     description_text = read_utf8_text(description_file)
-    topic_tags = _resolve_topic_tags(description_text, description_file)
+    description_body, topic_tags = _resolve_kuaishou_description_parts(description_text, description_file)
 
     poster_image, detail_image, recipe_image = resolve_publish_image_triplet(final_dir)
     cover_image = resolve_publish_cover_image(final_dir)
@@ -201,6 +207,7 @@ def resolve_kuaishou_assets(args: argparse.Namespace) -> KuaishouPublishAssets:
         image_paths=(poster_image, detail_image, recipe_image),
         cover_path=cover_image,
         title_text=title_text,
+        description_body=description_body,
         topic_tags=topic_tags,
         title_file=title_file or description_file,
         description_file=description_file,
@@ -216,7 +223,7 @@ def log_assets(assets: KuaishouPublishAssets) -> None:
         print(f"标题来源：输出目录菜名（无独立标题文件）")
     print(f"描述文件：{assets.description_file}")
     print(f"标题：{assets.title_text}")
-    print(f"话题数量：{len(assets.topic_tags)}")
+    print(f"描述正文长度：{len(assets.description_body)}，话题数量：{len(assets.topic_tags)}")
     for image_path in assets.image_paths:
         print(f"已识别上传图片：{image_path}")
     print(f"已识别封面图：{assets.cover_path}")

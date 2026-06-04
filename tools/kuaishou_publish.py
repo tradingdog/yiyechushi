@@ -19,6 +19,7 @@ if __name__ == "__main__":
     setup_script_logging(__file__)
 
 try:
+    import pyautogui
     from playwright.sync_api import Page, sync_playwright
 except ImportError as exc:
     raise SystemExit(
@@ -67,6 +68,7 @@ class KuaishouPublishAssets:
     image_paths: tuple[Path, ...]
     cover_path: Path
     title_text: str
+    description_body: str
     topic_tags: tuple[str, ...]
     title_file: Path
     description_file: Path
@@ -244,6 +246,14 @@ def location_option_locators(page: Page, location: str) -> tuple:
     )
 
 
+def _kuaishou_page_priority(url: str) -> int:
+    if "/article/publish" in url or ("/publish" in url and "/manage/" not in url):
+        return 0
+    if "cp.kuaishou.com" in url:
+        return 1
+    return 2
+
+
 def find_kuaishou_page(browser, url_keyword: str) -> Page:
     matched_pages = [
         page
@@ -254,13 +264,20 @@ def find_kuaishou_page(browser, url_keyword: str) -> Page:
     if not matched_pages:
         raise RuntimeError(
             f"未在已打开的 Chrome 标签页里找到包含 {url_keyword} 的页面。"
-            "请先自行打开快手创作者平台并登录，然后重新运行脚本。"
+            "请先自行打开快手创作者中心并登录，然后重新运行脚本。"
         )
-    page = matched_pages[-1]
+    page = min(matched_pages, key=lambda item: (_kuaishou_page_priority(item.url), item.url))
     page.bring_to_front()
     page.wait_for_load_state("domcontentloaded")
     print(f"已锁定快手页面：{page.url}")
     return page
+
+
+def close_stray_file_dialog(page: Page) -> None:
+    page.bring_to_front()
+    page.wait_for_timeout(200)
+    pyautogui.press("escape")
+    page.wait_for_timeout(300)
 
 
 def save_step_screenshot(page: Page, screenshot_path: Path, label: str) -> None:
@@ -335,77 +352,125 @@ def dismiss_draft_recovery_if_present(page: Page) -> None:
     print("检测到未发布图集提示，但未找到「放弃」按钮，尝试继续。")
 
 
+def wait_for_graphic_upload_panel(page: Page, *, timeout_ms: int = 30_000) -> None:
+    wait_for_locator(page, main_upload_button_locators(page), description="上传图文面板-上传图片按钮", timeout_ms=timeout_ms)
+    print("已确认：上传图文面板已打开（可见「上传图片」按钮）。")
+
+
 def activate_graphic_tab(page: Page, settings: KuaishouPublishSettings) -> None:
     tab = wait_for_locator(page, graphic_tab_locators(page), description="上传图文标签", timeout_ms=30_000)
     tab.scroll_into_view_if_needed()
-    tab.click()
-    print("已点击：上传图文")
+    selected = tab.get_attribute("aria-selected")
+    if selected != "true":
+        tab.click(force=True)
+        page.wait_for_timeout(800)
+        tab.click(force=True)
+        print("已点击：上传图文（切换到图文发布）")
+    else:
+        tab.click(force=True)
+        print("已点击：上传图文（已选中，再次确认）")
     page.wait_for_timeout(settings.after_graphic_tab_wait_ms)
 
-    panel = find_optional_locator(page, graphic_tab_panel_locators(page), timeout_ms=5_000)
-    if panel is None:
-        tab.click()
-        page.wait_for_timeout(1_000)
-        print("上传图文面板未立即激活，已重试点击标签。")
-
     dismiss_draft_recovery_if_present(page)
+    wait_for_graphic_upload_panel(page)
+
+
+def post_upload_advance_locators(page: Page) -> tuple:
+    return (
+        *continue_edit_draft_button_locators(page),
+        page.get_by_role("button", name="下一步"),
+        page.get_by_role("button", name="继续"),
+        page.get_by_text("下一步", exact=True),
+        page.get_by_text("继续编辑", exact=True),
+    )
 
 
 def ensure_graphic_editor_ready(page: Page, settings: KuaishouPublishSettings) -> None:
-    editor = find_optional_locator(page, description_editor_locators(page), timeout_ms=3_000)
-    if editor is not None:
-        print("已进入快手图文编辑页。")
-        return
+    deadline_ms = 90_000
+    attempts = max(1, deadline_ms // 3_000)
 
-    continue_button = find_optional_locator(page, continue_edit_draft_button_locators(page), timeout_ms=3_000)
-    if continue_button is not None:
-        continue_button.click()
-        print("已点击：继续编辑（进入图文编辑页）")
-        page.wait_for_timeout(2_000)
+    for attempt in range(attempts):
+        editor = find_optional_locator(page, description_editor_locators(page), timeout_ms=1_500)
+        if editor is not None:
+            print("已进入快手图文编辑页。")
+            return
 
-    wait_for_locator(page, description_editor_locators(page), description="作品描述输入框", timeout_ms=60_000)
+        continue_button = find_optional_locator(page, continue_edit_draft_button_locators(page), timeout_ms=1_500)
+        if continue_button is not None:
+            continue_button.click()
+            print("已点击：继续编辑（进入图文编辑页）")
+            page.wait_for_timeout(2_000)
+            continue
+
+        for locator_group in post_upload_advance_locators(page):
+            try:
+                button = locator_group.first
+                if button.is_visible(timeout=500):
+                    button.click()
+                    print("已点击：上传后进入编辑的按钮")
+                    page.wait_for_timeout(2_000)
+                    break
+            except Exception:
+                continue
+
+        if attempt % 4 == 3:
+            dismiss_draft_recovery_if_present(page)
+
+        page.wait_for_timeout(3_000)
+
+    wait_for_locator(page, description_editor_locators(page), description="作品描述输入框", timeout_ms=15_000)
     print("作品描述输入框已就绪。")
 
 
 def open_graphic_publish_flow(page: Page, settings: KuaishouPublishSettings) -> None:
     click_locator(page, publish_work_button_locators(page), description="发布作品", timeout_ms=30_000)
     page.wait_for_timeout(settings.after_publish_work_wait_ms)
+
+    upload_panel_ready = find_optional_locator(page, main_upload_button_locators(page), timeout_ms=3_000)
+    editor_ready = find_optional_locator(page, description_editor_locators(page), timeout_ms=1_500)
+    if upload_panel_ready is None and editor_ready is None:
+        print("发布作品后未立即出现上传区，等待页面加载…")
+        page.wait_for_timeout(3_000)
+
     activate_graphic_tab(page, settings)
 
 
 def upload_main_images(page: Page, assets: KuaishouPublishAssets, settings: KuaishouPublishSettings) -> None:
     print(f"准备上传 {len(assets.image_paths)} 张图文（01/02/03）。")
-    dismiss_draft_recovery_if_present(page)
     page.bring_to_front()
-
-    if _upload_via_dom_input(page, main_upload_file_input_locators(page), assets.image_paths, label="图文"):
-        page.wait_for_timeout(settings.after_main_upload_wait_ms)
-        save_step_screenshot(page, settings.upload_step_screenshot, "图文上传后")
-        ensure_graphic_editor_ready(page, settings)
-        print(f"快手图文上传完成，共 {len(assets.image_paths)} 张。")
-        return
+    dismiss_draft_recovery_if_present(page)
+    wait_for_graphic_upload_panel(page)
 
     upload_button = wait_for_locator(page, main_upload_button_locators(page), description="上传图片按钮", timeout_ms=30_000)
     upload_button.scroll_into_view_if_needed()
 
+    resolved_paths = [str(path.resolve()) for path in assets.image_paths]
+    uploaded = False
     try:
-        resolved_paths = [str(path.resolve()) for path in assets.image_paths]
-        with page.expect_file_chooser(timeout=10_000) as chooser_info:
+        with page.expect_file_chooser(timeout=12_000) as chooser_info:
             upload_button.click()
+            print("已点击：上传图片（等待 file chooser）")
         chooser_info.value.set_files(resolved_paths)
-        print(f"图文已通过 file chooser 投喂 {len(resolved_paths)} 张。")
+        uploaded = True
+        print(f"图文已通过 file chooser 上传 {len(resolved_paths)} 张。")
         for path in assets.image_paths:
             print(f"  - {path.name}")
     except Exception as exc:
         print(f"file chooser 不可用，改用 Windows 对话框：{exc}")
-        _upload_via_windows_dialog(
-            page,
-            main_upload_button_locators(page),
+        upload_button.click()
+        print("已点击：上传图片（打开 Windows 对话框）")
+        page.wait_for_timeout(settings.after_upload_button_wait_ms)
+        confirm_windows_open_dialog(
             assets.image_paths,
-            settings,
-            label="图文",
+            wait_ms=settings.windows_open_dialog_wait_ms,
+            focus_page=page,
         )
+        uploaded = True
 
+    if not uploaded:
+        raise RuntimeError("快手图文上传失败：未能通过 file chooser 或 Windows 对话框完成上传。")
+
+    close_stray_file_dialog(page)
     page.wait_for_timeout(settings.after_main_upload_wait_ms)
     save_step_screenshot(page, settings.upload_step_screenshot, "图文上传后")
     ensure_graphic_editor_ready(page, settings)
@@ -429,7 +494,14 @@ def fill_work_description(page: Page, assets: KuaishouPublishAssets, settings: K
     page.wait_for_timeout(settings.typing_delay_ms)
     page.keyboard.press("Enter")
     page.wait_for_timeout(settings.typing_delay_ms)
-    print(f"已输入快手作品描述首行标题：{assets.title_text}")
+    print(f"已输入快手作品描述标题：{assets.title_text}")
+
+    type_text_humanly(page, assets.description_body, delay_ms=settings.typing_delay_ms)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(settings.typing_delay_ms)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(settings.typing_delay_ms)
+    print(f"已输入快手作品描述正文（第 1 行），长度 {len(assets.description_body)}。")
 
     for topic_tag in assets.topic_tags:
         topic_text = topic_tag.lstrip("#")
