@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -20,7 +21,7 @@ if __name__ == "__main__":
 
 try:
     import pyautogui
-    from playwright.sync_api import Page, sync_playwright
+    from playwright.sync_api import Locator, Page, sync_playwright
 except ImportError as exc:
     raise SystemExit(
         f"导入发布依赖失败：{exc}\n请执行：{sys.executable} -m pip install -r requirements.txt"
@@ -477,10 +478,18 @@ def upload_main_images(page: Page, assets: KuaishouPublishAssets, settings: Kuai
     print(f"快手图文上传完成，共 {len(assets.image_paths)} 张。")
 
 
-def confirm_topic_with_enter(page: Page, topic_tag: str, settings: KuaishouPublishSettings) -> None:
+def type_hashtag_topic_humanly(editor: Locator, topic_text: str, *, delay_ms: int) -> None:
+    """在作品描述框内逐字敲 #话题，触发下拉（insert_text 不会弹出下拉）。"""
+    editor.press_sequentially(f"#{topic_text}", delay=max(0, delay_ms))
+
+
+def confirm_topic_with_main_enter(page: Page, topic_tag: str, settings: KuaishouPublishSettings) -> None:
+    """用主键盘区 Enter 确认话题（Shift 上方那颗；勿用 NumpadEnter，否则会空行不变蓝）。"""
     page.wait_for_timeout(settings.after_topic_confirm_wait_ms)
-    page.keyboard.press("Enter")
-    print(f"已等待 {settings.after_topic_confirm_wait_ms}ms 后回车确认话题：{topic_tag}")
+    page.bring_to_front()
+    time.sleep(0.2)
+    pyautogui.press("enter")
+    print(f"已等待 {settings.after_topic_confirm_wait_ms}ms 后系统主键盘 Enter 确认话题：{topic_tag}")
 
 
 def fill_work_description(page: Page, assets: KuaishouPublishAssets, settings: KuaishouPublishSettings) -> None:
@@ -505,10 +514,8 @@ def fill_work_description(page: Page, assets: KuaishouPublishAssets, settings: K
 
     for topic_tag in assets.topic_tags:
         topic_text = topic_tag.lstrip("#")
-        page.keyboard.insert_text("#")
-        page.wait_for_timeout(settings.topic_typing_delay_ms)
-        type_text_humanly(page, topic_text, delay_ms=settings.topic_typing_delay_ms)
-        confirm_topic_with_enter(page, topic_tag, settings)
+        type_hashtag_topic_humanly(editor, topic_text, delay_ms=settings.topic_typing_delay_ms)
+        confirm_topic_with_main_enter(page, topic_tag, settings)
         page.wait_for_timeout(settings.between_topics_wait_ms)
 
     print(f"已输入快手 {len(assets.topic_tags)} 个话题。")
