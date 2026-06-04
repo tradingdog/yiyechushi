@@ -33,6 +33,7 @@ from tools.douyin_publish import (  # noqa: E402
 from tools.weixin_channels_publish import (  # noqa: E402
     DEFAULT_AFTER_TOPIC_PASTE_WAIT_MS,
     DEFAULT_AFTER_UPLOAD_WAIT_MS,
+    DEFAULT_AFTER_UPLOAD_TITLE_WAIT_MS,
     DEFAULT_BETWEEN_TOPICS_WAIT_MS,
     DEFAULT_DEBUG_SCREENSHOT,
     DEFAULT_LOGIN_MARKER,
@@ -43,6 +44,7 @@ from tools.weixin_channels_publish import (  # noqa: E402
     DEFAULT_STEP_WAIT_MS,
     DEFAULT_TEMPLATE_MATCH_THRESHOLD,
     DEFAULT_UPLOAD_AREA_MARKER,
+    DEFAULT_STEP_SCREENSHOT_DIR,
     DEFAULT_UPLOAD_STEP_SCREENSHOT,
     DEFAULT_URL_KEYWORD,
     DEFAULT_WINDOWS_OPEN_DIALOG_WAIT_MS,
@@ -60,6 +62,7 @@ from publish_final_assets import (  # noqa: E402
 DEFAULT_V2_OUTPUT_DIR = V2_DIR / "output" / "20260604_210303_葱香陈皮羊排"
 DEFAULT_FINAL_DIR_NAME = "publish/final"
 WECHAT_DESCRIPTION_SUFFIX = "_微信视频号和公众号图文描述.txt"
+WECHAT_TOPIC_SUFFIX = "_微信视频号和公众号话题.txt"
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,6 +96,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug-screenshot", default=str(DEFAULT_DEBUG_SCREENSHOT))
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
+
+
+def _resolve_topic_tags(output_dir: Path, fallback_topics_line: str) -> tuple[str, ...]:
+    topic_files = sorted(output_dir.glob(f"*{WECHAT_TOPIC_SUFFIX}"))
+    if topic_files:
+        topic_tags = parse_topic_tags(read_utf8_text(topic_files[-1]))
+        if topic_tags:
+            print(f"话题来自专用文件（{len(topic_tags)} 个）：{topic_files[-1].name}")
+            return topic_tags
+    topic_tags = parse_topic_tags(fallback_topics_line)
+    if topic_tags:
+        print(f"话题来自图文描述第 2 行（{len(topic_tags)} 个）。")
+    return topic_tags
 
 
 def _find_title_file(output_dir: Path) -> Path:
@@ -141,10 +157,12 @@ def resolve_settings(args: argparse.Namespace) -> WeixinChannelsPublishSettings:
         template_match_threshold=DEFAULT_TEMPLATE_MATCH_THRESHOLD,
         step_wait_ms=max(0, int(args.step_wait_ms)),
         after_upload_wait_ms=DEFAULT_AFTER_UPLOAD_WAIT_MS,
+        after_upload_title_wait_ms=DEFAULT_AFTER_UPLOAD_TITLE_WAIT_MS,
         after_topic_paste_wait_ms=max(0, int(args.after_topic_paste_wait_ms)),
         between_topics_wait_ms=max(0, int(args.between_topics_wait_ms)),
         windows_open_dialog_wait_ms=max(0, int(args.windows_open_dialog_wait_ms)),
         upload_step_screenshot=resolve_path(args.upload_step_screenshot),
+        step_screenshot_dir=DEFAULT_STEP_SCREENSHOT_DIR,
         debug_screenshot=resolve_path(args.debug_screenshot),
         dry_run=bool(args.dry_run),
     )
@@ -159,7 +177,7 @@ def resolve_channels_assets(args: argparse.Namespace) -> WeixinChannelsPublishAs
     description_file = find_single_file(output_dir, WECHAT_DESCRIPTION_SUFFIX)
     title_text = read_utf8_text(title_file)
     description_body, topics_line = split_wechat_description_parts(read_utf8_text(description_file))
-    topic_tags = parse_topic_tags(topics_line)
+    topic_tags = _resolve_topic_tags(output_dir, topics_line)
 
     if not title_text:
         raise RuntimeError(f"标题为空：{title_file}")
