@@ -1,2 +1,13 @@
 
 {"timestamp": "2026-06-01 03:38:33", "region_code": "1", "region_label": "中华料理", "reference_dish": "酸菜鱼", "generated_dish_name": "酸煎鲈鱼", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-06-01 03:49:03", "region_code": "1", "region_label": "中华料理", "reference_dish": "干炸带鱼", "generated_dish_name": "豉香蒸小排", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-06-01 04:13:54", "region_code": "1", "region_label": "中华料理", "reference_dish": "清炖马蹄鳖", "generated_dish_name": "焖酿蹄花", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-06-01 04:25:18", "region_code": "1", "region_label": "中华料理", "reference_dish": "得莫利炖鱼", "generated_dish_name": "酱爆梅花肉", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-06-01 04:37:42", "region_code": "1", "region_label": "中华料理", "reference_dish": "红烧牛尾", "generated_dish_name": "香炒牛尾丁", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-06-01 04:53:25", "region_code": "1", "region_label": "中华料理", "reference_dish": "樱桃肉", "generated_dish_name": "蜜烤猪颈肉", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-06-01 05:47:40", "region_code": "1", "region_label": "中华料理", "reference_dish": "清蒸石斑鱼", "generated_dish_name": "香炸鸡块", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-06-01 06:02:20", "region_code": "1", "region_label": "中华料理", "reference_dish": "三套鸭", "generated_dish_name": "糟卤鸭掌", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-06-01 06:10:47", "region_code": "1", "region_label": "中华料理", "reference_dish": "南煎肝", "generated_dish_name": "蛏肉烩豆腐", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-06-02 03:08:09", "region_code": "1", "region_label": "中华料理", "reference_dish": "皮蛋瘦肉粥", "generated_dish_name": "山药皮蛋凝糕", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-06-02 16:01:26", "region_code": "1", "region_label": "中华料理", "reference_dish": "芸豆卷", "generated_dish_name": "芸豆软糕", "model": "doubao-seed-2-0-mini-260428"}
+{"timestamp": "2026-06-02 16:02:20", "region_code": "1", "region_label": "中华料理", "reference_dish": "麻婆豆腐", "generated_dish_name": "鲜辣浸蛏子", "model": "doubao-seed-2-0-mini-260428"}
