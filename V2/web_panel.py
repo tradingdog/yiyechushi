@@ -20,7 +20,8 @@ ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from main import run_v2_first_feature
+from main import run_v2_first_feature, resolve_workflow_mode
+from mode2_flow import run_v2_mode2
 from v2_core import (
     IDEA_FILE,
     OUTPUT_DIR,
@@ -38,7 +39,7 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.36"
+PANEL_VERSION = "v0.37"
 
 RUN_LOCK = threading.Lock()
 RUNNING = False
@@ -148,6 +149,10 @@ HTML_PAGE = """<!doctype html>
     .sec-title{margin:0 0 8px;font-size:14px;font-weight:700}
     .sec-desc{margin:0 0 8px;font-size:12px;color:var(--sub)}
     .mode{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .mode-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:stretch}
+    .mode2-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+    .mode2-item{border:1px solid #283449;border-radius:8px;padding:8px;background:#0f172a}
+    .mode2-item h4{margin:0 0 6px;font-size:12px;color:#cbd5e1}
     .mode button{
       width:100%;padding:10px;border:1px solid #3a475f;border-radius:9px;background:#111b2f;color:#dbe7ff;cursor:pointer;font-weight:700;
     }
@@ -313,9 +318,15 @@ HTML_PAGE = """<!doctype html>
       <aside class="panel panel-mid">
         <div class="section-card">
           <h3 class="sec-title">模式选择</h3>
-          <div class="mode">
-            <button id="modeAutoBtn" class="active" type="button">自动造菜</button>
-            <button id="modeFileBtn" type="button">手动点名</button>
+          <div class="mode-row">
+            <div class="mode">
+              <button id="modeAutoBtn" class="active" type="button">自动造菜</button>
+              <button id="modeFileBtn" type="button">手动点名</button>
+            </div>
+            <div class="mode">
+              <button id="workflowMode2Btn" class="active" type="button">模式2</button>
+              <button id="workflowMode1Btn" type="button">模式1</button>
+            </div>
           </div>
           <label style="margin-top:8px">手动菜名（仅手动点名生效）</label>
           <input id="dishName" placeholder="例如：蒜香煎嫩鸡胸肉" />
@@ -329,29 +340,62 @@ HTML_PAGE = """<!doctype html>
               <input id="temperature" type="number" step="0.1" min="0" max="1.5" />
               <input id="temperatureSlider" class="slider" type="range" min="0" max="15" step="1" />
             </div>
-            <div class="param-item">
-              <label>出图数量</label>
-              <input id="imageCount" type="number" step="1" min="1" max="4" />
-              <input id="imageCountSlider" class="slider" type="range" min="1" max="4" step="1" />
+          </div>
+          <div id="mode1Params">
+            <div class="param-grid" style="margin-top:8px">
+              <div class="param-item">
+                <label>主图数量</label>
+                <input id="imageCount" type="number" step="1" min="1" max="4" />
+                <input id="imageCountSlider" class="slider" type="range" min="1" max="4" step="1" />
+              </div>
+              <div class="param-item">
+                <label>主图画质</label>
+                <select id="imageQuality">
+                  <option value="low">标准清晰（省成本）</option>
+                  <option value="medium">中等清晰</option>
+                  <option value="high">高清细节（高质量）</option>
+                  <option value="auto">自动选择</option>
+                </select>
+                <input id="imageQualitySlider" class="slider" type="range" min="0" max="3" step="1" />
+              </div>
             </div>
-            <div class="param-item">
-              <label>画质档位</label>
-              <select id="imageQuality">
-                <option value="low">标准清晰（省成本）</option>
-                <option value="medium">中等清晰</option>
-                <option value="high">高清细节（高质量）</option>
-                <option value="auto">自动选择</option>
-              </select>
-              <input id="imageQualitySlider" class="slider" type="range" min="0" max="3" step="1" />
+            <div class="preset-row">
+              <button id="presetBudgetBtn" type="button">省成本模板</button>
+              <button id="presetQualityBtn" type="button">高质量模板</button>
             </div>
           </div>
-          <div class="preset-row">
-            <button id="presetBudgetBtn" type="button">省成本模板</button>
-            <button id="presetQualityBtn" type="button">高质量模板</button>
+          <div id="mode2Params" style="display:none">
+            <div class="sec-desc" style="margin-top:8px">模式2 四组图各自独立配置画质与数量。</div>
+            <div class="mode2-grid">
+              <div class="mode2-item">
+                <h4>海报图</h4>
+                <label>数量</label><input id="posterCount" type="number" min="1" max="4" step="1" />
+                <label style="margin-top:6px">画质</label>
+                <select id="posterQuality"><option value="low">标准</option><option value="medium">中等</option><option value="high">高清</option><option value="auto">自动</option></select>
+              </div>
+              <div class="mode2-item">
+                <h4>细节图</h4>
+                <label>数量</label><input id="detailCount" type="number" min="1" max="4" step="1" />
+                <label style="margin-top:6px">画质</label>
+                <select id="detailQuality"><option value="low">标准</option><option value="medium">中等</option><option value="high">高清</option><option value="auto">自动</option></select>
+              </div>
+              <div class="mode2-item">
+                <h4>菜谱图</h4>
+                <label>数量</label><input id="recipeCount" type="number" min="1" max="4" step="1" />
+                <label style="margin-top:6px">画质</label>
+                <select id="recipeQuality"><option value="low">标准</option><option value="medium">中等</option><option value="high">高清</option><option value="auto">自动</option></select>
+              </div>
+              <div class="mode2-item">
+                <h4>封面图</h4>
+                <label>数量</label><input id="coverMode2Count" type="number" min="1" max="4" step="1" />
+                <label style="margin-top:6px">画质</label>
+                <select id="coverMode2Quality"><option value="low">标准</option><option value="medium">中等</option><option value="high">高清</option><option value="auto">自动</option></select>
+              </div>
+            </div>
           </div>
         </div>
 
-        <div class="section-card">
+        <div id="mode1CoverCard" class="section-card">
           <h3 class="sec-title">封面参数</h3>
           <label>封面生成数量</label>
           <input id="coverCount" type="number" step="1" min="1" max="4" />
@@ -433,6 +477,7 @@ HTML_PAGE = """<!doctype html>
   <script>
     const state = {
       mode: "auto",
+      workflow: "mode2",
       galleryImages: [],
       galleryIndex: 0,
       currentImagePath: "",
@@ -478,6 +523,17 @@ HTML_PAGE = """<!doctype html>
       $("dishNotes").disabled = !manual;
       $("dishNotes").classList.toggle("input-disabled", !manual);
       $("notesCard").style.display = manual ? "block" : "none";
+    }
+
+    function setWorkflow(workflow){
+      state.workflow = workflow === "mode1" ? "mode1" : "mode2";
+      $("workflowMode2Btn").classList.toggle("active", state.workflow === "mode2");
+      $("workflowMode1Btn").classList.toggle("active", state.workflow === "mode1");
+      const mode2 = state.workflow === "mode2";
+      $("mode1Params").style.display = mode2 ? "none" : "block";
+      $("mode2Params").style.display = mode2 ? "block" : "none";
+      $("mode1CoverCard").style.display = mode2 ? "none" : "block";
+      $("regenBtn").style.display = mode2 ? "none" : "inline-block";
     }
 
     function setStatus(text, level=""){
@@ -716,26 +772,55 @@ HTML_PAGE = """<!doctype html>
 
     function renderResult(result){
       state.currentResult = result || null;
-      更新结果信息(
-        result?.dish_name,
-        result?.reference_dish,
-        result?.region_label,
-        result?.output_dir,
-        result?.primary_selected_image,
-        result?.cover_selected_image,
-        result?.primary_selection_mode,
-        result?.cover_selection_mode,
-        result?.photoshop_processed_files || [],
-        result?.photoshop_error || ""
-      );
-      const coverImages = result?.cover_saved_images || [];
-      renderGallery((result?.saved_images || []).concat(coverImages));
+      const isMode2 = result?.workflow_mode === "mode2";
+      if(isMode2){
+        const gallery = []
+          .concat(result?.poster_saved_images || [])
+          .concat(result?.detail_saved_images || [])
+          .concat(result?.recipe_saved_images || [])
+          .concat(result?.cover_saved_images || []);
+        renderGallery(gallery.length ? gallery : (result?.saved_images || []));
+        更新结果信息(
+          result?.dish_name,
+          result?.reference_dish,
+          result?.region_label,
+          result?.output_dir,
+          result?.poster_selected_image || result?.primary_selected_image,
+          (result?.cover_saved_images || [])[0] || "",
+          result?.poster_selection_mode || "",
+          "",
+          [],
+          ""
+        );
+        $("rPickMode").textContent = `流程：模式2 / 海报：${result?.poster_selection_mode || "未执行"}`;
+        $("rPsStatus").textContent = "模式2 不执行 PS 合成";
+      }else{
+        const coverImages = result?.cover_saved_images || [];
+        renderGallery((result?.saved_images || []).concat(coverImages));
+        更新结果信息(
+          result?.dish_name,
+          result?.reference_dish,
+          result?.region_label,
+          result?.output_dir,
+          result?.primary_selected_image,
+          result?.cover_selected_image,
+          result?.primary_selection_mode,
+          result?.cover_selection_mode,
+          result?.photoshop_processed_files || [],
+          result?.photoshop_error || ""
+        );
+      }
       const isRegen = result?.run_kind === "regenerate_image";
       const hasError = Boolean(result?.image_error || result?.cover_image_error);
       const errText = [result?.image_error, result?.cover_image_error].filter(Boolean).join("\\n");
-      const msg = hasError
-        ? ((isRegen ? "重新生图异常：\\n" : "生图异常：\\n") + errText)
-        : (isRegen ? "已按原提示词重新生图完成。" : "主图/封面流程已完成。");
+      let msg = "";
+      if(hasError){
+        msg = (isRegen ? "重新生图异常：\\n" : "生图异常：\\n") + errText;
+      }else if(isMode2){
+        msg = "模式2 四组图流程已完成。";
+      }else{
+        msg = isRegen ? "已按原提示词重新生图完成。" : "主图/封面流程已完成。";
+      }
       $("resultMsg").textContent = msg;
       $("resultMsg").className = "status " + (hasError ? "warn" : "ok");
     }
@@ -917,7 +1002,19 @@ HTML_PAGE = """<!doctype html>
       $("envQuality").textContent = `画质：${画质文案(data.config.OPENAI_IMAGE_QUALITY)}`;
       $("envCount").textContent = `出图数：${data.config.OPENAI_IMAGE_COUNT}`;
       $("envCoverCount").textContent = `封面数：${data.config.COVER_IMAGE_COUNT || "-"}`;
-      $("envMode").textContent = `模式：${data.config.AUTO_GENERATE_DISH_IDEA === "1" ? "自动造菜" : "手动点名"}`;
+      const wf = data.config.V2_WORKFLOW_MODE === "mode1" ? "模式1" : "模式2";
+      $("envMode").textContent = `${data.config.AUTO_GENERATE_DISH_IDEA === "1" ? "自动造菜" : "手动点名"} / ${wf}`;
+      setWorkflow(data.config.V2_WORKFLOW_MODE === "mode1" ? "mode1" : "mode2");
+      if(data.config.V2_WORKFLOW_MODE === "mode2"){
+        $("posterCount").value = data.config.MODE2_POSTER_IMAGE_COUNT || data.config.OPENAI_IMAGE_COUNT;
+        $("posterQuality").value = data.config.MODE2_POSTER_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
+        $("detailCount").value = data.config.MODE2_DETAIL_IMAGE_COUNT || "1";
+        $("detailQuality").value = data.config.MODE2_DETAIL_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
+        $("recipeCount").value = data.config.MODE2_RECIPE_IMAGE_COUNT || "1";
+        $("recipeQuality").value = data.config.MODE2_RECIPE_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
+        $("coverMode2Count").value = data.config.MODE2_COVER_IMAGE_COUNT || data.config.COVER_IMAGE_COUNT || "1";
+        $("coverMode2Quality").value = data.config.MODE2_COVER_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
+      }
       $("temperature").value = data.config.MODEL_TEMPERATURE;
       $("imageCount").value = data.config.OPENAI_IMAGE_COUNT;
       $("coverCount").value = data.config.COVER_IMAGE_COUNT || "1";
@@ -964,12 +1061,21 @@ HTML_PAGE = """<!doctype html>
           : {
               action: "run",
               mode: state.mode,
+              workflow: state.workflow,
               dish_name: $("dishName").value.trim(),
               notes: $("dishNotes").value.trim(),
               model_temperature: $("temperature").value.trim(),
               image_quality: $("imageQuality").value.trim(),
               image_count: $("imageCount").value.trim(),
-              cover_count: $("coverCount").value.trim()
+              cover_count: $("coverCount").value.trim(),
+              poster_quality: $("posterQuality").value.trim(),
+              poster_count: $("posterCount").value.trim(),
+              detail_quality: $("detailQuality").value.trim(),
+              detail_count: $("detailCount").value.trim(),
+              recipe_quality: $("recipeQuality").value.trim(),
+              recipe_count: $("recipeCount").value.trim(),
+              cover_mode2_quality: $("coverMode2Quality").value.trim(),
+              cover_mode2_count: $("coverMode2Count").value.trim()
             };
         const res = await fetch("/api/run_start", {
           method:"POST",
@@ -1044,6 +1150,8 @@ HTML_PAGE = """<!doctype html>
     function bindEvents(){
       $("modeAutoBtn").onclick = () => setMode("auto");
       $("modeFileBtn").onclick = () => setMode("file");
+      $("workflowMode2Btn").onclick = () => setWorkflow("mode2");
+      $("workflowMode1Btn").onclick = () => setWorkflow("mode1");
       $("runBtn").onclick = runNow;
       $("regenBtn").onclick = () => runNow({regenerateOnly: true});
       $("presetBudgetBtn").onclick = () => applyPreset("budget");
@@ -1081,6 +1189,7 @@ HTML_PAGE = """<!doctype html>
 
     bindEvents();
     绑定参数滑块();
+    setWorkflow("mode2");
     加载三栏宽度();
     初始化拖拽分栏();
     loadState();
@@ -1317,11 +1426,20 @@ def current_config_snapshot() -> dict[str, str]:
     ensure_runtime_config_loaded()
     return {
         "AUTO_GENERATE_DISH_IDEA": os.getenv("AUTO_GENERATE_DISH_IDEA", "0").strip() or "0",
+        "V2_WORKFLOW_MODE": resolve_workflow_mode(os.getenv("V2_WORKFLOW_MODE")),
         "MODEL_TEMPERATURE": os.getenv("MODEL_TEMPERATURE", "0.3").strip() or "0.3",
         "OPENAI_IMAGE_MODEL": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2").strip() or "gpt-image-2",
         "OPENAI_IMAGE_QUALITY": os.getenv("OPENAI_IMAGE_QUALITY", "low").strip() or "low",
         "OPENAI_IMAGE_COUNT": os.getenv("OPENAI_IMAGE_COUNT", "1").strip() or "1",
         "COVER_IMAGE_COUNT": str(get_cover_image_count()),
+        "MODE2_POSTER_IMAGE_QUALITY": os.getenv("MODE2_POSTER_IMAGE_QUALITY", "").strip(),
+        "MODE2_POSTER_IMAGE_COUNT": os.getenv("MODE2_POSTER_IMAGE_COUNT", "").strip(),
+        "MODE2_DETAIL_IMAGE_QUALITY": os.getenv("MODE2_DETAIL_IMAGE_QUALITY", "").strip(),
+        "MODE2_DETAIL_IMAGE_COUNT": os.getenv("MODE2_DETAIL_IMAGE_COUNT", "").strip(),
+        "MODE2_RECIPE_IMAGE_QUALITY": os.getenv("MODE2_RECIPE_IMAGE_QUALITY", "").strip(),
+        "MODE2_RECIPE_IMAGE_COUNT": os.getenv("MODE2_RECIPE_IMAGE_COUNT", "").strip(),
+        "MODE2_COVER_IMAGE_QUALITY": os.getenv("MODE2_COVER_IMAGE_QUALITY", "").strip(),
+        "MODE2_COVER_IMAGE_COUNT": os.getenv("MODE2_COVER_IMAGE_COUNT", "").strip(),
     }
 
 
@@ -1329,6 +1447,9 @@ def apply_runtime_overrides(payload: dict[str, Any]) -> None:
     mode = str(payload.get("mode", "")).strip().lower()
     if mode in {"auto", "file"}:
         os.environ["AUTO_GENERATE_DISH_IDEA"] = "1" if mode == "auto" else "0"
+    workflow = str(payload.get("workflow", "")).strip().lower()
+    if workflow in {"mode1", "mode2"}:
+        os.environ["V2_WORKFLOW_MODE"] = workflow
     if str(payload.get("model_temperature", "")).strip():
         os.environ["MODEL_TEMPERATURE"] = str(payload["model_temperature"]).strip()
     if str(payload.get("image_quality", "")).strip():
@@ -1337,6 +1458,21 @@ def apply_runtime_overrides(payload: dict[str, Any]) -> None:
         os.environ["OPENAI_IMAGE_COUNT"] = str(payload["image_count"]).strip()
     if str(payload.get("cover_count", "")).strip():
         os.environ["COVER_IMAGE_COUNT"] = str(payload["cover_count"]).strip()
+
+    mode2_pairs = (
+        ("poster", "poster_quality", "poster_count"),
+        ("detail", "detail_quality", "detail_count"),
+        ("recipe", "recipe_quality", "recipe_count"),
+        ("cover", "cover_mode2_quality", "cover_mode2_count"),
+    )
+    for group, quality_key, count_key in mode2_pairs:
+        quality_value = str(payload.get(quality_key, "")).strip()
+        count_value = str(payload.get(count_key, "")).strip()
+        prefix = group.upper()
+        if quality_value:
+            os.environ[f"MODE2_{prefix}_IMAGE_QUALITY"] = quality_value
+        if count_value:
+            os.environ[f"MODE2_{prefix}_IMAGE_COUNT"] = count_value
 
 
 def resolve_output_path(raw_path: str) -> Path:
@@ -1382,12 +1518,14 @@ def run_task_worker(task: dict[str, Any]) -> None:
     stream = LiveLogWriter()
     action = str(task.get("action", "run")).strip().lower() or "run"
     mode = str(task.get("mode", "")).strip().lower()
+    workflow = str(task.get("workflow", "")).strip().lower()
     dish_name = str(task.get("dish_name", "")).strip()
     source_output_dir = str(task.get("source_output_dir", "")).strip()
     append_run_log(
         f"[{time.strftime('%H:%M:%S')}] 开始任务 #{task.get('task_id', '-')}"
         f"（类型：{'重新生图' if action == 'regenerate_image' else '正常生成'}，"
-        f"模式：{mode or '按配置'}，菜名：{dish_name or '自动生成'}）"
+        f"造菜：{mode or '按配置'}，流程：{workflow or resolve_workflow_mode(None)}，"
+        f"菜名：{dish_name or '自动生成'}）"
     )
     try:
         with redirect_stdout(stream), redirect_stderr(stream):
@@ -1398,7 +1536,11 @@ def run_task_worker(task: dict[str, Any]) -> None:
             else:
                 if mode == "file":
                     write_idea_file(str(task.get("dish_name", "")).strip(), str(task.get("notes", "")).strip())
-                result = run_v2_first_feature(mode=mode if mode in {"auto", "file"} else None)
+                active_workflow = resolve_workflow_mode(workflow or None)
+                if active_workflow == "mode2":
+                    result = run_v2_mode2(mode=mode if mode in {"auto", "file"} else None)
+                else:
+                    result = run_v2_first_feature(mode=mode if mode in {"auto", "file"} else None)
         with RUN_LOCK:
             LAST_RESULT = result
             LAST_ERROR = ""
@@ -1579,6 +1721,15 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 "image_quality": str(payload.get("image_quality", "")).strip(),
                 "image_count": str(payload.get("image_count", "")).strip(),
                 "cover_count": str(payload.get("cover_count", "")).strip(),
+                "workflow": str(payload.get("workflow", "")).strip().lower(),
+                "poster_quality": str(payload.get("poster_quality", "")).strip(),
+                "poster_count": str(payload.get("poster_count", "")).strip(),
+                "detail_quality": str(payload.get("detail_quality", "")).strip(),
+                "detail_count": str(payload.get("detail_count", "")).strip(),
+                "recipe_quality": str(payload.get("recipe_quality", "")).strip(),
+                "recipe_count": str(payload.get("recipe_count", "")).strip(),
+                "cover_mode2_quality": str(payload.get("cover_mode2_quality", "")).strip(),
+                "cover_mode2_count": str(payload.get("cover_mode2_count", "")).strip(),
                 "source_output_dir": str(source_dir) if action == "regenerate_image" else "",
                 "queued_at": time.time(),
             }

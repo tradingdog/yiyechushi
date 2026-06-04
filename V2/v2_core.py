@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
 import os
 import re
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +29,12 @@ CONFIG_FILE = ROOT_DIR / "config.env"
 IDEA_FILE = ROOT_DIR / "dish_name.txt"
 REFERENCE_FILE = ROOT_DIR / "cankao.txt"
 COVER_TEMPLATE_FILE = ROOT_DIR / "cover_promtp_cankao.txt"
+CANKAO_DIR = ROOT_DIR / "cankao"
+HAIBAO_TEMPLATE_FILE = CANKAO_DIR / "haibao.txt"
+XIJIETU_TEMPLATE_FILE = CANKAO_DIR / "xijietu.txt"
+CAIPU_TEMPLATE_FILE = CANKAO_DIR / "caipu.txt"
+FENGMIAN_TEMPLATE_FILE = CANKAO_DIR / "fengmian.txt"
+CHARACTER_REFERENCE_FILE = CANKAO_DIR / "juese.png"
 OUTPUT_DIR = ROOT_DIR / "output"
 
 DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
@@ -41,6 +49,8 @@ DEFAULT_CONTENT_TRACK = "电饭煲一锅出"
 
 _RUNTIME_CONFIG_LOADED = False
 TEMPLATE_PLACEHOLDER_PATTERN = re.compile(r"\{变量(?:[：:,，][^{}]*)?\}")
+CANKAO_PLACEHOLDER_PATTERN = re.compile(r"\{[^{}]+\}")
+MODE2_GROUP_KEYS = ("poster", "detail", "recipe", "cover")
 STEP_PREFIX_PATTERN = re.compile(r"^\s*(?:第?\s*\d+\s*[步段]|步骤\s*\d+|step\s*\d+)\s*[:：、.．-]?\s*", re.IGNORECASE)
 META_COPY_PATTERN = re.compile(
     r"(图解教程|图解\s*\d+\s*/\s*\d+|步骤与转化页|教程页|转化页|第\s*[一二三123]\s*张|第\s*[一二三123]\s*步)",
@@ -329,6 +339,59 @@ def load_cover_template(template_file: Path = COVER_TEMPLATE_FILE) -> str:
     return template
 
 
+def load_cankao_group_template(template_file: Path) -> str:
+    if not template_file.exists():
+        raise FileNotFoundError(f"未找到模式2模板：{template_file}")
+    template = template_file.read_text(encoding="utf-8").strip()
+    if not template:
+        raise ValueError(f"模式2模板为空：{template_file}")
+    return template
+
+
+def collect_cankao_placeholders(template_text: str) -> list[str]:
+    placeholders: list[str] = []
+    for match in CANKAO_PLACEHOLDER_PATTERN.finditer(template_text):
+        placeholders.append(match.group(0))
+    return placeholders
+
+
+def render_cankao_template_by_replacements(template_text: str, replacements: list[str]) -> str:
+    replaced_count = 0
+
+    def _replace(match: re.Match[str]) -> str:
+        nonlocal replaced_count
+        if replaced_count >= len(replacements):
+            raise ValueError("变量替换数量不足，无法覆盖模板中的所有变量位。")
+        value = str(replacements[replaced_count]).strip()
+        replaced_count += 1
+        if not value:
+            raise ValueError("变量替换值不能为空。")
+        return value
+
+    rendered = CANKAO_PLACEHOLDER_PATTERN.sub(_replace, template_text)
+    if replaced_count != len(replacements):
+        raise ValueError("变量替换数量超出模板需求。")
+    if CANKAO_PLACEHOLDER_PATTERN.search(rendered):
+        raise ValueError("模板仍存在未替换的变量占位符。")
+    return rendered.strip()
+
+
+def encode_image_as_data_url(image_path: Path) -> str:
+    mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
+    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def move_image_to_publish(source_image_path: str | Path, publish_dir: Path) -> str:
+    source = Path(source_image_path)
+    publish_dir.mkdir(parents=True, exist_ok=True)
+    target = publish_dir / source.name
+    if target.exists():
+        target.unlink()
+    shutil.move(str(source), str(target))
+    return str(target)
+
+
 def collect_template_placeholders(template_text: str) -> list[str]:
     placeholders: list[str] = []
     for match in TEMPLATE_PLACEHOLDER_PATTERN.finditer(template_text):
@@ -459,6 +522,318 @@ def generate_doubao_prompt_by_template(
 
     prompt_text = render_template_by_replacements(template_text=template_text, replacements=replacements)
     return {"model": model, "prompt": prompt_text}
+
+
+def generate_cankao_prompt_by_template(
+    client: OpenAI,
+    dish_name: str,
+    notes: str,
+    template_text: str,
+) -> dict[str, str]:
+    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    temperature = get_text_temperature()
+    placeholders = collect_cankao_placeholders(template_text)
+    if not placeholders:
+        return {"model": model, "prompt": template_text.strip()}
+
+    system_prompt = """
+你是菜谱视觉策划总监。你的任务是只为模板里的变量位提供替换值。
+强制要求：
+1) 你不能改写模板任何固定文本，只输出变量替换值。
+2) 你必须按“变量位从上到下顺序”给出 replacement 数组。
+3) replacement 数组长度必须与变量位数量完全一致。
+4) 输出 JSON：{"replacements":["值1","值2",...]}，不要输出其它内容。
+5) 每个变量位形如 {标签，示例}，请结合菜名与补充说明生成贴合该菜的替换值，不要照抄示例。
+""".strip()
+
+    placeholder_lines = "\n".join(f"{index + 1}. {placeholder}" for index, placeholder in enumerate(placeholders))
+    user_prompt = f"""
+菜名：{dish_name}
+补充说明：{notes or "无"}
+
+模板如下：
+{template_text}
+
+变量位清单（按顺序）：
+{placeholder_lines}
+
+请只返回 replacements JSON。
+""".strip()
+
+    max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
+    response = None
+    last_error: Exception | None = None
+    for _ in range(max_retry):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=2200,
+                temperature=temperature,
+            )
+            break
+        except Exception as exc:
+            last_error = exc
+    if response is None:
+        raise RuntimeError(f"豆包模板改写失败：{last_error}")
+
+    raw_text = extract_chat_text_output(response).strip()
+    if not raw_text:
+        raise ValueError("豆包未返回有效内容。")
+    payload = extract_json_object_from_text(raw_text)
+    replacements_raw = payload.get("replacements")
+    if not isinstance(replacements_raw, list):
+        raise ValueError("豆包返回 JSON 缺少 replacements 数组。")
+    replacements = [str(item).strip() for item in replacements_raw]
+    if len(replacements) != len(placeholders):
+        raise ValueError(f"变量替换数量不匹配：需要 {len(placeholders)} 个，实际 {len(replacements)} 个。")
+
+    prompt_text = render_cankao_template_by_replacements(template_text=template_text, replacements=replacements)
+    return {"model": model, "prompt": prompt_text}
+
+
+def generate_cankao_prompt_with_images(
+    client: OpenAI,
+    dish_name: str,
+    notes: str,
+    template_text: str,
+    image_paths: list[Path],
+    *,
+    bubble_text: str = "",
+    stage_name: str = "模式2多模态模板",
+) -> dict[str, str]:
+    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    temperature = get_text_temperature()
+    placeholders = collect_cankao_placeholders(template_text)
+    if not placeholders:
+        return {"model": model, "prompt": template_text.strip()}
+
+    system_prompt = """
+你是抖音美食图文视觉策划。请结合参考图片，只为模板变量位提供替换值。
+要求：
+1) 不得改写模板固定文本，只输出 replacements 数组。
+2) replacements 顺序必须与变量位从上到下完全一致。
+3) 只输出 JSON：{"replacements":["值1","值2",...]}。
+4) 变量位含“海报图”时，用一句话描述参考海报中的菜品视觉，不要写“见上图”。
+5) 变量位含“豆包生成的气泡话语”时，必须使用用户提供的已定稿气泡文案。
+""".strip()
+
+    placeholder_lines = "\n".join(f"{index + 1}. {placeholder}" for index, placeholder in enumerate(placeholders))
+    bubble_block = f"\n已定稿气泡文案：{bubble_text}" if bubble_text.strip() else ""
+    user_prompt = f"""
+菜名：{dish_name}
+补充说明：{notes or "无"}{bubble_block}
+
+模板如下：
+{template_text}
+
+变量位清单（按顺序）：
+{placeholder_lines}
+
+请只返回 replacements JSON。
+""".strip()
+
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+    for image_path in image_paths:
+        if not image_path.exists():
+            raise FileNotFoundError(f"参考图不存在：{image_path}")
+        user_content.append({"type": "text", "text": f"参考图：{image_path.name}"})
+        user_content.append({"type": "image_url", "image_url": {"url": encode_image_as_data_url(image_path)}})
+
+    max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
+    response = None
+    last_error: Exception | None = None
+    for _ in range(max_retry):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                max_tokens=2600,
+                temperature=temperature,
+            )
+            break
+        except Exception as exc:
+            last_error = exc
+    if response is None:
+        raise RuntimeError(f"{stage_name}失败：{last_error}")
+
+    raw_text = extract_chat_text_output(response).strip()
+    if not raw_text:
+        raise ValueError(f"{stage_name}未返回有效内容。")
+    payload = extract_json_object_from_text(raw_text)
+    replacements_raw = payload.get("replacements")
+    if not isinstance(replacements_raw, list):
+        raise ValueError(f"{stage_name}返回 JSON 缺少 replacements 数组。")
+    replacements = [str(item).strip() for item in replacements_raw]
+    if len(replacements) != len(placeholders):
+        raise ValueError(f"{stage_name}变量替换数量不匹配：需要 {len(placeholders)} 个，实际 {len(replacements)} 个。")
+
+    for index, placeholder in enumerate(placeholders):
+        if "豆包生成的气泡话语" in placeholder and bubble_text.strip():
+            replacements[index] = bubble_text.strip()
+
+    prompt_text = render_cankao_template_by_replacements(template_text=template_text, replacements=replacements)
+    return {"model": model, "prompt": prompt_text}
+
+
+def generate_poster_bubble_copy(client: OpenAI, poster_image_path: Path) -> dict[str, str]:
+    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    temperature = get_text_temperature()
+    if not poster_image_path.exists():
+        raise FileNotFoundError(f"海报图不存在：{poster_image_path}")
+
+    user_content: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "为这个菜写角色的气泡框的话语，让抖音用户一看就有食欲！只输出气泡内文案，不要解释、不要加引号外的说明。",
+        },
+        {"type": "image_url", "image_url": {"url": encode_image_as_data_url(poster_image_path)}},
+    ]
+    max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
+    response = None
+    last_error: Exception | None = None
+    for _ in range(max_retry):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": user_content}],
+                max_tokens=300,
+                temperature=temperature,
+            )
+            break
+        except Exception as exc:
+            last_error = exc
+    if response is None:
+        raise RuntimeError(f"气泡文案生成失败：{last_error}")
+
+    content = extract_chat_text_output(response).strip()
+    if not content:
+        raise ValueError("豆包未返回有效气泡文案。")
+    return {"model": model, "content": content}
+
+
+def select_douyin_poster_image(client: OpenAI, image_paths: list[Path]) -> dict[str, Any]:
+    if not image_paths:
+        raise ValueError("没有可筛选的海报候选图。")
+    if len(image_paths) == 1:
+        only_path = image_paths[0]
+        return {
+            "auto_selected": True,
+            "winner_index": 1,
+            "winner_image_name": only_path.name,
+            "winner_reason": "仅 1 张候选，直接入 publish。",
+        }
+
+    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    user_content: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": (
+                "选出最适合在抖音发布的图文海报。"
+                "只输出 JSON：{\"winner_index\": 1, \"winner_reason\": \"一句话理由\"}，"
+                "winner_index 从 1 开始，对应下面候选顺序。"
+            ),
+        }
+    ]
+    for index, image_path in enumerate(image_paths, start=1):
+        user_content.append({"type": "text", "text": f"候选{index}：{image_path.name}"})
+        user_content.append({"type": "image_url", "image_url": {"url": encode_image_as_data_url(image_path)}})
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": user_content}],
+        max_tokens=400,
+        temperature=0,
+    )
+    raw_text = extract_chat_text_output(response).strip()
+    if not raw_text:
+        raise ValueError("豆包未返回海报筛选结果。")
+    payload = extract_json_object_from_text(raw_text)
+    winner_index = int(payload.get("winner_index", 1))
+    if winner_index < 1 or winner_index > len(image_paths):
+        winner_index = 1
+    winner_path = image_paths[winner_index - 1]
+    return {
+        "auto_selected": False,
+        "winner_index": winner_index,
+        "winner_image_name": winner_path.name,
+        "winner_reason": str(payload.get("winner_reason", "")).strip() or "豆包已选出抖音图文海报。",
+    }
+
+
+def get_mode2_group_settings(group: str) -> dict[str, Any]:
+    if group not in MODE2_GROUP_KEYS:
+        raise ValueError(f"未知模式2分组：{group}")
+    ensure_runtime_config_loaded()
+    prefix = group.upper()
+    quality = (
+        os.getenv(f"MODE2_{prefix}_IMAGE_QUALITY", "").strip()
+        or os.getenv("OPENAI_IMAGE_QUALITY", DEFAULT_IMAGE_QUALITY).strip()
+        or DEFAULT_IMAGE_QUALITY
+    )
+    count_env = f"MODE2_{prefix}_IMAGE_COUNT"
+    default_count = parse_int_env("OPENAI_IMAGE_COUNT", DEFAULT_IMAGE_COUNT)
+    raw_count = os.getenv(count_env, "").strip()
+    image_count = parse_int_env(count_env, default_count) if raw_count else default_count
+    base = get_image_settings()
+    return {
+        "model": base["model"],
+        "size": base["size"],
+        "quality": quality,
+        "image_count": image_count,
+    }
+
+
+def generate_images_from_references(
+    client: OpenAI,
+    prompt_text: str,
+    reference_paths: list[str | Path],
+    settings: dict[str, Any],
+) -> list[dict[str, str]]:
+    valid_paths = [Path(path) for path in reference_paths if str(path).strip() and Path(path).exists()]
+    if not valid_paths:
+        return generate_images_by_prompt(client=client, prompt_text=prompt_text, settings=settings)
+
+    max_retry = parse_int_env("IMAGE_REQUEST_RETRY_COUNT", 2)
+    request_timeout = parse_float_env("OPENAI_IMAGE_REQUEST_TIMEOUT_SECONDS", 900.0)
+    response = None
+    opened_files: list[Any] = []
+    try:
+        for path in valid_paths:
+            opened_files.append(open(path, "rb"))
+        image_arg: Any = opened_files[0] if len(opened_files) == 1 else opened_files
+        for attempt in range(1, max_retry + 1):
+            try:
+                response = client.images.edit(
+                    model=settings["model"],
+                    image=image_arg,
+                    prompt=prompt_text,
+                    size=settings["size"],
+                    quality=settings["quality"],
+                    n=settings["image_count"],
+                    timeout=request_timeout,
+                )
+                break
+            except Exception as exc:
+                if attempt >= max_retry or not is_timeout_error(exc):
+                    raise RuntimeError(f"参考图生图失败：{exc}") from exc
+                print(f"参考图生图超时，正在重试第 {attempt + 1}/{max_retry} 次...")
+    finally:
+        for file_obj in opened_files:
+            file_obj.close()
+
+    if response is None:
+        raise RuntimeError("参考图生图失败：接口未返回有效响应。")
+    image_items = extract_image_items(response)
+    if not image_items:
+        raise RuntimeError("参考图生图失败：接口未返回有效图片数据。")
+    return image_items
 
 
 def render_prompt_fallback(template_text: str, dish_name: str, notes: str) -> str:
@@ -765,15 +1140,18 @@ def save_generated_images(
     output_dir: Path,
     timestamp: str,
     dish_name: str,
+    *,
+    name_suffix: str = "",
 ) -> list[str]:
     safe_name = sanitize_file_name(dish_name)
+    suffix_part = f"_{sanitize_file_name(name_suffix)}" if name_suffix.strip() else ""
     saved_files: list[str] = []
     for index, item in enumerate(image_items, start=1):
-        image_file = output_dir / f"{timestamp}_{safe_name}_{index:02d}.png"
+        image_file = output_dir / f"{timestamp}_{safe_name}{suffix_part}_{index:02d}.png"
         image_file.write_bytes(base64.b64decode(item["image_base64"]))
         saved_files.append(str(image_file))
         revised_prompt = item["revised_prompt"].strip()
         if revised_prompt:
-            revised_file = output_dir / f"{timestamp}_{safe_name}_{index:02d}_revised_prompt.txt"
+            revised_file = output_dir / f"{timestamp}_{safe_name}{suffix_part}_{index:02d}_revised_prompt.txt"
             save_text_output(revised_prompt, revised_file)
     return saved_files

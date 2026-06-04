@@ -39,6 +39,7 @@ from v2_core import (
 
 from tools.select_publish_images import select_publish_images
 from tools.apply_photoshop_template_batch import apply_photoshop_template_batch_to_dir
+from mode2_flow import run_v2_mode2
 
 
 def resolve_auto_generate_enabled(mode: str | None) -> bool:
@@ -430,17 +431,36 @@ def run_v2_first_feature(mode: str | None = None) -> dict[str, object]:
     }
 
 
+def resolve_workflow_mode(workflow: str | None) -> str:
+    raw = (workflow or os.getenv("V2_WORKFLOW_MODE", "mode2")).strip().lower()
+    if raw in {"mode1", "1", "first"}:
+        return "mode1"
+    return "mode2"
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="V2 首功能：自动/手动菜名 -> 模板重写 -> gpt-image-2 生图")
+    parser = argparse.ArgumentParser(description="V2：自动/手动造菜 -> 豆包模板 -> gpt-image-2 生图")
     parser.add_argument("--mode", choices=["auto", "file"], default=None, help="auto 自动造菜；file 读取 V2/dish_name.txt")
+    parser.add_argument(
+        "--workflow",
+        choices=["mode1", "mode2"],
+        default=None,
+        help="mode1 主图+封面；mode2 海报/细节/菜谱/封面四组图（默认 mode2）",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    print("开始执行 V2 第一个功能：自动/手动造菜 -> 豆包生成提示词 -> gpt-image-2 生图")
+    workflow = resolve_workflow_mode(args.workflow)
+    if workflow == "mode2":
+        print("开始执行 V2 模式2：海报 -> 细节图 -> 菜谱图 -> 封面图")
+        runner = run_v2_mode2
+    else:
+        print("开始执行 V2 模式1：自动/手动造菜 -> 豆包生成提示词 -> gpt-image-2 生图")
+        runner = run_v2_first_feature
     try:
-        result = run_v2_first_feature(mode=args.mode)
+        result = runner(mode=args.mode)
     except Exception as exc:
         print(f"运行失败：{exc}")
         return 1
