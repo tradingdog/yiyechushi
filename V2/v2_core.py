@@ -693,43 +693,92 @@ def generate_cankao_prompt_with_images(
     return {"model": model, "prompt": prompt_text}
 
 
-def generate_poster_bubble_copy(client: OpenAI, poster_image_path: Path) -> dict[str, str]:
+BUBBLE_COPY_MIN_CHARS = 5
+BUBBLE_COPY_MAX_CHARS = 12
+
+
+def normalize_bubble_copy_text(raw_text: str) -> str:
+    text = raw_text.strip()
+    text = re.sub(r"^[「『\"'“”]+", "", text)
+    text = re.sub(r"[」』\"'“”]+$", "", text)
+    text = re.sub(r"\s+", "", text)
+    return text.strip("，。！？!?.、；;：:")
+
+
+def count_bubble_copy_chars(text: str) -> int:
+    return len(re.findall(r"[\u4e00-\u9fff]", text))
+
+
+def validate_bubble_copy_text(text: str) -> str:
+    normalized = normalize_bubble_copy_text(text)
+    if not normalized:
+        raise ValueError("气泡文案为空。")
+    char_count = count_bubble_copy_chars(normalized)
+    if char_count < BUBBLE_COPY_MIN_CHARS or char_count > BUBBLE_COPY_MAX_CHARS:
+        raise ValueError(
+            f"气泡文案必须为 {BUBBLE_COPY_MIN_CHARS} 到 {BUBBLE_COPY_MAX_CHARS} 个汉字，"
+            f"当前为 {char_count} 个：{normalized}"
+        )
+    if not re.search(r"[\u4e00-\u9fff]", normalized):
+        raise ValueError("气泡文案必须包含汉字。")
+    return normalized
+
+
+def build_bubble_copy_prompt(*, dish_name: str, retry_feedback: str = "") -> str:
+    dish_line = f"菜名：{dish_name.strip()}\n" if dish_name.strip() else ""
+    feedback_block = f"\n上次不合格原因：{retry_feedback}\n请重写。" if retry_feedback.strip() else ""
+    return f"""{dish_line}请根据参考海报，用「我」的第一人称，只写这道菜入口时的口感与食欲感（如香、嫩、脆、爆汁、入味），让抖音用户立刻想吃。
+硬性要求：
+1) 只输出气泡里要说的一句话，不要标题、不要解释、不要 emoji、不要引号。
+2) 全句仅 {BUBBLE_COPY_MIN_CHARS} 到 {BUBBLE_COPY_MAX_CHARS} 个汉字（标点不计入字数）。
+3) 禁止菜名、禁止“关注/收藏/教程”等引导语，禁止堆砌多个卖点。
+4) 语气口语、有画面感，像刚尝一口忍不住感叹。
+示例（仅示意长度与口吻）：外脆里嫩爆汁！ / 一口香到上头！{feedback_block}"""
+
+
+def generate_poster_bubble_copy(
+    client: OpenAI,
+    poster_image_path: Path,
+    *,
+    dish_name: str = "",
+) -> dict[str, str]:
     model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
     temperature = get_text_temperature()
     if not poster_image_path.exists():
         raise FileNotFoundError(f"海报图不存在：{poster_image_path}")
 
-    user_content: list[dict[str, Any]] = [
-        {
-            "type": "text",
-            "text": (
-                "请根据参考海报中的菜品，用角色第一人称的口吻写一条气泡框内文案，"
-                "让抖音用户一看就有食欲！只输出气泡内要说的话，不要解释、不要加引号外的说明。"
-            ),
-        },
-        {"type": "image_url", "image_url": {"url": encode_image_as_data_url(poster_image_path)}},
-    ]
     max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
-    response = None
-    last_error: Exception | None = None
-    for _ in range(max_retry):
+    last_error = ""
+    last_model = model
+    for attempt in range(1, max_retry + 1):
+        retry_feedback = last_error if attempt > 1 else ""
+        user_content: list[dict[str, Any]] = [
+            {"type": "text", "text": build_bubble_copy_prompt(dish_name=dish_name, retry_feedback=retry_feedback)},
+            {"type": "image_url", "image_url": {"url": encode_image_as_data_url(poster_image_path)}},
+        ]
         try:
             response = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": user_content}],
-                max_tokens=300,
+                max_tokens=80,
                 temperature=temperature,
             )
-            break
+            last_model = model
         except Exception as exc:
-            last_error = exc
-    if response is None:
-        raise RuntimeError(f"气泡文案生成失败：{last_error}")
+            last_error = str(exc)
+            continue
 
-    content = extract_chat_text_output(response).strip()
-    if not content:
-        raise ValueError("豆包未返回有效气泡文案。")
-    return {"model": model, "content": content}
+        raw_content = extract_chat_text_output(response).strip()
+        if not raw_content:
+            last_error = "豆包未返回有效气泡文案。"
+            continue
+        try:
+            content = validate_bubble_copy_text(raw_content)
+            return {"model": last_model, "content": content}
+        except ValueError as exc:
+            last_error = str(exc)
+
+    raise RuntimeError(f"气泡文案生成失败：{last_error or '多次输出字数不合规。'}")
 
 
 def select_douyin_publish_image(

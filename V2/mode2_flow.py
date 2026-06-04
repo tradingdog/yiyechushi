@@ -225,7 +225,7 @@ def run_v2_mode2(mode: str | None = None) -> dict[str, object]:
 
         # 2A) 气泡文案
         try:
-            bubble_result = generate_poster_bubble_copy(doubao_client, poster_path)
+            bubble_result = generate_poster_bubble_copy(doubao_client, poster_path, dish_name=dish_name)
             bubble_path = run_output_dir / f"{dish_name}_气泡文案.txt"
             save_text_output(bubble_result["content"], bubble_path)
             bubble_text_file = str(bubble_path)
