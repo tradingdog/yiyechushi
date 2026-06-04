@@ -142,7 +142,13 @@ def main() -> int:
         print("已清空并聚焦作品描述输入框。")
 
         settings = build_test_settings(args)
-        paste_topic_tags_via_clipboard(page, editor, topic_tags, settings)
+        paste_topic_tags_via_clipboard(
+            page,
+            editor,
+            topic_tags,
+            after_paste_wait_ms=settings.after_topic_paste_wait_ms,
+            between_topics_wait_ms=settings.between_topics_wait_ms,
+        )
 
         page.wait_for_timeout(1_500)
         html = editor.evaluate("el => el.innerHTML")

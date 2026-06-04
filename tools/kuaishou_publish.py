@@ -488,7 +488,10 @@ def paste_topic_tags_via_clipboard(
     page: Page,
     editor: Locator,
     topic_tags: Sequence[str],
-    settings: KuaishouPublishSettings,
+    *,
+    after_paste_wait_ms: int,
+    between_topics_wait_ms: int,
+    platform_label: str = "快手",
 ) -> None:
     """逐个复制话题到剪贴板后 Ctrl+V 粘贴；第 2 个起先按空格再粘贴。"""
     if not topic_tags:
@@ -506,10 +509,10 @@ def paste_topic_tags_via_clipboard(
             pyautogui.press("space")
             time.sleep(0.1)
         pyautogui.hotkey("ctrl", "v")
-        page.wait_for_timeout(settings.after_topic_paste_wait_ms)
-        print(f"已粘贴快手话题（{'首项' if index == 0 else '空格后'}）：{tag}")
+        page.wait_for_timeout(max(0, after_paste_wait_ms))
+        print(f"已粘贴{platform_label}话题（{'首项' if index == 0 else '空格后'}）：{tag}")
         if index < len(topic_tags) - 1:
-            page.wait_for_timeout(settings.between_topics_wait_ms)
+            page.wait_for_timeout(max(0, between_topics_wait_ms))
 
 
 def fill_work_description(page: Page, assets: KuaishouPublishAssets, settings: KuaishouPublishSettings) -> None:
@@ -534,7 +537,13 @@ def fill_work_description(page: Page, assets: KuaishouPublishAssets, settings: K
 
     editor.click()
     page.wait_for_timeout(200)
-    paste_topic_tags_via_clipboard(page, editor, assets.topic_tags, settings)
+    paste_topic_tags_via_clipboard(
+        page,
+        editor,
+        assets.topic_tags,
+        after_paste_wait_ms=settings.after_topic_paste_wait_ms,
+        between_topics_wait_ms=settings.between_topics_wait_ms,
+    )
     print(f"已用剪贴板粘贴快手 {len(assets.topic_tags)} 个话题（Ctrl+V，第 2 个起先空格）。")
 
 
