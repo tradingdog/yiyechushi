@@ -40,7 +40,7 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.65"
+PANEL_VERSION = "v0.66"
 REPO_ROOT = ROOT_DIR.parent
 
 PUBLISH_PLATFORMS: dict[str, dict[str, str]] = {
@@ -1366,8 +1366,9 @@ HTML_PAGE = """<!doctype html>
         .concat(result?.recipe_saved_images || [])
         .concat(result?.cover_saved_images || []);
       const allImages = gallery.length ? gallery : (result?.saved_images || []);
-      const publishImages = (result?.publish_final_images || []).filter(Boolean);
-      setGallerySource(allImages, publishImages.length ? publishImages : allImages.filter((p) => /[\\\\/]publish[\\\\/]final[\\\\/]/i.test(String(p))));
+      const publishImages = (result?.photoshop_processed_files || result?.publish_final_images || []).filter(Boolean);
+      const fallbackPublish = allImages.filter((p) => /[\\\\/]publish[\\\\/]final[\\\\/]/i.test(String(p)));
+      setGallerySource(allImages, publishImages.length ? publishImages : fallbackPublish);
       const psFiles = result?.photoshop_processed_files || [];
       const detailFromResult = {
         dish_name: result?.dish_name,
@@ -1384,7 +1385,7 @@ HTML_PAGE = """<!doctype html>
         photoshop_error: result?.photoshop_error || "",
         workflow_status: psFiles.length ? `已合成发布图（${psFiles.length} 张）` : "四组图流程已完成",
         images: allImages,
-        publish_images: publishImages.length ? publishImages : allImages.filter((p) => /[\\\\/]publish[\\\\/]final[\\\\/]/i.test(String(p))),
+        publish_images: publishImages.length ? publishImages : fallbackPublish,
       };
       applyDishDetail(detailFromResult);
       const hasError = Boolean(result?.image_error);
@@ -1611,18 +1612,22 @@ HTML_PAGE = """<!doctype html>
         setRunState(false, 0);
         stopPolling();
         if(data.result && data.result.output_dir){
-          renderResult(data.result);
-          if(state.selectedHistoryPath){
-            const doneDir = String(data.result.output_dir || "").replace(/[\\\\/]+$/, "").toLowerCase();
-            const selectedDir = String(state.selectedHistoryPath || "").replace(/[\\\\/]+$/, "").toLowerCase();
-            if(doneDir && selectedDir && doneDir === selectedDir){
-              try{ await loadDishDetail(state.selectedHistoryPath); }catch{}
-            }
+          const doneDir = String(data.result.output_dir || "").replace(/[\\\\/]+$/, "").toLowerCase();
+          const selectedDir = String(state.selectedHistoryPath || "").replace(/[\\\\/]+$/, "").toLowerCase();
+          const sameSelected = Boolean(doneDir && selectedDir && doneDir === selectedDir);
+          if(wasRunning || !state.selectedHistoryPath){
+            renderResult(data.result);
+          }
+          if(sameSelected && (wasRunning || !state.selectedHistoryPath)){
+            try{ await loadDishDetail(state.selectedHistoryPath); }catch{}
           }
         }
         if(data.history_revision && data.history_revision !== state.historyRevision){
           state.historyRevision = data.history_revision;
           await loadHistory(true);
+          if(state.selectedHistoryPath){
+            try{ await loadDishDetail(state.selectedHistoryPath); }catch{}
+          }
         }else if(data.history){
           const nextSnapshot = buildHistorySnapshot(data.history);
           if(nextSnapshot !== state.historySnapshot){
@@ -1691,7 +1696,7 @@ HTML_PAGE = """<!doctype html>
       $("dishNotes").value = data.idea.notes || "";
       setMode(data.config.AUTO_GENERATE_DISH_IDEA === "1" ? "auto" : "file");
       同步参数滑块();
-      if(data.last_result){ renderResult(data.last_result); }
+      if(data.last_result && !state.selectedHistoryPath){ renderResult(data.last_result); }
       state.logNextIndex = 0;
       $("logPanel").textContent = "";
       state.historyRevision = data.history_revision || "";
@@ -2421,10 +2426,16 @@ def run_task_worker(task: dict[str, Any]) -> None:
     action = str(task.get("action", "run")).strip().lower() or "run"
     mode = str(task.get("mode", "")).strip().lower()
     dish_name = str(task.get("dish_name", "")).strip()
-    action_label = "造菜信息" if action == "idea_only" else "四组图"
+    if action == "idea_only":
+        action_label = "造菜信息"
+    elif mode == "target":
+        action_label = "指定造菜"
+    else:
+        action_label = "四组图"
+    mode_label = {"auto": "自动造菜", "file": "手动点名", "target": "指定造菜"}.get(mode, mode or "按配置")
     append_run_log(
         f"[{time.strftime('%H:%M:%S')}] 开始任务 #{task.get('task_id', '-')}"
-        f"（类型：{action_label}，造菜：{mode or '按配置'}，菜名：{dish_name or '自动生成'}）"
+        f"（类型：{action_label}，造菜：{mode_label}，菜名：{dish_name or '自动生成'}）"
     )
     try:
         with redirect_stdout(stream), redirect_stderr(stream):
@@ -2672,6 +2683,11 @@ class V2PanelHandler(BaseHTTPRequestHandler):
         if mode == "file" and not dish_name:
             self._send_json({"error": "手动模式下，菜名不能为空。"}, code=400)
             return
+        if action == "run" and mode == "target":
+            target_output_dir = str(payload.get("target_output_dir", "")).strip()
+            if not target_output_dir:
+                self._send_json({"error": "指定造菜请先在菜品池选中一个菜品。"}, code=400)
+                return
         if action == "idea_only":
             try:
                 idea_count = int(idea_count_raw)
@@ -2691,7 +2707,8 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             task_item = {
                 "task_id": TASK_SEQ,
                 "action": action,
-                "mode": mode if mode in {"auto", "file"} else "",
+                "mode": mode if mode in {"auto", "file", "target"} else "",
+                "target_output_dir": str(payload.get("target_output_dir", "")).strip() if mode == "target" else "",
                 "cuisine_mode": str(payload.get("cuisine_mode", "")).strip(),
                 "dish_name": dish_name,
                 "notes": str(payload.get("notes", "")).strip(),
