@@ -40,7 +40,7 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.64"
+PANEL_VERSION = "v0.65"
 REPO_ROOT = ROOT_DIR.parent
 
 PUBLISH_PLATFORMS: dict[str, dict[str, str]] = {
@@ -674,6 +674,7 @@ HTML_PAGE = """<!doctype html>
             <div class="overlay-line"><div class="overlay-k">参考菜</div><div id="rRef" class="overlay-v">暂无</div></div>
             <div class="overlay-line"><div class="overlay-k">菜系</div><div id="rRegion" class="overlay-v">暂无</div></div>
             <div class="overlay-line"><div class="overlay-k">目录</div><div id="rOut" class="overlay-v mono">-</div></div>
+            <div class="overlay-line"><div class="overlay-k">流程</div><div id="rWorkflow" class="overlay-v">暂无</div></div>
             <div class="overlay-line"><div class="overlay-k">主图首选</div><div id="rBestMain" class="overlay-v mono">暂无</div></div>
             <div class="overlay-line"><div class="overlay-k">封面首选</div><div id="rBestCover" class="overlay-v mono">暂无</div></div>
             <div class="overlay-line"><div class="overlay-k">选图方式</div><div id="rPickMode" class="overlay-v">暂无</div></div>
@@ -1210,6 +1211,65 @@ HTML_PAGE = """<!doctype html>
       return `主图：${toText(mainMode)} / 封面：${toText(coverMode)}`;
     }
 
+    function 选图方式详情(detail){
+      const label = (mode) => {
+        const text = String(mode || "").trim();
+        if(!text || text === "未执行"){ return "未执行"; }
+        if(text === "direct" || text === "fallback_direct"){ return "数量=1直入"; }
+        if(text === "scored"){ return "豆包评分"; }
+        return text;
+      };
+      return [
+        `海报：${label(detail?.poster_selection_mode)}`,
+        `细节：${label(detail?.detail_selection_mode)}`,
+        `菜谱：${label(detail?.recipe_selection_mode)}`,
+        `封面：${label(detail?.cover_selection_mode)}`,
+      ].join(" / ");
+    }
+
+    function 展示字段(value, fallback="暂无"){
+      const text = String(value || "").trim();
+      if(!text || text === "未记录"){ return fallback; }
+      return text;
+    }
+
+    function applyDishDetail(detail){
+      if(!detail){ return; }
+      更新结果信息(
+        detail.dish_name,
+        展示字段(detail.reference_dish, "未记录"),
+        展示字段(detail.region_label, "未记录"),
+        detail.output_dir,
+        detail.poster_selected_image || "",
+        detail.cover_selected_image || "",
+        detail.poster_selection_mode || "",
+        detail.cover_selection_mode || "",
+        detail.photoshop_processed_files || [],
+        detail.photoshop_error || ""
+      );
+      $("rPickMode").textContent = 选图方式详情(detail);
+      $("rPsStatus").textContent = PS状态文案(detail.photoshop_processed_files, detail.photoshop_error);
+      $("rWorkflow").textContent = detail.workflow_status || "暂无";
+      const allImages = detail.images || [];
+      const publishImages = detail.publish_images || [];
+      setGallerySource(allImages, publishImages.length ? publishImages : allImages);
+      if(detail.workflow_status){
+        $("resultMsg").textContent = detail.workflow_status;
+        $("resultMsg").className = "status ok";
+      }
+    }
+
+    async function loadDishDetail(path){
+      if(!path){
+        return null;
+      }
+      const res = await fetch("/api/dish_detail?path=" + encodeURIComponent(path));
+      const data = await res.json();
+      if(!res.ok){ throw new Error(data.error || "读取菜品详情失败"); }
+      applyDishDetail(data);
+      return data;
+    }
+
     function PS状态文案(psFiles, psError){
       if(psError){ return `失败：${psError}`; }
       const count = Array.isArray(psFiles) ? psFiles.length : 0;
@@ -1309,22 +1369,24 @@ HTML_PAGE = """<!doctype html>
       const publishImages = (result?.publish_final_images || []).filter(Boolean);
       setGallerySource(allImages, publishImages.length ? publishImages : allImages.filter((p) => /[\\\\/]publish[\\\\/]final[\\\\/]/i.test(String(p))));
       const psFiles = result?.photoshop_processed_files || [];
-      更新结果信息(
-        result?.dish_name,
-        result?.reference_dish,
-        result?.region_label,
-        result?.output_dir,
-        result?.poster_selected_image || "",
-        (result?.cover_saved_images || [])[0] || "",
-        result?.poster_selection_mode || "",
-        "",
-        psFiles,
-        result?.photoshop_error || ""
-      );
-      $("rPickMode").textContent = `海报选优：${result?.poster_selection_mode || "未执行"}`;
-      $("rPsStatus").textContent = psFiles.length
-        ? `已完成 ${psFiles.length} 张`
-        : (result?.photoshop_error || "未执行");
+      const detailFromResult = {
+        dish_name: result?.dish_name,
+        reference_dish: result?.reference_dish,
+        region_label: result?.region_label,
+        output_dir: result?.output_dir,
+        poster_selected_image: result?.poster_selected_image || "",
+        cover_selected_image: result?.cover_selected_image || (result?.cover_saved_images || [])[0] || "",
+        poster_selection_mode: result?.poster_selection_mode || "",
+        detail_selection_mode: result?.detail_selection_mode || "",
+        recipe_selection_mode: result?.recipe_selection_mode || "",
+        cover_selection_mode: result?.cover_selection_mode || "",
+        photoshop_processed_files: psFiles,
+        photoshop_error: result?.photoshop_error || "",
+        workflow_status: psFiles.length ? `已合成发布图（${psFiles.length} 张）` : "四组图流程已完成",
+        images: allImages,
+        publish_images: publishImages.length ? publishImages : allImages.filter((p) => /[\\\\/]publish[\\\\/]final[\\\\/]/i.test(String(p))),
+      };
+      applyDishDetail(detailFromResult);
       const hasError = Boolean(result?.image_error);
       const errText = result?.image_error || "";
       $("resultMsg").textContent = hasError ? ("流程异常：\\n" + errText) : "四组图流程已完成。";
@@ -1378,18 +1440,20 @@ HTML_PAGE = """<!doctype html>
       state.selectedHistoryItem = item;
       Array.from($("history").querySelectorAll(".history-item")).forEach((el) => el.classList.remove("active"));
       if(card){ card.classList.add("active"); }
-      const 历史参考菜 = item.reference_dish || "未记录参考菜";
-      const 历史菜系 = item.region_label || "未记录菜系";
-      更新结果信息(item.dish_name, 历史参考菜, 历史菜系, item.path, "", "", "", "", [], "");
-      const allImages = item.images || (item.preview_image ? [item.preview_image] : []);
-      const publishImages = item.publish_images || [];
-      setGallerySource(allImages, publishImages);
+      try{
+        await loadDishDetail(item.path);
+      }catch(err){
+        applyDishDetail(item);
+        $("resultMsg").textContent = "读取菜品详情失败，已显示缓存信息：" + String(err.message || err);
+        $("resultMsg").className = "status warn";
+      }
       if(state.mode === "target"){
-        applyTargetDishFromItem(item);
+        applyTargetDishFromItem(state.selectedHistoryItem || item);
       }
       await loadTextAssets(item.path);
-      $("resultMsg").textContent = "已切换为菜品预览。";
-      $("resultMsg").className = "status";
+      if($("resultMsg").className === "status"){
+        $("resultMsg").textContent = "已同步菜品目录状态。";
+      }
     }
 
     function createHistoryCard(item){
@@ -1548,6 +1612,13 @@ HTML_PAGE = """<!doctype html>
         stopPolling();
         if(data.result && data.result.output_dir){
           renderResult(data.result);
+          if(state.selectedHistoryPath){
+            const doneDir = String(data.result.output_dir || "").replace(/[\\\\/]+$/, "").toLowerCase();
+            const selectedDir = String(state.selectedHistoryPath || "").replace(/[\\\\/]+$/, "").toLowerCase();
+            if(doneDir && selectedDir && doneDir === selectedDir){
+              try{ await loadDishDetail(state.selectedHistoryPath); }catch{}
+            }
+          }
         }
         if(data.history_revision && data.history_revision !== state.historyRevision){
           state.historyRevision = data.history_revision;
@@ -1841,13 +1912,31 @@ def infer_dish_name_from_folder(folder_name: str) -> str:
     return folder_name.strip()
 
 
-def build_run_meta(result: dict[str, Any]) -> dict[str, str]:
+IMAGE_FILE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def build_run_meta(result: dict[str, Any]) -> dict[str, Any]:
+    ps_files = result.get("photoshop_processed_files") or []
+    poster_selected = str(result.get("poster_selected_image", "")).strip()
+    workflow_status = ""
+    if ps_files:
+        workflow_status = f"已合成发布图（{len(ps_files)} 张）"
+    elif poster_selected:
+        workflow_status = "已选图"
     return {
         "dish_name": str(result.get("dish_name", "")).strip(),
         "region_label": str(result.get("region_label", "")).strip(),
         "reference_dish": str(result.get("reference_dish", "")).strip(),
         "output_dir": str(result.get("output_dir", "")).strip(),
         "run_kind": str(result.get("run_kind", "run")).strip() or "run",
+        "poster_selected_image": poster_selected,
+        "cover_selected_image": str(result.get("cover_selected_image", "")).strip(),
+        "poster_selection_mode": str(result.get("poster_selection_mode", "")).strip(),
+        "detail_selection_mode": str(result.get("detail_selection_mode", "")).strip(),
+        "recipe_selection_mode": str(result.get("recipe_selection_mode", "")).strip(),
+        "cover_selection_mode": str(result.get("cover_selection_mode", "")).strip(),
+        "photoshop_count": len(ps_files),
+        "workflow_status": workflow_status,
     }
 
 
@@ -1865,7 +1954,7 @@ def write_run_meta(result: dict[str, Any]) -> None:
     )
 
 
-def read_run_meta(folder: Path) -> dict[str, str]:
+def read_run_meta(folder: Path) -> dict[str, Any]:
     meta_file = folder / RUN_META_FILE_NAME
     if not meta_file.exists() or not meta_file.is_file():
         return {}
@@ -1879,6 +1968,150 @@ def read_run_meta(folder: Path) -> dict[str, str]:
         "dish_name": str(payload.get("dish_name", "")).strip(),
         "region_label": str(payload.get("region_label", "")).strip(),
         "reference_dish": str(payload.get("reference_dish", "")).strip(),
+        "poster_selected_image": str(payload.get("poster_selected_image", "")).strip(),
+        "cover_selected_image": str(payload.get("cover_selected_image", "")).strip(),
+        "poster_selection_mode": str(payload.get("poster_selection_mode", "")).strip(),
+        "detail_selection_mode": str(payload.get("detail_selection_mode", "")).strip(),
+        "recipe_selection_mode": str(payload.get("recipe_selection_mode", "")).strip(),
+        "cover_selection_mode": str(payload.get("cover_selection_mode", "")).strip(),
+        "workflow_status": str(payload.get("workflow_status", "")).strip(),
+        "photoshop_count": int(payload.get("photoshop_count", 0) or 0),
+    }
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    if not path.exists() or not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _selection_mode_label(payload: dict[str, Any]) -> str:
+    if not payload:
+        return "未执行"
+    if payload.get("auto_selected"):
+        return "数量=1直入"
+    if payload.get("winner_image_name") or payload.get("winner_index"):
+        return "豆包评分"
+    return "未执行"
+
+
+def _find_image_by_name(folder: Path, file_name: str) -> str:
+    text = str(file_name or "").strip()
+    if not text:
+        return ""
+    stem = Path(text).stem
+    search_dirs = [folder / "publish" / "final", folder / "publish", folder]
+    for base in search_dirs:
+        if not base.is_dir():
+            continue
+        exact = base / text
+        if exact.is_file():
+            return str(exact.resolve())
+        for candidate in base.iterdir():
+            if not candidate.is_file():
+                continue
+            if candidate.stem == stem and candidate.suffix.lower() in IMAGE_FILE_SUFFIXES:
+                return str(candidate.resolve())
+    return ""
+
+
+def _collect_folder_images(folder_path: Path, *, recursive: bool = False) -> list[str]:
+    image_paths: list[Path] = []
+    patterns = ("*.png", "*.jpg", "*.jpeg", "*.webp")
+    if recursive:
+        for pattern in patterns:
+            image_paths.extend(folder_path.rglob(pattern))
+    else:
+        for pattern in patterns:
+            image_paths.extend(folder_path.glob(pattern))
+    unique = sorted({path.resolve() for path in image_paths}, key=lambda item: str(item).lower())
+    return [str(path) for path in unique]
+
+
+def read_dish_output_summary(folder: Path) -> dict[str, Any]:
+    publish_dir = folder / "publish"
+    final_dir = publish_dir / "final"
+    meta = read_run_meta(folder)
+
+    dish_name = meta.get("dish_name", "") or infer_dish_name_from_folder(folder.name)
+    region_label = str(meta.get("region_label", "")).strip()
+    reference_dish = str(meta.get("reference_dish", "")).strip()
+    idea_notes = ""
+    try:
+        idea_payload = load_dish_idea_record_from_dir(folder)
+        dish_name = str(idea_payload.get("dish_name", "")).strip() or dish_name
+        idea_notes = str(idea_payload.get("notes", "")).strip()
+        region_label = region_label or str(idea_payload.get("region_label", "")).strip()
+        reference_dish = reference_dish or str(idea_payload.get("reference_dish", "")).strip()
+    except Exception:
+        pass
+
+    poster_result = _read_json_object(publish_dir / "海报筛选结果.json")
+    detail_result = _read_json_object(publish_dir / "细节图筛选结果.json")
+    recipe_result = _read_json_object(publish_dir / "菜谱图筛选结果.json")
+    cover_result = _read_json_object(publish_dir / "封面图筛选结果.json")
+
+    poster_selected = _find_image_by_name(folder, str(poster_result.get("winner_image_name", "")))
+    if not poster_selected:
+        poster_selected = str(meta.get("poster_selected_image", "")).strip()
+    detail_selected = _find_image_by_name(folder, str(detail_result.get("winner_image_name", "")))
+    recipe_selected = _find_image_by_name(folder, str(recipe_result.get("winner_image_name", "")))
+    cover_selected = _find_image_by_name(folder, str(cover_result.get("winner_image_name", "")))
+    if not cover_selected:
+        cover_selected = str(meta.get("cover_selected_image", "")).strip()
+
+    photoshop_files = _collect_folder_images(final_dir) if final_dir.is_dir() else []
+    if not cover_selected and photoshop_files:
+        for image_path in photoshop_files:
+            if "封面" in Path(image_path).name:
+                cover_selected = image_path
+                break
+
+    ps_error = ""
+    ps_fail = folder / "Photoshop合成失败原因.txt"
+    if ps_fail.is_file():
+        ps_error = ps_fail.read_text(encoding="utf-8", errors="replace").strip()[:300]
+
+    images = _collect_folder_images(folder, recursive=True)
+    publish_images = photoshop_files or _collect_folder_images(publish_dir, recursive=False)
+
+    workflow_status = str(meta.get("workflow_status", "")).strip()
+    if not workflow_status:
+        if photoshop_files:
+            workflow_status = f"已合成发布图（{len(photoshop_files)} 张）"
+        elif poster_result:
+            workflow_status = "已选图待合成" if not ps_error else "选图完成（PS 失败）"
+        elif images:
+            workflow_status = "已生图"
+        else:
+            workflow_status = "仅造菜信息"
+
+    preview_image = poster_selected or (publish_images[0] if publish_images else (images[0] if images else ""))
+
+    return {
+        "dish_name": dish_name,
+        "region_label": region_label,
+        "reference_dish": reference_dish,
+        "idea_notes": idea_notes,
+        "output_dir": str(folder.resolve()),
+        "poster_selected_image": poster_selected,
+        "detail_selected_image": detail_selected,
+        "recipe_selected_image": recipe_selected,
+        "cover_selected_image": cover_selected,
+        "poster_selection_mode": _selection_mode_label(poster_result) if poster_result else str(meta.get("poster_selection_mode", "")).strip() or "未执行",
+        "detail_selection_mode": _selection_mode_label(detail_result) if detail_result else str(meta.get("detail_selection_mode", "")).strip() or "未执行",
+        "recipe_selection_mode": _selection_mode_label(recipe_result) if recipe_result else str(meta.get("recipe_selection_mode", "")).strip() or "未执行",
+        "cover_selection_mode": _selection_mode_label(cover_result) if cover_result else str(meta.get("cover_selection_mode", "")).strip() or "未执行",
+        "photoshop_processed_files": photoshop_files,
+        "photoshop_error": ps_error,
+        "workflow_status": workflow_status,
+        "images": images,
+        "publish_images": publish_images,
+        "preview_image": preview_image,
     }
 
 
@@ -1957,55 +2190,34 @@ def list_history(limit: int = 12, offset: int = 0) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     sliced = dirs[offset : offset + limit]
 
-    def collect_images(folder_path: Path, *, recursive: bool = False) -> list[str]:
-        image_paths: list[Path] = []
-        patterns = ("*.png", "*.jpg", "*.jpeg")
-        if recursive:
-            for pattern in patterns:
-                image_paths.extend(folder_path.rglob(pattern))
-        else:
-            for pattern in patterns:
-                image_paths.extend(folder_path.glob(pattern))
-        unique = sorted({path.resolve() for path in image_paths}, key=lambda item: str(item).lower())
-        return [str(path) for path in unique]
-
     for folder in sliced:
-        images = collect_images(folder, recursive=True)
-        publish_images = collect_images(folder / "publish" / "final")
-        meta = read_run_meta(folder)
-        dish_name = meta.get("dish_name", "") or infer_dish_name_from_folder(folder.name)
-        region_label = meta.get("region_label", "")
-        reference_dish = meta.get("reference_dish", "")
-        idea_notes = ""
-        try:
-            idea_payload = load_dish_idea_record_from_dir(folder)
-            dish_name = idea_payload.get("dish_name", "") or dish_name
-            idea_notes = str(idea_payload.get("notes", "")).strip()
-            region_label = region_label or str(idea_payload.get("region_label", "")).strip()
-            reference_dish = reference_dish or str(idea_payload.get("reference_dish", "")).strip()
-        except Exception:
-            pass
-        # 兜底：当前会话里最新结果尚未落盘时，优先用内存结果补上关键字段。
-        if (not region_label or not reference_dish) and isinstance(LAST_RESULT, dict):
+        summary = read_dish_output_summary(folder)
+        if (not summary.get("region_label") or not summary.get("reference_dish")) and isinstance(LAST_RESULT, dict):
             current_output_dir = str(LAST_RESULT.get("output_dir", "")).strip()
             if current_output_dir and Path(current_output_dir).resolve() == folder.resolve():
-                region_label = region_label or str(LAST_RESULT.get("region_label", "")).strip()
-                reference_dish = reference_dish or str(LAST_RESULT.get("reference_dish", "")).strip()
-        preview = ""
-        if images:
-            preview = images[0]
+                summary["region_label"] = summary.get("region_label") or str(LAST_RESULT.get("region_label", "")).strip()
+                summary["reference_dish"] = summary.get("reference_dish") or str(LAST_RESULT.get("reference_dish", "")).strip()
         rows.append(
             {
                 "name": folder.name,
-                "dish_name": dish_name,
-                "region_label": region_label,
-                "reference_dish": reference_dish,
+                "dish_name": summary.get("dish_name", ""),
+                "region_label": summary.get("region_label", ""),
+                "reference_dish": summary.get("reference_dish", ""),
                 "created_at": format_folder_time(folder.name),
                 "path": str(folder),
-                "preview_image": preview,
-                "images": images,
-                "publish_images": publish_images,
-                "idea_notes": idea_notes,
+                "preview_image": summary.get("preview_image", ""),
+                "images": summary.get("images", []),
+                "publish_images": summary.get("publish_images", []),
+                "idea_notes": summary.get("idea_notes", ""),
+                "workflow_status": summary.get("workflow_status", ""),
+                "poster_selected_image": summary.get("poster_selected_image", ""),
+                "cover_selected_image": summary.get("cover_selected_image", ""),
+                "poster_selection_mode": summary.get("poster_selection_mode", ""),
+                "detail_selection_mode": summary.get("detail_selection_mode", ""),
+                "recipe_selection_mode": summary.get("recipe_selection_mode", ""),
+                "cover_selection_mode": summary.get("cover_selection_mode", ""),
+                "photoshop_processed_files": summary.get("photoshop_processed_files", []),
+                "photoshop_error": summary.get("photoshop_error", ""),
             }
         )
     return rows
@@ -2353,6 +2565,18 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             except ValueError:
                 log_from = 0
             self._send_json(publish_status_snapshot(log_from=log_from))
+            return
+        if parsed.path == "/api/dish_detail":
+            query = parse_qs(parsed.query)
+            raw_path = (query.get("path", [""])[0] or "").strip()
+            if not raw_path:
+                self._send_json({"error": "path 不能为空。"}, code=400)
+                return
+            try:
+                folder = resolve_output_path(raw_path)
+                self._send_json(read_dish_output_summary(folder))
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
             return
         if parsed.path == "/api/text_assets":
             query = parse_qs(parsed.query)
