@@ -20,8 +20,8 @@ ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from main import run_v2_first_feature, resolve_workflow_mode
 from mode2_flow import run_v2_mode2
+from idea_batch import run_idea_batch, DISH_POOL_DIR
 from v2_core import (
     IDEA_FILE,
     OUTPUT_DIR,
@@ -39,7 +39,21 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.40"
+PANEL_VERSION = "v0.63"
+REPO_ROOT = ROOT_DIR.parent
+
+PUBLISH_PLATFORMS: dict[str, dict[str, str]] = {
+    "douyin": {"label": "抖音", "script": "douyin_publish_v2_test.py"},
+    "kuaishou": {"label": "快手", "script": "kuaishou_publish_v2_test.py"},
+    "xiaohongshu": {"label": "小红书", "script": "xiaohongshu_publish_v2_test.py"},
+    "weixin_mp": {"label": "微信公众号", "script": "weixin_publish_v2_test.py"},
+    "weixin_channels": {"label": "微信视频号", "script": "weixin_channels_publish_v2_test.py"},
+}
+LOGIN_WAIT_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("登录完成后请输入 y 继续", "y"),
+    ("完成扫码登录后按回车继续", "enter"),
+    ("按回车继续", "enter"),
+)
 
 RUN_LOCK = threading.Lock()
 RUNNING = False
@@ -54,6 +68,19 @@ CURRENT_TASK: dict[str, Any] | None = None
 TASK_SEQ = 0
 RUN_META_FILE_NAME = "_run_meta.json"
 
+PUBLISH_LOCK = threading.Lock()
+PUBLISH_RUNNING = False
+PUBLISH_OUTPUT_DIR = ""
+PUBLISH_LOG_LINES: list[str] = []
+PUBLISH_ERROR = ""
+PUBLISH_CURRENT_PLATFORM = ""
+PUBLISH_QUEUE: list[str] = []
+PUBLISH_LOGIN_REQUIRED = False
+PUBLISH_LOGIN_MESSAGE = ""
+PUBLISH_LOGIN_CONFIRM_KIND = "enter"
+PUBLISH_LOGIN_EVENT: threading.Event | None = None
+MAX_PUBLISH_LOG_LINES = 2000
+
 
 def append_run_log(text: str) -> None:
     line = text.rstrip("\r\n")
@@ -63,6 +90,154 @@ def append_run_log(text: str) -> None:
         RUN_LOG_LINES.append(line)
         if len(RUN_LOG_LINES) > MAX_LOG_LINES:
             del RUN_LOG_LINES[: len(RUN_LOG_LINES) - MAX_LOG_LINES]
+
+
+def append_publish_log(text: str) -> None:
+    line = text.rstrip("\r\n")
+    if not line:
+        return
+    with PUBLISH_LOCK:
+        PUBLISH_LOG_LINES.append(line)
+        if len(PUBLISH_LOG_LINES) > MAX_PUBLISH_LOG_LINES:
+            del PUBLISH_LOG_LINES[: len(PUBLISH_LOG_LINES) - MAX_PUBLISH_LOG_LINES]
+
+
+def history_revision() -> str:
+    dirs = collect_history_dirs()
+    if not dirs:
+        return "0:0"
+    max_mtime = max(path.stat().st_mtime for path in dirs)
+    return f"{len(dirs)}:{max_mtime:.3f}"
+
+
+def publish_status_snapshot(*, log_from: int = 0) -> dict[str, Any]:
+    with PUBLISH_LOCK:
+        total_logs = len(PUBLISH_LOG_LINES)
+        logs = PUBLISH_LOG_LINES[log_from:] if log_from < total_logs else []
+        return {
+            "running": PUBLISH_RUNNING,
+            "output_dir": PUBLISH_OUTPUT_DIR,
+            "current_platform": PUBLISH_CURRENT_PLATFORM,
+            "queue": list(PUBLISH_QUEUE),
+            "error": PUBLISH_ERROR,
+            "login_required": PUBLISH_LOGIN_REQUIRED,
+            "login_message": PUBLISH_LOGIN_MESSAGE,
+            "logs": logs,
+            "next_log_index": total_logs,
+            "platforms": {key: item["label"] for key, item in PUBLISH_PLATFORMS.items()},
+        }
+
+
+def _wait_for_publish_login(line: str, platform_label: str) -> str | None:
+    global PUBLISH_LOGIN_REQUIRED, PUBLISH_LOGIN_MESSAGE, PUBLISH_LOGIN_CONFIRM_KIND, PUBLISH_LOGIN_EVENT
+    for pattern, confirm_kind in LOGIN_WAIT_PATTERNS:
+        if pattern not in line:
+            continue
+        with PUBLISH_LOCK:
+            PUBLISH_LOGIN_REQUIRED = True
+            PUBLISH_LOGIN_MESSAGE = (
+                f"请在浏览器中完成「{platform_label}」登录，完成后点击下方「已完成登录，继续」。"
+            )
+            PUBLISH_LOGIN_CONFIRM_KIND = confirm_kind
+            if PUBLISH_LOGIN_EVENT is None:
+                PUBLISH_LOGIN_EVENT = threading.Event()
+            PUBLISH_LOGIN_EVENT.clear()
+        append_publish_log(f"[面板] 等待手动登录：{platform_label}")
+        if PUBLISH_LOGIN_EVENT is not None:
+            PUBLISH_LOGIN_EVENT.wait(timeout=3600)
+        with PUBLISH_LOCK:
+            PUBLISH_LOGIN_REQUIRED = False
+        return confirm_kind
+    return None
+
+
+def run_single_platform_publish(platform_key: str, output_dir: Path) -> None:
+    platform = PUBLISH_PLATFORMS[platform_key]
+    script_path = ROOT_DIR / platform["script"]
+    if not script_path.exists():
+        raise FileNotFoundError(f"发布脚本不存在：{script_path}")
+    append_publish_log(f"===== 开始发布：{platform['label']} =====")
+    publish_env = os.environ.copy()
+    publish_env["PYTHONUNBUFFERED"] = "1"
+    proc = subprocess.Popen(
+        [sys.executable, str(script_path), str(output_dir)],
+        cwd=str(REPO_ROOT),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        encoding="utf-8",
+        errors="replace",
+        env=publish_env,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        append_publish_log(line)
+        confirm_kind = _wait_for_publish_login(line, platform["label"])
+        if confirm_kind and proc.stdin is not None:
+            proc.stdin.write("y\n" if confirm_kind == "y" else "\n")
+            proc.stdin.flush()
+    return_code = proc.wait()
+    if return_code != 0:
+        raise RuntimeError(f"{platform['label']} 发布脚本退出码 {return_code}，请查看日志。")
+    append_publish_log(f"===== 完成发布：{platform['label']} =====")
+
+
+def publish_worker(output_dir_text: str, platform_keys: list[str]) -> None:
+    global PUBLISH_RUNNING, PUBLISH_ERROR, PUBLISH_OUTPUT_DIR, PUBLISH_CURRENT_PLATFORM, PUBLISH_QUEUE
+    try:
+        output_dir = resolve_output_path(output_dir_text)
+        final_dir = output_dir / "publish" / "final"
+        if not final_dir.is_dir():
+            raise FileNotFoundError(f"未找到发布图目录：{final_dir}")
+        with PUBLISH_LOCK:
+            PUBLISH_OUTPUT_DIR = str(output_dir)
+            PUBLISH_QUEUE = list(platform_keys)
+        for platform_key in platform_keys:
+            with PUBLISH_LOCK:
+                PUBLISH_CURRENT_PLATFORM = platform_key
+                if platform_key in PUBLISH_QUEUE:
+                    PUBLISH_QUEUE.remove(platform_key)
+            run_single_platform_publish(platform_key, output_dir)
+        append_publish_log("全部所选平台发布流程已执行完成，请在各平台浏览器中核对。")
+    except Exception as exc:  # noqa: BLE001
+        with PUBLISH_LOCK:
+            PUBLISH_ERROR = str(exc)
+        append_publish_log(f"发布失败：{exc}")
+        append_publish_log(traceback.format_exc())
+    finally:
+        with PUBLISH_LOCK:
+            PUBLISH_RUNNING = False
+            PUBLISH_CURRENT_PLATFORM = ""
+            PUBLISH_QUEUE = []
+
+
+def start_publish_task(output_dir_text: str, platform_keys: list[str]) -> None:
+    global PUBLISH_RUNNING, PUBLISH_ERROR, PUBLISH_LOG_LINES, PUBLISH_LOGIN_EVENT
+    if not platform_keys:
+        raise ValueError("请至少选择一个发布平台。")
+    unknown = [key for key in platform_keys if key not in PUBLISH_PLATFORMS]
+    if unknown:
+        raise ValueError(f"未知平台：{', '.join(unknown)}")
+    with PUBLISH_LOCK:
+        if PUBLISH_RUNNING:
+            raise RuntimeError("已有发布任务在执行，请等待完成后再试。")
+        PUBLISH_RUNNING = True
+        PUBLISH_ERROR = ""
+        PUBLISH_LOG_LINES = []
+        PUBLISH_LOGIN_EVENT = threading.Event()
+    worker = threading.Thread(target=publish_worker, args=(output_dir_text, platform_keys), daemon=True)
+    worker.start()
+
+
+def confirm_publish_login() -> None:
+    with PUBLISH_LOCK:
+        if not PUBLISH_LOGIN_REQUIRED:
+            return
+        event = PUBLISH_LOGIN_EVENT
+    if event is not None:
+        event.set()
 
 
 class LiveLogWriter:
@@ -103,6 +278,7 @@ HTML_PAGE = """<!doctype html>
       --shadow:0 10px 28px rgba(0,0,0,.35);
       --col-left:320px;
       --col-mid:430px;
+      --col-publish:220px;
       --splitter:8px;
     }
     *{box-sizing:border-box}
@@ -118,13 +294,20 @@ HTML_PAGE = """<!doctype html>
     .chip{font-size:12px;background:#0b1220;border:1px solid #334155;padding:6px 10px;border-radius:999px;color:#dbe7ff}
     .version-tag{font-size:12px;color:#e2e8f0;background:#1e293b;border:1px solid #475569;border-radius:999px;padding:4px 10px}
     .top-actions{display:flex;gap:8px}
+    button{transition:background .15s ease,border-color .15s ease,box-shadow .15s ease,color .15s ease,transform .12s ease}
+    button:hover{border-color:#60a5fa!important;box-shadow:0 0 0 2px rgba(96,165,250,.22)}
+    button:active{transform:translateY(1px)}
+    button.active,.view-tab.active,.text-tab.active,.text-file-btn.active{
+      border-color:#22c55e!important;background:linear-gradient(180deg,#064e3b,#022c22)!important;color:#dcfce7!important;
+      box-shadow:0 0 0 2px rgba(34,197,94,.22)!important;
+    }
     .top-actions button{
       width:auto;padding:7px 10px;border:1px solid #334155;border-radius:8px;background:#0b1220;color:#dbe7ff;cursor:pointer;font-size:12px;
     }
     .top-actions .danger-btn{border-color:#7f1d1d;color:#fecaca;background:#2b1313}
-    .three-col{
+    .four-col{
       display:grid;
-      grid-template-columns:var(--col-left) var(--splitter) var(--col-mid) var(--splitter) minmax(520px, 1fr);
+      grid-template-columns:var(--col-left) var(--splitter) var(--col-mid) var(--splitter) minmax(420px, 1fr) var(--col-publish);
       gap:0;
       align-items:start;
       min-height:calc(100vh - 120px);
@@ -136,7 +319,21 @@ HTML_PAGE = """<!doctype html>
     }
     .panel-left{margin-right:6px}
     .panel-mid{margin:0 6px}
-    .panel-right{margin-left:6px}
+    .panel-right{margin:0 6px}
+    .panel-publish{margin-left:6px;display:flex;flex-direction:column;gap:10px}
+    .publish-platform-list{display:flex;flex-direction:column;gap:8px;flex:1}
+    .publish-platform-item{display:flex;align-items:center;gap:8px;font-size:13px;color:#dbe7ff;border:1px solid #2f3b55;border-radius:8px;padding:8px 10px;background:#0f172a;cursor:pointer}
+    .publish-platform-item input{width:auto;margin:0;accent-color:#22c55e}
+    .publish-status{min-height:72px;max-height:180px;overflow:auto;font-size:12px;color:var(--sub);white-space:pre-wrap;line-height:1.45;border:1px solid #2a364f;border-radius:8px;padding:8px;background:#0b1220}
+    .btn-publish{width:100%;padding:12px;border:1px solid #4b5563;border-radius:10px;background:linear-gradient(180deg,#14532d,#052e16);color:#dcfce7;font-size:15px;font-weight:700;cursor:pointer}
+    .btn-publish[disabled]{opacity:.6;cursor:not-allowed}
+    .gallery-filter{width:auto;padding:7px 10px;border:1px solid #3a475f;border-radius:8px;background:#101a2a;color:#dbe7ff;cursor:pointer;font-size:12px}
+    .modal{position:fixed;inset:0;background:rgba(2,6,23,.72);display:flex;align-items:center;justify-content:center;z-index:80;padding:16px}
+    .modal.hidden{display:none}
+    .modal-box{max-width:460px;width:100%;border:1px solid #334155;border-radius:12px;background:#111827;padding:16px;box-shadow:var(--shadow)}
+    .modal-box h3{margin:0 0 10px;font-size:18px}
+    .modal-box p{margin:0 0 14px;font-size:13px;line-height:1.6;color:#cbd5e1;white-space:pre-wrap}
+    .modal-box button{width:100%;padding:11px;border:1px solid #22c55e;border-radius:9px;background:#14532d;color:#dcfce7;font-weight:700;cursor:pointer}
     .splitter{
       margin:0 2px;border-radius:8px;background:linear-gradient(180deg,#334155,#1f2937);cursor:col-resize;height:calc(100vh - 112px);
       user-select:none;position:relative;
@@ -156,7 +353,6 @@ HTML_PAGE = """<!doctype html>
     .mode button{
       width:100%;padding:10px;border:1px solid #3a475f;border-radius:9px;background:#111b2f;color:#dbe7ff;cursor:pointer;font-weight:700;
     }
-    .mode .active{background:linear-gradient(180deg,#1f2937,#111827);border-color:#6b7280}
     label{display:block;font-size:12px;color:var(--sub);margin:0 0 6px}
     input,textarea,select,button{font-family:inherit;outline:none}
     input,textarea,select{
@@ -211,6 +407,9 @@ HTML_PAGE = """<!doctype html>
       padding:5px 10px;font-size:12px;color:#e2e8f0;display:none;
     }
     @keyframes shine { from { background-position:200% 0; } to { background-position:-20% 0; } }
+    .right-tabs{display:flex;gap:8px;margin-bottom:10px}
+    .view-tab{width:auto;padding:8px 12px;border:1px solid #3a475f;border-radius:999px;background:#101a2a;color:#dbe7ff;cursor:pointer;font-weight:700}
+    .content-pane.hidden{display:none}
     .result-actions{display:flex;gap:8px;margin-top:10px}
     .result-actions button{width:auto;padding:8px 10px;border:1px solid #3a475f;border-radius:8px;background:#101a2a;color:#dbe7ff;cursor:pointer}
     .gallery-strip{
@@ -234,7 +433,8 @@ HTML_PAGE = """<!doctype html>
       transition:transform .15s ease,border-color .15s ease;
       display:grid;grid-template-columns:64px 1fr;grid-template-areas:"cover meta" "ops ops";gap:8px;align-items:center;padding:8px;
     }
-    .history-item:hover{transform:translateY(-1px);border-color:#60a5fa}
+    .history-item:hover{transform:translateY(-1px);border-color:#60a5fa;box-shadow:0 0 0 2px rgba(96,165,250,.18)}
+    .history-item.active{border-color:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,.22)}
     .history-cover{grid-area:cover;width:64px;height:64px;background:#111827;border-radius:7px;display:flex;align-items:center;justify-content:center;overflow:hidden}
     .history-cover img{width:100%;height:100%;object-fit:cover}
     .history-meta{grid-area:meta;padding:0;min-width:0}
@@ -250,6 +450,13 @@ HTML_PAGE = """<!doctype html>
     .history-ops .del{border-color:#7f1d1d;color:#fecaca;background:rgba(69,10,10,.85)}
     .load-more{margin-top:10px;text-align:center;font-size:12px;color:var(--sub)}
     .load-more button{width:auto;padding:7px 10px;border:1px solid #3a475f;border-radius:8px;background:#111b2f;color:#dbe7ff;cursor:pointer}
+    .text-panel{border:1px solid #2a364f;border-radius:12px;background:#0b1220;padding:10px;min-height:calc(100vh - 260px)}
+    .text-empty{display:flex;align-items:center;justify-content:center;min-height:260px;color:#9fb0cc;font-size:13px;text-align:center;line-height:1.7}
+    .text-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+    .text-tab,.text-file-btn{width:auto;padding:7px 10px;border:1px solid #3a475f;border-radius:999px;background:#101a2a;color:#dbe7ff;cursor:pointer;font-size:12px}
+    .text-file-list{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #26344b}
+    .text-file-meta{font-size:12px;color:#94a3b8;margin-bottom:8px;word-break:break-all}
+    .text-content{margin:0;min-height:360px;max-height:calc(100vh - 360px);overflow:auto;white-space:pre-wrap;word-break:break-word;border:1px solid #26344b;border-radius:10px;background:#08111f;padding:12px;color:#e5edf8;font-size:13px;line-height:1.65}
     .log-toggle{
       position:fixed;right:16px;bottom:16px;z-index:55;padding:9px 12px;border-radius:999px;border:1px solid #475569;
       background:#0f172a;color:#e2e8f0;box-shadow:var(--shadow);cursor:pointer;font-size:12px;
@@ -267,12 +474,12 @@ HTML_PAGE = """<!doctype html>
       height:calc(100% - 44px);margin:0;padding:10px;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.45;
       white-space:pre-wrap;word-break:break-word;color:#d1d9e9;
     }
-    @media(max-width:1400px){.three-col{grid-template-columns:300px var(--splitter) 400px var(--splitter) minmax(460px,1fr)}}
+    @media(max-width:1500px){.four-col{grid-template-columns:300px var(--splitter) 400px var(--splitter) minmax(380px,1fr) 200px}}
     @media(max-width:1200px){
-      .three-col{grid-template-columns:1fr}
+      .four-col{grid-template-columns:1fr}
       .splitter{display:none}
       .panel{height:auto}
-      .panel-left,.panel-mid,.panel-right{margin:0 0 10px}
+      .panel-left,.panel-mid,.panel-right,.panel-publish{margin:0 0 10px}
       .history-grid{max-height:none}
     }
     @media(max-width:860px){
@@ -288,7 +495,7 @@ HTML_PAGE = """<!doctype html>
     <div class="top">
       <div>
         <div class="title">V2 自动造菜控制台</div>
-        <div class="sub">三栏布局：左侧历史目录，中间造菜控制，右侧看图栏；宽度可拖拽并自动记忆。</div>
+        <div class="sub">四栏布局：菜品池、造菜控制、看图/文字、发布平台；左侧宽度可拖拽并自动记忆。</div>
       </div>
       <div class="chips">
         <span id="envQuality" class="chip">画质：-</span>
@@ -300,13 +507,13 @@ HTML_PAGE = """<!doctype html>
       <div class="top-actions">
         <button id="openOutputTopBtn" type="button">打开目录</button>
         <button id="copyOutputTopBtn" type="button">复制路径</button>
-        <button id="refreshTopBtn" type="button">刷新历史</button>
+        <button id="refreshTopBtn" type="button">刷新菜品池</button>
       </div>
     </div>
 
-    <div id="threeColLayout" class="three-col">
+    <div id="fourColLayout" class="four-col">
       <section class="panel panel-left">
-        <h3 class="panel-title">历史输出</h3>
+        <h3 class="panel-title">菜品池</h3>
         <div id="history" class="history-grid"></div>
         <div id="historyLoadMore" class="load-more">
           <button id="loadMoreBtn" type="button">加载更多</button>
@@ -317,16 +524,10 @@ HTML_PAGE = """<!doctype html>
 
       <aside class="panel panel-mid">
         <div class="section-card">
-          <h3 class="sec-title">模式选择</h3>
-          <div class="mode-row">
-            <div class="mode">
-              <button id="modeAutoBtn" class="active" type="button">自动造菜</button>
-              <button id="modeFileBtn" type="button">手动点名</button>
-            </div>
-            <div class="mode">
-              <button id="workflowMode2Btn" class="active" type="button">模式2</button>
-              <button id="workflowMode1Btn" type="button">模式1</button>
-            </div>
+          <h3 class="sec-title">造菜方式</h3>
+          <div class="mode">
+            <button id="modeAutoBtn" class="active" type="button">自动造菜</button>
+            <button id="modeFileBtn" type="button">手动点名</button>
           </div>
           <div id="cuisineCard" style="margin-top:8px">
             <label>自动造菜菜系</label>
@@ -347,6 +548,14 @@ HTML_PAGE = """<!doctype html>
         </div>
 
         <div class="section-card">
+          <h3 class="sec-title">只生成造菜信息</h3>
+          <div class="sec-desc">仅调用豆包写入 txt，不生成图片。自动造菜可批量；手动点名每次 1 条。</div>
+          <label>生成数量</label>
+          <input id="ideaCount" type="number" min="1" max="30" step="1" value="3" />
+          <button id="ideaOnlyBtn" type="button" style="margin-top:8px;width:100%;padding:10px;border:1px solid #3a475f;border-radius:9px;background:#101a2a;color:#dbe7ff;cursor:pointer;font-weight:700">只生成造菜信息</button>
+        </div>
+
+        <div class="section-card">
           <h3 class="sec-title">参数调节</h3>
           <div class="param-grid">
             <div class="param-item">
@@ -355,31 +564,8 @@ HTML_PAGE = """<!doctype html>
               <input id="temperatureSlider" class="slider" type="range" min="0" max="15" step="1" />
             </div>
           </div>
-          <div id="mode1Params">
-            <div class="param-grid" style="margin-top:8px">
-              <div class="param-item">
-                <label>主图数量</label>
-                <input id="imageCount" type="number" step="1" min="1" max="4" />
-                <input id="imageCountSlider" class="slider" type="range" min="1" max="4" step="1" />
-              </div>
-              <div class="param-item">
-                <label>主图画质</label>
-                <select id="imageQuality">
-                  <option value="low">标准清晰（省成本）</option>
-                  <option value="medium">中等清晰</option>
-                  <option value="high">高清细节（高质量）</option>
-                  <option value="auto">自动选择</option>
-                </select>
-                <input id="imageQualitySlider" class="slider" type="range" min="0" max="3" step="1" />
-              </div>
-            </div>
-            <div class="preset-row">
-              <button id="presetBudgetBtn" type="button">省成本模板</button>
-              <button id="presetQualityBtn" type="button">高质量模板</button>
-            </div>
-          </div>
-          <div id="mode2Params" style="display:none">
-            <div class="sec-desc" style="margin-top:8px">模式2 四组图各自独立配置画质与数量。</div>
+          <div id="groupParams">
+            <div class="sec-desc" style="margin-top:8px">四组图（海报 / 细节 / 菜谱 / 封面）各自独立配置画质与数量。</div>
             <div class="mode2-grid">
               <div class="mode2-item">
                 <h4>海报图</h4>
@@ -407,14 +593,10 @@ HTML_PAGE = """<!doctype html>
               </div>
             </div>
           </div>
-        </div>
-
-        <div id="mode1CoverCard" class="section-card">
-          <h3 class="sec-title">封面参数</h3>
-          <label>封面生成数量</label>
-          <input id="coverCount" type="number" step="1" min="1" max="4" />
-          <input id="coverCountSlider" class="slider" type="range" min="1" max="4" step="1" />
-          <div class="sec-desc">封面会基于主图首选（publish）生成，再进行封面评分并选入 publish。</div>
+          <div class="preset-row" style="margin-top:8px">
+            <button id="presetBudgetBtn" type="button">省成本模板</button>
+            <button id="presetQualityBtn" type="button">高质量模板</button>
+          </div>
         </div>
 
         <div id="notesCard" class="section-card">
@@ -432,25 +614,37 @@ HTML_PAGE = """<!doctype html>
 
       <section class="panel panel-right">
         <div class="result-card">
-          <h3 class="panel-title">看图栏</h3>
-          <div class="gallery-strip">
-            <div class="gallery-tools">
-              <div class="gallery-actions">
-                <button id="prevImgBtn" type="button">上一张</button>
-                <button id="nextImgBtn" type="button">下一张</button>
-              </div>
-              <div id="galleryIndex" class="gallery-index">0 / 0</div>
-            </div>
-            <div id="thumbs" class="thumbs"></div>
+          <div class="right-tabs">
+            <button id="imageTabBtn" class="view-tab active" type="button">看图栏</button>
+            <button id="textTabBtn" class="view-tab" type="button">文字栏</button>
           </div>
-          <div class="result-stage">
-            <div id="runSkeleton" class="skeleton" style="display:none"></div>
-            <div id="runBadge" class="run-badge">处理中 0%</div>
-            <img id="resultImg" class="gallery-main" alt="暂无图片" />
-            <div id="emptyImageState" class="empty-image-state">
-              <div class="empty-image-icon">🖼</div>
-              <div class="empty-image-title">暂未生成图片</div>
-              <div class="empty-image-sub">运行任务后在这里查看结果，双击可新标签打开原图。</div>
+          <div id="imagePane" class="content-pane">
+            <div class="gallery-strip">
+              <div class="gallery-tools">
+                <div class="gallery-actions">
+                  <button id="prevImgBtn" type="button">上一张</button>
+                  <button id="nextImgBtn" type="button">下一张</button>
+                  <button id="filterPublishBtn" class="gallery-filter" type="button">发布图</button>
+                  <button id="filterAllBtn" class="gallery-filter active" type="button">非发布图</button>
+                </div>
+                <div id="galleryIndex" class="gallery-index">0 / 0</div>
+              </div>
+              <div id="thumbs" class="thumbs"></div>
+            </div>
+            <div class="result-stage">
+              <div id="runSkeleton" class="skeleton" style="display:none"></div>
+              <div id="runBadge" class="run-badge">处理中 0%</div>
+              <img id="resultImg" class="gallery-main" alt="暂无图片" />
+              <div id="emptyImageState" class="empty-image-state">
+                <div class="empty-image-icon">图</div>
+                <div class="empty-image-title">暂未生成图片</div>
+                <div class="empty-image-sub">运行任务后在这里查看结果，双击可新标签打开原图。</div>
+              </div>
+            </div>
+          </div>
+          <div id="textPane" class="content-pane hidden">
+            <div id="textPanel" class="text-panel">
+              <div class="text-empty">点击左侧某个菜品后，这里会显示它的造菜信息、平台文案、提示词和其他 txt 文案。</div>
             </div>
           </div>
           <div class="result-overlay">
@@ -467,11 +661,31 @@ HTML_PAGE = """<!doctype html>
             <button id="openOutputBtn" type="button">打开输出目录</button>
             <button id="openPublishBtn" type="button">打开 publish</button>
             <button id="copyOutputBtn" type="button">复制路径</button>
-            <button id="regenBtn" type="button">重新生成</button>
           </div>
           <div id="resultMsg" class="status"></div>
         </div>
       </section>
+
+      <aside class="panel panel-publish">
+        <h3 class="panel-title">发布平台</h3>
+        <div id="publishPlatforms" class="publish-platform-list">
+          <label class="publish-platform-item"><input type="checkbox" value="douyin" checked />抖音</label>
+          <label class="publish-platform-item"><input type="checkbox" value="kuaishou" checked />快手</label>
+          <label class="publish-platform-item"><input type="checkbox" value="xiaohongshu" checked />小红书</label>
+          <label class="publish-platform-item"><input type="checkbox" value="weixin_mp" checked />微信公众号</label>
+          <label class="publish-platform-item"><input type="checkbox" value="weixin_channels" checked />微信视频号</label>
+        </div>
+        <div id="publishStatus" class="publish-status">选中左侧菜品后，勾选平台并点击发布。</div>
+        <button id="publishBtn" class="btn-publish" type="button">发布</button>
+      </aside>
+    </div>
+  </div>
+
+  <div id="loginModal" class="modal hidden">
+    <div class="modal-box">
+      <h3>需要手动登录</h3>
+      <p id="loginModalMsg">请在浏览器中完成平台登录后，点击下方按钮继续。</p>
+      <button id="loginModalConfirm" type="button">已完成登录，继续</button>
     </div>
   </div>
 
@@ -491,7 +705,6 @@ HTML_PAGE = """<!doctype html>
   <script>
     const state = {
       mode: "auto",
-      workflow: "mode2",
       galleryImages: [],
       galleryIndex: 0,
       currentImagePath: "",
@@ -506,9 +719,20 @@ HTML_PAGE = """<!doctype html>
       historyHasMore: true,
       historyLoading: false,
       historySnapshot: "",
+      historyRevision: "",
       running: false,
       colLeft: 320,
-      colMid: 430
+      colMid: 430,
+      activeRightTab: "image",
+      selectedHistoryPath: "",
+      galleryFilter: "all",
+      galleryAllImages: [],
+      galleryPublishImages: [],
+      textAssets: null,
+      activeTextCategory: "",
+      activeTextFilePath: "",
+      publishLogIndex: 0,
+      publishPolling: false
     };
     const $ = (id) => document.getElementById(id);
     const QUALITY_INDEX = { low: 0, medium: 1, high: 2, auto: 3 };
@@ -552,17 +776,14 @@ HTML_PAGE = """<!doctype html>
       $("dishNotes").disabled = !manual;
       $("dishNotes").classList.toggle("input-disabled", !manual);
       $("notesCard").style.display = manual ? "block" : "none";
+      syncIdeaCountUi();
     }
 
-    function setWorkflow(workflow){
-      state.workflow = workflow === "mode1" ? "mode1" : "mode2";
-      $("workflowMode2Btn").classList.toggle("active", state.workflow === "mode2");
-      $("workflowMode1Btn").classList.toggle("active", state.workflow === "mode1");
-      const mode2 = state.workflow === "mode2";
-      $("mode1Params").style.display = mode2 ? "none" : "block";
-      $("mode2Params").style.display = mode2 ? "block" : "none";
-      $("mode1CoverCard").style.display = mode2 ? "none" : "block";
-      $("regenBtn").style.display = mode2 ? "none" : "inline-block";
+    function syncIdeaCountUi(){
+      const manual = state.mode === "file";
+      $("ideaCount").disabled = manual;
+      $("ideaCount").classList.toggle("input-disabled", manual);
+      if(manual){ $("ideaCount").value = "1"; }
     }
 
     function setStatus(text, level=""){
@@ -586,7 +807,7 @@ HTML_PAGE = """<!doctype html>
     }
 
     function 应用三栏宽度(leftWidth, midWidth){
-      const layout = $("threeColLayout");
+      const layout = $("fourColLayout");
       if(!layout){ return; }
       const total = layout.clientWidth || 1400;
       const splitterSpace = 2 * 8;
@@ -621,8 +842,105 @@ HTML_PAGE = """<!doctype html>
       应用三栏宽度(320, 430);
     }
 
+    function getSelectedPublishPlatforms(){
+      return Array.from($("publishPlatforms").querySelectorAll('input[type="checkbox"]:checked'))
+        .map((el) => el.value)
+        .filter(Boolean);
+    }
+
+    function setPublishStatus(text, level=""){
+      const box = $("publishStatus");
+      box.textContent = text;
+      box.className = "publish-status" + (level ? (" " + level) : "");
+    }
+
+    function showLoginModal(message){
+      $("loginModalMsg").textContent = message || "请在浏览器中完成平台登录后，点击下方按钮继续。";
+      $("loginModal").classList.remove("hidden");
+    }
+
+    function hideLoginModal(){
+      $("loginModal").classList.add("hidden");
+    }
+
+    async function confirmPublishLogin(){
+      try{
+        const res = await fetch("/api/publish_login_confirm", {method:"POST"});
+        const data = await res.json();
+        if(!res.ok){ throw new Error(data.error || "确认失败"); }
+        hideLoginModal();
+        setPublishStatus("已确认登录，发布脚本继续执行…");
+      }catch(err){
+        setPublishStatus("登录确认失败：" + err.message, "warn");
+      }
+    }
+
+    async function fetchPublishStatus(options = {}){
+      const silent = Boolean(options?.silent);
+      try{
+        const res = await fetch(`/api/publish_status?from=${state.publishLogIndex}`);
+        const data = await res.json();
+        if(data.logs?.length){
+          const tail = data.logs.slice(-6).join("\\n");
+          setPublishStatus(tail || "发布中…");
+          state.publishLogIndex = data.next_log_index || state.publishLogIndex;
+          data.logs.forEach((line) => appendLogs(["[发布] " + line]));
+        }
+        if(data.login_required){
+          showLoginModal(data.login_message || "请在浏览器中完成登录。");
+        }else{
+          hideLoginModal();
+        }
+        $("publishBtn").disabled = Boolean(data.running);
+        $("publishBtn").textContent = data.running
+          ? `发布中：${data.current_platform || "…"}`
+          : "发布";
+        if(!data.running && state.publishPolling){
+          state.publishPolling = false;
+          if(data.error){
+            if(!silent){ setPublishStatus("发布失败：\\n" + data.error, "warn"); }
+          }else if(state.publishLogIndex > 0){
+            if(!silent){ setPublishStatus("发布流程已执行完成，请在各平台浏览器核对。", "ok"); }
+          }
+        }
+        if(data.running){ state.publishPolling = true; }
+      }catch(err){
+        if(!silent){ setPublishStatus("读取发布状态失败：" + err.message, "warn"); }
+      }
+    }
+
+    async function startPublish(){
+      const outputPath = (state.selectedHistoryPath || state.currentOutputPath || "").trim();
+      if(!outputPath || outputPath === "-"){
+        setPublishStatus("请先在左侧菜品池选择一个菜品。", "warn");
+        return;
+      }
+      const platforms = getSelectedPublishPlatforms();
+      if(!platforms.length){
+        setPublishStatus("请至少勾选一个发布平台。", "warn");
+        return;
+      }
+      state.publishLogIndex = 0;
+      setPublishStatus("正在启动发布任务…");
+      try{
+        const res = await fetch("/api/publish_start", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({output_dir: outputPath, platforms})
+        });
+        const data = await res.json();
+        if(!res.ok){ throw new Error(data.error || "发布启动失败"); }
+        state.publishPolling = true;
+        appendLogs([`[${new Date().toLocaleTimeString()}] 发布任务已启动：${platforms.join("、")}`]);
+        $("publishBtn").disabled = true;
+        await fetchPublishStatus();
+      }catch(err){
+        setPublishStatus("发布失败：" + err.message, "warn");
+      }
+    }
+
     function 初始化拖拽分栏(){
-      const layout = $("threeColLayout");
+      const layout = $("fourColLayout");
       const splitL = $("splitterLeft");
       const splitR = $("splitterRight");
       if(!layout || !splitL || !splitR){ return; }
@@ -662,22 +980,11 @@ HTML_PAGE = """<!doctype html>
     function 同步参数滑块(){
       const t = Math.max(0, Math.min(15, Math.round((Number($("temperature").value || "0") * 10))));
       $("temperatureSlider").value = String(t);
-      const c = Math.max(1, Math.min(4, Number($("imageCount").value || "1")));
-      $("imageCountSlider").value = String(c);
-      const coverCount = Math.max(1, Math.min(4, Number($("coverCount").value || "1")));
-      $("coverCountSlider").value = String(coverCount);
-      $("imageQualitySlider").value = String(QUALITY_INDEX[$("imageQuality").value] ?? 0);
     }
 
     function 绑定参数滑块(){
       $("temperatureSlider").oninput = () => { $("temperature").value = (Number($("temperatureSlider").value) / 10).toFixed(1); };
-      $("imageCountSlider").oninput = () => { $("imageCount").value = String(Number($("imageCountSlider").value)); };
-      $("coverCountSlider").oninput = () => { $("coverCount").value = String(Number($("coverCountSlider").value)); };
-      $("imageQualitySlider").oninput = () => { $("imageQuality").value = INDEX_QUALITY[Number($("imageQualitySlider").value)] || "low"; };
       $("temperature").oninput = 同步参数滑块;
-      $("imageCount").oninput = 同步参数滑块;
-      $("coverCount").oninput = 同步参数滑块;
-      $("imageQuality").onchange = 同步参数滑块;
     }
 
     function appendLogs(lines){
@@ -736,6 +1043,99 @@ HTML_PAGE = """<!doctype html>
       return parts[parts.length - 1] || path;
     }
 
+    function setRightTab(tab){
+      state.activeRightTab = tab === "text" ? "text" : "image";
+      $("imageTabBtn").classList.toggle("active", state.activeRightTab === "image");
+      $("textTabBtn").classList.toggle("active", state.activeRightTab === "text");
+      $("imagePane").classList.toggle("hidden", state.activeRightTab !== "image");
+      $("textPane").classList.toggle("hidden", state.activeRightTab !== "text");
+    }
+
+    function renderTextAssets(){
+      const panel = $("textPanel");
+      const payload = state.textAssets;
+      const groups = payload?.groups || [];
+      if(!groups.length){
+        panel.innerHTML = `<div class="text-empty">当前菜品目录里还没有可显示的 txt 文案。</div>`;
+        return;
+      }
+      if(!state.activeTextCategory || !groups.some((group) => group.key === state.activeTextCategory)){
+        state.activeTextCategory = groups[0].key;
+      }
+      const activeGroup = groups.find((group) => group.key === state.activeTextCategory) || groups[0];
+      if(!state.activeTextFilePath || !activeGroup.files.some((file) => file.path === state.activeTextFilePath)){
+        state.activeTextFilePath = activeGroup.files[0]?.path || "";
+      }
+      const activeFile = activeGroup.files.find((file) => file.path === state.activeTextFilePath) || activeGroup.files[0];
+
+      panel.innerHTML = "";
+      const tabs = document.createElement("div");
+      tabs.className = "text-tabs";
+      groups.forEach((group) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "text-tab" + (group.key === state.activeTextCategory ? " active" : "");
+        btn.textContent = `${group.label}（${group.files.length}）`;
+        btn.onclick = () => {
+          state.activeTextCategory = group.key;
+          state.activeTextFilePath = "";
+          renderTextAssets();
+        };
+        tabs.appendChild(btn);
+      });
+      panel.appendChild(tabs);
+
+      const fileList = document.createElement("div");
+      fileList.className = "text-file-list";
+      activeGroup.files.forEach((file) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "text-file-btn" + (file.path === state.activeTextFilePath ? " active" : "");
+        btn.textContent = file.name;
+        btn.title = file.relative_path;
+        btn.onclick = () => {
+          state.activeTextFilePath = file.path;
+          renderTextAssets();
+        };
+        fileList.appendChild(btn);
+      });
+      panel.appendChild(fileList);
+
+      const meta = document.createElement("div");
+      meta.className = "text-file-meta";
+      meta.textContent = activeFile ? activeFile.relative_path : "";
+      panel.appendChild(meta);
+
+      const content = document.createElement("pre");
+      content.className = "text-content";
+      content.textContent = activeFile?.content || "";
+      panel.appendChild(content);
+    }
+
+    async function loadTextAssets(path){
+      state.textAssets = null;
+      state.activeTextCategory = "";
+      state.activeTextFilePath = "";
+      $("textPanel").innerHTML = `<div class="text-empty">正在读取文案...</div>`;
+      if(!path){
+        $("textPanel").innerHTML = `<div class="text-empty">点击左侧某个菜品后，这里会显示它的造菜信息、平台文案、提示词和其他 txt 文案。</div>`;
+        return;
+      }
+      try{
+        const res = await fetch("/api/text_assets?path=" + encodeURIComponent(path));
+        const data = await res.json();
+        if(!res.ok){ throw new Error(data.error || "读取文案失败"); }
+        state.textAssets = data;
+        renderTextAssets();
+      }catch(err){
+        const msg = document.createElement("div");
+        msg.className = "text-empty";
+        msg.textContent = "读取文案失败：" + String(err.message || err);
+        $("textPanel").innerHTML = "";
+        $("textPanel").appendChild(msg);
+      }
+    }
+
     function 选图方式文案(mainMode, coverMode){
       const toText = (mode) => {
         if(mode === "direct"){ return "数量=1直入"; }
@@ -782,9 +1182,23 @@ HTML_PAGE = """<!doctype html>
       thumbs.forEach((el, idx) => el.classList.toggle("active", idx === safe));
     }
 
-    function renderGallery(images){
+    function setGallerySource(allImages, publishImages){
+      state.galleryAllImages = (allImages || []).filter(Boolean);
+      state.galleryPublishImages = (publishImages || []).filter(Boolean);
+      applyGalleryFilter(false);
+    }
+
+    function applyGalleryFilter(resetIndex=true){
+      const images = state.galleryFilter === "publish" ? state.galleryPublishImages : state.galleryAllImages;
+      $("filterPublishBtn").classList.toggle("active", state.galleryFilter === "publish");
+      $("filterAllBtn").classList.toggle("active", state.galleryFilter === "all");
+      renderGallery(images, resetIndex);
+    }
+
+    function renderGallery(images, resetIndex=true){
       state.galleryImages = (images || []).filter(Boolean);
-      state.galleryIndex = 0;
+      if(resetIndex){ state.galleryIndex = 0; }
+      else if(state.galleryIndex >= state.galleryImages.length){ state.galleryIndex = 0; }
       const box = $("thumbs");
       box.innerHTML = "";
       state.galleryImages.forEach((imgPath, idx) => {
@@ -801,56 +1215,54 @@ HTML_PAGE = """<!doctype html>
 
     function renderResult(result){
       state.currentResult = result || null;
-      const isMode2 = result?.workflow_mode === "mode2";
-      if(isMode2){
-        const gallery = []
-          .concat(result?.poster_saved_images || [])
-          .concat(result?.detail_saved_images || [])
-          .concat(result?.recipe_saved_images || [])
-          .concat(result?.cover_saved_images || []);
-        renderGallery(gallery.length ? gallery : (result?.saved_images || []));
+      if(result?.run_kind === "idea_batch"){
+        setGallerySource([], []);
         更新结果信息(
           result?.dish_name,
-          result?.reference_dish,
-          result?.region_label,
-          result?.output_dir,
-          result?.poster_selected_image || result?.primary_selected_image,
-          (result?.cover_saved_images || [])[0] || "",
-          result?.poster_selection_mode || "",
+          "",
+          "",
+          result?.batch_dir || result?.output_dir,
+          "",
+          "",
+          "",
           "",
           [],
           ""
         );
-        $("rPickMode").textContent = `流程：模式2 / 海报：${result?.poster_selection_mode || "未执行"}`;
-        $("rPsStatus").textContent = "模式2 不执行 PS 合成";
-      }else{
-        const coverImages = result?.cover_saved_images || [];
-        renderGallery((result?.saved_images || []).concat(coverImages));
-        更新结果信息(
-          result?.dish_name,
-          result?.reference_dish,
-          result?.region_label,
-          result?.output_dir,
-          result?.primary_selected_image,
-          result?.cover_selected_image,
-          result?.primary_selection_mode,
-          result?.cover_selection_mode,
-          result?.photoshop_processed_files || [],
-          result?.photoshop_error || ""
-        );
+        $("rPickMode").textContent = "仅造菜信息";
+        $("rPsStatus").textContent = "-";
+        $("resultMsg").textContent = `已生成 ${result?.count || 0} 条造菜信息，目录：${result?.batch_dir || "-"}`;
+        $("resultMsg").className = "status ok";
+        return;
       }
-      const isRegen = result?.run_kind === "regenerate_image";
-      const hasError = Boolean(result?.image_error || result?.cover_image_error);
-      const errText = [result?.image_error, result?.cover_image_error].filter(Boolean).join("\\n");
-      let msg = "";
-      if(hasError){
-        msg = (isRegen ? "重新生图异常：\\n" : "生图异常：\\n") + errText;
-      }else if(isMode2){
-        msg = "模式2 四组图流程已完成。";
-      }else{
-        msg = isRegen ? "已按原提示词重新生图完成。" : "主图/封面流程已完成。";
-      }
-      $("resultMsg").textContent = msg;
+      const gallery = []
+        .concat(result?.poster_saved_images || [])
+        .concat(result?.detail_saved_images || [])
+        .concat(result?.recipe_saved_images || [])
+        .concat(result?.cover_saved_images || []);
+      const allImages = gallery.length ? gallery : (result?.saved_images || []);
+      const publishImages = (result?.publish_final_images || []).filter(Boolean);
+      setGallerySource(allImages, publishImages.length ? publishImages : allImages.filter((p) => /[\\\\/]publish[\\\\/]final[\\\\/]/i.test(String(p))));
+      const psFiles = result?.photoshop_processed_files || [];
+      更新结果信息(
+        result?.dish_name,
+        result?.reference_dish,
+        result?.region_label,
+        result?.output_dir,
+        result?.poster_selected_image || "",
+        (result?.cover_saved_images || [])[0] || "",
+        result?.poster_selection_mode || "",
+        "",
+        psFiles,
+        result?.photoshop_error || ""
+      );
+      $("rPickMode").textContent = `海报选优：${result?.poster_selection_mode || "未执行"}`;
+      $("rPsStatus").textContent = psFiles.length
+        ? `已完成 ${psFiles.length} 张`
+        : (result?.photoshop_error || "未执行");
+      const hasError = Boolean(result?.image_error);
+      const errText = result?.image_error || "";
+      $("resultMsg").textContent = hasError ? ("流程异常：\\n" + errText) : "四组图流程已完成。";
       $("resultMsg").className = "status " + (hasError ? "warn" : "ok");
     }
 
@@ -871,6 +1283,7 @@ HTML_PAGE = """<!doctype html>
     function createHistoryCard(item){
       const div = document.createElement("div");
       div.className = "history-item";
+      div.dataset.path = item.path || "";
       const cover = item.preview_image
         ? `<img src="${fileUrl(item.preview_image)}" alt="${item.dish_name || item.name}" />`
         : `<div class="history-empty">暂无图片</div>`;
@@ -887,12 +1300,18 @@ HTML_PAGE = """<!doctype html>
           <button data-op="delete" class="del">删除</button>
         </div>
       `;
-      div.onclick = () => {
+      div.onclick = async () => {
+        state.selectedHistoryPath = item.path;
+        Array.from($("history").querySelectorAll(".history-item")).forEach((el) => el.classList.remove("active"));
+        div.classList.add("active");
         const 历史参考菜 = item.reference_dish || "未记录参考菜";
         const 历史菜系 = item.region_label || "未记录菜系";
         更新结果信息(item.dish_name, 历史参考菜, 历史菜系, item.path, "", "", "", "", [], "");
-        renderGallery(item.images || (item.preview_image ? [item.preview_image] : []));
-        $("resultMsg").textContent = "已切换为历史预览。";
+        const allImages = item.images || (item.preview_image ? [item.preview_image] : []);
+        const publishImages = item.publish_images || [];
+        setGallerySource(allImages, publishImages);
+        await loadTextAssets(item.path);
+        $("resultMsg").textContent = "已切换为菜品预览。";
         $("resultMsg").className = "status";
       };
       const ops = div.querySelector(".history-ops");
@@ -910,6 +1329,14 @@ HTML_PAGE = """<!doctype html>
 
     function buildHistorySnapshot(items){
       return (items || []).map((item) => String(item?.name || "")).join("|");
+    }
+
+    function markSelectedHistoryCard(){
+      const selected = state.selectedHistoryPath;
+      if(!selected){ return; }
+      Array.from($("history").querySelectorAll(".history-item")).forEach((el) => {
+        el.classList.toggle("active", el.dataset.path === selected);
+      });
     }
 
     async function loadHistory(reset=false){
@@ -930,11 +1357,16 @@ HTML_PAGE = """<!doctype html>
           state.historySnapshot = buildHistorySnapshot(items);
         }
         if(items.length < state.historyLimit){ state.historyHasMore = false; }
-        items.forEach((item) => $("history").appendChild(createHistoryCard(item)));
+        items.forEach((item) => {
+          const card = createHistoryCard(item);
+          card.dataset.path = item.path;
+          $("history").appendChild(card);
+        });
         state.historyOffset += items.length;
+        markSelectedHistoryCard();
         $("loadMoreBtn").style.display = state.historyHasMore ? "inline-block" : "none";
         if(!$("history").children.length){
-          $("history").innerHTML = '<div class="history-empty">暂无历史输出</div>';
+          $("history").innerHTML = '<div class="history-empty">暂无菜品</div>';
           $("loadMoreBtn").style.display = "none";
         }
       }finally{
@@ -957,9 +1389,9 @@ HTML_PAGE = """<!doctype html>
       if(state.autoRefreshTimer){ return; }
       state.autoRefreshTimer = setInterval(() => {
         if(document.hidden){ return; }
-        if(state.running){ return; }
         fetchRunStatus({silent: true});
-      }, 5000);
+        fetchPublishStatus({silent: true});
+      }, 2000);
     }
 
     async function fetchRunStatus(options = {}){
@@ -988,9 +1420,13 @@ HTML_PAGE = """<!doctype html>
         if(data.result && data.result.output_dir){
           renderResult(data.result);
         }
-        if(data.history){
+        if(data.history_revision && data.history_revision !== state.historyRevision){
+          state.historyRevision = data.history_revision;
+          await loadHistory(true);
+        }else if(data.history){
           const nextSnapshot = buildHistorySnapshot(data.history);
           if(nextSnapshot !== state.historySnapshot){
+            state.historySnapshot = nextSnapshot;
             await loadHistory(true);
           }
         }
@@ -1028,32 +1464,25 @@ HTML_PAGE = """<!doctype html>
     async function loadState(showMsg=false){
       const res = await fetch("/api/state");
       const data = await res.json();
-      $("envQuality").textContent = `画质：${画质文案(data.config.OPENAI_IMAGE_QUALITY)}`;
-      $("envCount").textContent = `出图数：${data.config.OPENAI_IMAGE_COUNT}`;
-      $("envCoverCount").textContent = `封面数：${data.config.COVER_IMAGE_COUNT || "-"}`;
-      const wf = data.config.V2_WORKFLOW_MODE === "mode1" ? "模式1" : "模式2";
+      $("envQuality").textContent = `海报画质：${画质文案(data.config.MODE2_POSTER_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY)}`;
+      $("envCount").textContent = `海报数：${data.config.MODE2_POSTER_IMAGE_COUNT || data.config.OPENAI_IMAGE_COUNT}`;
+      $("envCoverCount").textContent = `封面数：${data.config.MODE2_COVER_IMAGE_COUNT || "-"}`;
       const cuisineText = data.config.AUTO_GENERATE_DISH_IDEA === "1"
         ? 菜系文案(data.config.AUTO_DISH_CUISINE_MODE || "1")
         : "";
       $("envMode").textContent = data.config.AUTO_GENERATE_DISH_IDEA === "1"
-        ? `自动造菜 / ${cuisineText} / ${wf}`
-        : `手动点名 / ${wf}`;
+        ? `自动造菜 / ${cuisineText}`
+        : "手动点名";
       $("cuisineMode").value = data.config.AUTO_DISH_CUISINE_MODE || "1";
-      setWorkflow(data.config.V2_WORKFLOW_MODE === "mode1" ? "mode1" : "mode2");
-      if(data.config.V2_WORKFLOW_MODE === "mode2"){
-        $("posterCount").value = data.config.MODE2_POSTER_IMAGE_COUNT || data.config.OPENAI_IMAGE_COUNT;
-        $("posterQuality").value = data.config.MODE2_POSTER_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
-        $("detailCount").value = data.config.MODE2_DETAIL_IMAGE_COUNT || "1";
-        $("detailQuality").value = data.config.MODE2_DETAIL_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
-        $("recipeCount").value = data.config.MODE2_RECIPE_IMAGE_COUNT || "1";
-        $("recipeQuality").value = data.config.MODE2_RECIPE_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
-        $("coverMode2Count").value = data.config.MODE2_COVER_IMAGE_COUNT || data.config.COVER_IMAGE_COUNT || "1";
-        $("coverMode2Quality").value = data.config.MODE2_COVER_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
-      }
+      $("posterCount").value = data.config.MODE2_POSTER_IMAGE_COUNT || data.config.OPENAI_IMAGE_COUNT;
+      $("posterQuality").value = data.config.MODE2_POSTER_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
+      $("detailCount").value = data.config.MODE2_DETAIL_IMAGE_COUNT || "1";
+      $("detailQuality").value = data.config.MODE2_DETAIL_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
+      $("recipeCount").value = data.config.MODE2_RECIPE_IMAGE_COUNT || "1";
+      $("recipeQuality").value = data.config.MODE2_RECIPE_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
+      $("coverMode2Count").value = data.config.MODE2_COVER_IMAGE_COUNT || data.config.COVER_IMAGE_COUNT || "1";
+      $("coverMode2Quality").value = data.config.MODE2_COVER_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
       $("temperature").value = data.config.MODEL_TEMPERATURE;
-      $("imageCount").value = data.config.OPENAI_IMAGE_COUNT;
-      $("coverCount").value = data.config.COVER_IMAGE_COUNT || "1";
-      $("imageQuality").value = data.config.OPENAI_IMAGE_QUALITY;
       $("dishName").value = data.idea.dish_name || "";
       $("dishNotes").value = data.idea.notes || "";
       setMode(data.config.AUTO_GENERATE_DISH_IDEA === "1" ? "auto" : "file");
@@ -1061,58 +1490,18 @@ HTML_PAGE = """<!doctype html>
       if(data.last_result){ renderResult(data.last_result); }
       state.logNextIndex = 0;
       $("logPanel").textContent = "";
+      state.historyRevision = data.history_revision || "";
       await loadHistory(true);
       await fetchRunStatus();
+      await fetchPublishStatus({silent: true});
       if(showMsg){ setStatus("页面状态已刷新。", "ok"); }
     }
 
-    async function runNow(options = {}){
-      const regenerateOnly = Boolean(options?.regenerateOnly);
-      if(!regenerateOnly && state.mode === "file" && !$("dishName").value.trim()){
-        setStatus("手动点名模式下请先填写菜名。", "danger");
-        $("dishName").focus();
-        return;
-      }
-      if(regenerateOnly && !state.currentOutputPath){
-        setStatus("请先在右侧选中一条已有结果，再执行重新生成。", "warn");
-        return;
-      }
+    async function submitTask(payload, okText){
       state.logNextIndex = 0;
       if(!state.pollTimer){ $("logPanel").textContent = ""; }
-      if(regenerateOnly){
-        setStatus("重新生成任务已提交：沿用原提示词，仅按当前画质/数量重新出图。");
-      }else{
-        setStatus("任务已提交，正在加入队列...");
-      }
+      setStatus(okText || "任务已提交，正在加入队列...");
       try{
-        const payload = regenerateOnly
-          ? {
-              action: "regenerate_image",
-              source_output_dir: state.currentOutputPath,
-              image_quality: $("imageQuality").value.trim(),
-              image_count: $("imageCount").value.trim(),
-              cover_count: $("coverCount").value.trim()
-            }
-          : {
-              action: "run",
-              mode: state.mode,
-              cuisine_mode: $("cuisineMode").value.trim(),
-              workflow: state.workflow,
-              dish_name: $("dishName").value.trim(),
-              notes: $("dishNotes").value.trim(),
-              model_temperature: $("temperature").value.trim(),
-              image_quality: $("imageQuality").value.trim(),
-              image_count: $("imageCount").value.trim(),
-              cover_count: $("coverCount").value.trim(),
-              poster_quality: $("posterQuality").value.trim(),
-              poster_count: $("posterCount").value.trim(),
-              detail_quality: $("detailQuality").value.trim(),
-              detail_count: $("detailCount").value.trim(),
-              recipe_quality: $("recipeQuality").value.trim(),
-              recipe_count: $("recipeCount").value.trim(),
-              cover_mode2_quality: $("coverMode2Quality").value.trim(),
-              cover_mode2_count: $("coverMode2Count").value.trim()
-            };
         const res = await fetch("/api/run_start", {
           method:"POST",
           headers:{"Content-Type":"application/json"},
@@ -1122,21 +1511,58 @@ HTML_PAGE = """<!doctype html>
         if(!res.ok){ throw new Error(data.error || "运行失败"); }
         if(data.started_now){
           appendLogs([`[${new Date().toLocaleTimeString()}] 任务 #${data.task_id} 已开始执行。`]);
-          setStatus(regenerateOnly ? "重新生成已开始执行。" : "任务已开始执行。");
+          setStatus("任务已开始执行。");
         }else{
           appendLogs([`[${new Date().toLocaleTimeString()}] 任务 #${data.task_id} 已加入队列，前方 ${data.waiting_ahead} 个任务。`]);
-          setStatus(
-            regenerateOnly
-              ? `重新生成已加入队列，前方还有 ${data.waiting_ahead} 个任务。`
-              : `已加入队列，前方还有 ${data.waiting_ahead} 个任务。`,
-            "ok"
-          );
+          setStatus(`已加入队列，前方还有 ${data.waiting_ahead} 个任务。`, "ok");
         }
         startPolling();
         await fetchRunStatus();
       }catch(err){
         setStatus("失败：" + err.message, "warn");
       }
+    }
+
+    async function runNow(){
+      if(state.mode === "file" && !$("dishName").value.trim()){
+        setStatus("手动点名模式下请先填写菜名。", "danger");
+        $("dishName").focus();
+        return;
+      }
+      await submitTask({
+        action: "run",
+        mode: state.mode,
+        cuisine_mode: $("cuisineMode").value.trim(),
+        dish_name: $("dishName").value.trim(),
+        notes: $("dishNotes").value.trim(),
+        model_temperature: $("temperature").value.trim(),
+        poster_quality: $("posterQuality").value.trim(),
+        poster_count: $("posterCount").value.trim(),
+        detail_quality: $("detailQuality").value.trim(),
+        detail_count: $("detailCount").value.trim(),
+        recipe_quality: $("recipeQuality").value.trim(),
+        recipe_count: $("recipeCount").value.trim(),
+        cover_mode2_quality: $("coverMode2Quality").value.trim(),
+        cover_mode2_count: $("coverMode2Count").value.trim()
+      });
+    }
+
+    async function runIdeaOnly(){
+      if(state.mode === "file" && !$("dishName").value.trim()){
+        setStatus("手动点名模式下请先填写菜名。", "danger");
+        $("dishName").focus();
+        return;
+      }
+      const count = Math.max(1, Math.min(30, Number($("ideaCount").value || "1")));
+      $("ideaCount").value = String(count);
+      await submitTask({
+        action: "idea_only",
+        mode: state.mode,
+        cuisine_mode: $("cuisineMode").value.trim(),
+        dish_name: $("dishName").value.trim(),
+        notes: $("dishNotes").value.trim(),
+        idea_count: String(count)
+      }, `造菜信息任务已提交（共 ${count} 条）。`);
     }
 
     async function copyText(text, okMessage){
@@ -1168,17 +1594,16 @@ HTML_PAGE = """<!doctype html>
     function applyPreset(kind){
       if(kind === "budget"){
         $("temperature").value = "0.2";
-        $("imageCount").value = "1";
-        $("coverCount").value = "1";
-        $("imageQuality").value = "low";
+        $("posterCount").value = $("detailCount").value = $("recipeCount").value = $("coverMode2Count").value = "1";
+        $("posterQuality").value = $("detailQuality").value = $("recipeQuality").value = $("coverMode2Quality").value = "low";
         同步参数滑块();
         setStatus("已套用省成本模板。", "ok");
         return;
       }
       $("temperature").value = "0.6";
-      $("imageCount").value = "2";
-      $("coverCount").value = "2";
-      $("imageQuality").value = "high";
+      $("posterCount").value = $("detailCount").value = "2";
+      $("recipeCount").value = $("coverMode2Count").value = "2";
+      $("posterQuality").value = $("detailQuality").value = $("recipeQuality").value = $("coverMode2Quality").value = "high";
       同步参数滑块();
       setStatus("已套用高质量模板。", "ok");
     }
@@ -1186,14 +1611,18 @@ HTML_PAGE = """<!doctype html>
     function bindEvents(){
       $("modeAutoBtn").onclick = () => setMode("auto");
       $("modeFileBtn").onclick = () => setMode("file");
-      $("workflowMode2Btn").onclick = () => setWorkflow("mode2");
-      $("workflowMode1Btn").onclick = () => setWorkflow("mode1");
+      $("imageTabBtn").onclick = () => setRightTab("image");
+      $("textTabBtn").onclick = () => setRightTab("text");
       $("runBtn").onclick = runNow;
-      $("regenBtn").onclick = () => runNow({regenerateOnly: true});
+      $("ideaOnlyBtn").onclick = runIdeaOnly;
       $("presetBudgetBtn").onclick = () => applyPreset("budget");
       $("presetQualityBtn").onclick = () => applyPreset("quality");
       $("prevImgBtn").onclick = () => showGalleryImage(state.galleryIndex - 1);
       $("nextImgBtn").onclick = () => showGalleryImage(state.galleryIndex + 1);
+      $("filterPublishBtn").onclick = () => { state.galleryFilter = "publish"; applyGalleryFilter(true); };
+      $("filterAllBtn").onclick = () => { state.galleryFilter = "all"; applyGalleryFilter(true); };
+      $("publishBtn").onclick = startPublish;
+      $("loginModalConfirm").onclick = confirmPublishLogin;
       $("resultImg").ondblclick = () => openImageInNewTab(state.currentImagePath);
       $("resultImg").onerror = () => 显示无图占位("图片加载失败，请切换其它图片或重新运行");
       $("copyOutputBtn").onclick = () => copyText(state.currentOutputPath, "输出目录已复制到剪贴板。");
@@ -1225,7 +1654,7 @@ HTML_PAGE = """<!doctype html>
 
     bindEvents();
     绑定参数滑块();
-    setWorkflow("mode2");
+    syncIdeaCountUi();
     加载三栏宽度();
     初始化拖拽分栏();
     loadState();
@@ -1252,6 +1681,11 @@ def read_idea_file() -> dict[str, str]:
 
 
 def infer_dish_name_from_folder(folder_name: str) -> str:
+    import re
+
+    matched = re.match(r"^\d{4}_(.+)$", folder_name)
+    if matched:
+        return matched.group(1).strip()
     parts = folder_name.split("_", 2)
     if len(parts) >= 3 and parts[2].strip():
         return parts[2].strip()
@@ -1301,6 +1735,48 @@ def read_run_meta(folder: Path) -> dict[str, str]:
     }
 
 
+def classify_text_file(path: Path) -> tuple[str, str]:
+    name = path.name
+    if "造菜信息" in name:
+        return "idea", "造菜信息"
+    if "平台文案" in name or "标题" in name or "话题" in name or "描述" in name:
+        return "publish", "平台文案"
+    if "prompt" in name.lower() or "提示词" in name:
+        return "prompt", "提示词"
+    return "other", "其他"
+
+
+def read_text_assets(raw_path: str) -> dict[str, Any]:
+    folder = resolve_output_path(raw_path)
+    if not folder.exists() or not folder.is_dir():
+        raise FileNotFoundError(f"目录不存在：{folder}")
+
+    grouped: dict[str, dict[str, Any]] = {}
+    order = ["idea", "publish", "prompt", "other"]
+    for text_file in sorted(folder.rglob("*.txt"), key=lambda item: str(item.relative_to(folder)).lower()):
+        if not text_file.is_file():
+            continue
+        category_key, category_label = classify_text_file(text_file)
+        group = grouped.setdefault(category_key, {"key": category_key, "label": category_label, "files": []})
+        try:
+            content = text_file.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            content = text_file.read_text(encoding="utf-8", errors="replace")
+        if len(content) > 200_000:
+            content = content[:200_000] + "\n\n……内容过长，已截断显示。"
+        group["files"].append(
+            {
+                "name": text_file.name,
+                "relative_path": str(text_file.relative_to(folder)),
+                "path": str(text_file),
+                "content": content,
+            }
+        )
+
+    groups = [grouped[key] for key in order if key in grouped]
+    return {"path": str(folder), "groups": groups}
+
+
 def format_folder_time(folder_name: str) -> str:
     parts = folder_name.split("_", 2)
     if len(parts) < 2:
@@ -1312,29 +1788,43 @@ def format_folder_time(folder_name: str) -> str:
     return f"{date_text[0:4]}-{date_text[4:6]}-{date_text[6:8]} {time_text[0:2]}:{time_text[2:4]}:{time_text[4:6]}"
 
 
+def collect_history_dirs() -> list[Path]:
+    dirs: list[Path] = []
+    if OUTPUT_DIR.exists():
+        dirs.extend(path for path in OUTPUT_DIR.iterdir() if path.is_dir())
+    if DISH_POOL_DIR.exists():
+        for batch_dir in DISH_POOL_DIR.iterdir():
+            if not batch_dir.is_dir() or not batch_dir.name.endswith("_batch"):
+                continue
+            dirs.extend(path for path in batch_dir.iterdir() if path.is_dir())
+    dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return dirs
+
+
 def list_history(limit: int = 12, offset: int = 0) -> list[dict[str, Any]]:
-    if not OUTPUT_DIR.exists():
-        return []
     if offset < 0:
         offset = 0
     if limit < 1:
         limit = 12
-    dirs = [p for p in OUTPUT_DIR.iterdir() if p.is_dir()]
-    dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    dirs = collect_history_dirs()
     rows: list[dict[str, Any]] = []
     sliced = dirs[offset : offset + limit]
 
-    def collect_images(folder_path: Path) -> list[str]:
+    def collect_images(folder_path: Path, *, recursive: bool = False) -> list[str]:
         image_paths: list[Path] = []
-        for pattern in ("*.png", "*.jpg", "*.jpeg"):
-            image_paths.extend(folder_path.glob(pattern))
-        return [str(path) for path in sorted(image_paths, key=lambda item: item.name.lower())]
+        patterns = ("*.png", "*.jpg", "*.jpeg")
+        if recursive:
+            for pattern in patterns:
+                image_paths.extend(folder_path.rglob(pattern))
+        else:
+            for pattern in patterns:
+                image_paths.extend(folder_path.glob(pattern))
+        unique = sorted({path.resolve() for path in image_paths}, key=lambda item: str(item).lower())
+        return [str(path) for path in unique]
 
     for folder in sliced:
-        images = collect_images(folder)
-        publish_dir = folder / "publish"
-        if publish_dir.exists() and publish_dir.is_dir():
-            images.extend(collect_images(publish_dir))
+        images = collect_images(folder, recursive=True)
+        publish_images = collect_images(folder / "publish" / "final")
         meta = read_run_meta(folder)
         dish_name = meta.get("dish_name", "") or infer_dish_name_from_folder(folder.name)
         region_label = meta.get("region_label", "")
@@ -1358,6 +1848,7 @@ def list_history(limit: int = 12, offset: int = 0) -> list[dict[str, Any]]:
                 "path": str(folder),
                 "preview_image": preview,
                 "images": images,
+                "publish_images": publish_images,
             }
         )
     return rows
@@ -1463,7 +1954,6 @@ def current_config_snapshot() -> dict[str, str]:
     return {
         "AUTO_GENERATE_DISH_IDEA": os.getenv("AUTO_GENERATE_DISH_IDEA", "0").strip() or "0",
         "AUTO_DISH_CUISINE_MODE": os.getenv("AUTO_DISH_CUISINE_MODE", "1").strip() or "1",
-        "V2_WORKFLOW_MODE": resolve_workflow_mode(os.getenv("V2_WORKFLOW_MODE")),
         "MODEL_TEMPERATURE": os.getenv("MODEL_TEMPERATURE", "0.3").strip() or "0.3",
         "OPENAI_IMAGE_MODEL": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2").strip() or "gpt-image-2",
         "OPENAI_IMAGE_QUALITY": os.getenv("OPENAI_IMAGE_QUALITY", "low").strip() or "low",
@@ -1487,17 +1977,8 @@ def apply_runtime_overrides(payload: dict[str, Any]) -> None:
     cuisine_mode = str(payload.get("cuisine_mode", "")).strip()
     if cuisine_mode in {"0", "1", "2", "3", "4", "5", "6", "7"}:
         os.environ["AUTO_DISH_CUISINE_MODE"] = cuisine_mode
-    workflow = str(payload.get("workflow", "")).strip().lower()
-    if workflow in {"mode1", "mode2"}:
-        os.environ["V2_WORKFLOW_MODE"] = workflow
     if str(payload.get("model_temperature", "")).strip():
         os.environ["MODEL_TEMPERATURE"] = str(payload["model_temperature"]).strip()
-    if str(payload.get("image_quality", "")).strip():
-        os.environ["OPENAI_IMAGE_QUALITY"] = str(payload["image_quality"]).strip()
-    if str(payload.get("image_count", "")).strip():
-        os.environ["OPENAI_IMAGE_COUNT"] = str(payload["image_count"]).strip()
-    if str(payload.get("cover_count", "")).strip():
-        os.environ["COVER_IMAGE_COUNT"] = str(payload["cover_count"]).strip()
 
     mode2_pairs = (
         ("poster", "poster_quality", "poster_count"),
@@ -1521,9 +2002,9 @@ def resolve_output_path(raw_path: str) -> Path:
     target = Path(raw_path).resolve()
     if target.is_file():
         target = target.parent
-    output_root = OUTPUT_DIR.resolve()
-    if target != output_root and output_root not in target.parents:
-        raise ValueError("只允许打开 V2/output 下的目录。")
+    allowed_roots = [OUTPUT_DIR.resolve(), DISH_POOL_DIR.resolve()]
+    if not any(target == root or root in target.parents for root in allowed_roots):
+        raise ValueError("只允许打开 V2/output 或 V2/dish_pool 下的目录。")
     if not target.exists():
         raise FileNotFoundError(f"目录不存在：{target}")
     return target
@@ -1558,29 +2039,27 @@ def run_task_worker(task: dict[str, Any]) -> None:
     stream = LiveLogWriter()
     action = str(task.get("action", "run")).strip().lower() or "run"
     mode = str(task.get("mode", "")).strip().lower()
-    workflow = str(task.get("workflow", "")).strip().lower()
     dish_name = str(task.get("dish_name", "")).strip()
-    source_output_dir = str(task.get("source_output_dir", "")).strip()
+    action_label = "造菜信息" if action == "idea_only" else "四组图"
     append_run_log(
         f"[{time.strftime('%H:%M:%S')}] 开始任务 #{task.get('task_id', '-')}"
-        f"（类型：{'重新生图' if action == 'regenerate_image' else '正常生成'}，"
-        f"造菜：{mode or '按配置'}，流程：{workflow or resolve_workflow_mode(None)}，"
-        f"菜名：{dish_name or '自动生成'}）"
+        f"（类型：{action_label}，造菜：{mode or '按配置'}，菜名：{dish_name or '自动生成'}）"
     )
     try:
         with redirect_stdout(stream), redirect_stderr(stream):
             apply_runtime_overrides(task)
-            if action == "regenerate_image":
-                source_dir = resolve_output_path(source_output_dir)
-                result = regenerate_images_from_output_dir(source_dir)
+            if action == "idea_only":
+                idea_count = int(str(task.get("idea_count", "1")).strip() or "1")
+                result = run_idea_batch(
+                    count=idea_count,
+                    mode=mode if mode in {"auto", "file"} else None,
+                    dish_name=dish_name,
+                    notes=str(task.get("notes", "")).strip(),
+                )
             else:
                 if mode == "file":
                     write_idea_file(str(task.get("dish_name", "")).strip(), str(task.get("notes", "")).strip())
-                active_workflow = resolve_workflow_mode(workflow or None)
-                if active_workflow == "mode2":
-                    result = run_v2_mode2(mode=mode if mode in {"auto", "file"} else None)
-                else:
-                    result = run_v2_first_feature(mode=mode if mode in {"auto", "file"} else None)
+                result = run_v2_mode2(mode=mode if mode in {"auto", "file"} else None)
         with RUN_LOCK:
             LAST_RESULT = result
             LAST_ERROR = ""
@@ -1645,7 +2124,9 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                     "config": current_config_snapshot(),
                     "idea": read_idea_file(),
                     "history": list_history(limit=12, offset=0),
+                    "history_revision": history_revision(),
                     "last_result": LAST_RESULT or {},
+                    "publish_platforms": {key: item["label"] for key, item in PUBLISH_PLATFORMS.items()},
                 }
             )
             return
@@ -1685,8 +2166,29 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                     "queue_length": len(TASK_QUEUE),
                     "current_task": CURRENT_TASK or {},
                     "history": list_history(limit=12, offset=0),
+                    "history_revision": history_revision(),
                 }
             self._send_json(payload)
+            return
+        if parsed.path == "/api/publish_status":
+            query = parse_qs(parsed.query)
+            raw_from = (query.get("from", ["0"])[0] or "0").strip()
+            try:
+                log_from = max(0, int(raw_from))
+            except ValueError:
+                log_from = 0
+            self._send_json(publish_status_snapshot(log_from=log_from))
+            return
+        if parsed.path == "/api/text_assets":
+            query = parse_qs(parsed.query)
+            raw_path = (query.get("path", [""])[0] or "").strip()
+            if not raw_path:
+                self._send_json({"error": "path 不能为空。"}, code=400)
+                return
+            try:
+                self._send_json(read_text_assets(raw_path))
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
             return
         if parsed.path == "/api/file":
             query = parse_qs(parsed.query)
@@ -1701,7 +2203,13 @@ class V2PanelHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         global RUNNING, LAST_RESULT, LAST_ERROR, LAST_STARTED_AT, LAST_FINISHED_AT, TASK_SEQ
         parsed = urlparse(self.path)
-        if parsed.path not in {"/api/run_start", "/api/open_output", "/api/history_delete"}:
+        if parsed.path not in {
+            "/api/run_start",
+            "/api/open_output",
+            "/api/history_delete",
+            "/api/publish_start",
+            "/api/publish_login_confirm",
+        }:
             self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
             return
 
@@ -1727,25 +2235,44 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": str(exc)}, code=400)
             return
+        if parsed.path == "/api/publish_login_confirm":
+            try:
+                confirm_publish_login()
+                self._send_json({"ok": True})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
+            return
+        if parsed.path == "/api/publish_start":
+            try:
+                output_dir_text = str(payload.get("output_dir", "")).strip()
+                platform_keys = [str(item).strip() for item in (payload.get("platforms") or []) if str(item).strip()]
+                start_publish_task(output_dir_text, platform_keys)
+                self._send_json({"ok": True, "platforms": platform_keys})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
+            return
 
         action = str(payload.get("action", "run")).strip().lower() or "run"
+        if action not in {"run", "idea_only"}:
+            action = "run"
         mode = str(payload.get("mode", "")).strip().lower()
         dish_name = str(payload.get("dish_name", "")).strip()
-        source_output_dir = str(payload.get("source_output_dir", "")).strip()
+        idea_count_raw = str(payload.get("idea_count", "1")).strip() or "1"
 
-        if action == "regenerate_image":
-            if not source_output_dir:
-                self._send_json({"error": "重新生成需要指定来源输出目录。"}, code=400)
-                return
+        if mode == "file" and not dish_name:
+            self._send_json({"error": "手动模式下，菜名不能为空。"}, code=400)
+            return
+        if action == "idea_only":
             try:
-                source_dir = resolve_output_path(source_output_dir)
-            except Exception as exc:  # noqa: BLE001
-                self._send_json({"error": f"来源目录无效：{exc}"}, code=400)
+                idea_count = int(idea_count_raw)
+            except ValueError:
+                self._send_json({"error": "生成数量必须是整数。"}, code=400)
                 return
-            dish_name = infer_dish_name_from_folder(source_dir.name)
-        else:
-            if mode == "file" and not dish_name:
-                self._send_json({"error": "手动模式下，菜名不能为空。"}, code=400)
+            if idea_count < 1 or idea_count > 30:
+                self._send_json({"error": "生成数量须在 1～30 之间。"}, code=400)
+                return
+            if mode == "file" and idea_count > 1:
+                self._send_json({"error": "手动点名每次只能生成 1 条造菜信息。"}, code=400)
                 return
 
         with RUN_LOCK:
@@ -1753,16 +2280,13 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             TASK_SEQ += 1
             task_item = {
                 "task_id": TASK_SEQ,
-                "action": action if action in {"run", "regenerate_image"} else "run",
+                "action": action,
                 "mode": mode if mode in {"auto", "file"} else "",
                 "cuisine_mode": str(payload.get("cuisine_mode", "")).strip(),
                 "dish_name": dish_name,
                 "notes": str(payload.get("notes", "")).strip(),
                 "model_temperature": str(payload.get("model_temperature", "")).strip(),
-                "image_quality": str(payload.get("image_quality", "")).strip(),
-                "image_count": str(payload.get("image_count", "")).strip(),
-                "cover_count": str(payload.get("cover_count", "")).strip(),
-                "workflow": str(payload.get("workflow", "")).strip().lower(),
+                "idea_count": idea_count_raw if action == "idea_only" else "",
                 "poster_quality": str(payload.get("poster_quality", "")).strip(),
                 "poster_count": str(payload.get("poster_count", "")).strip(),
                 "detail_quality": str(payload.get("detail_quality", "")).strip(),
@@ -1771,7 +2295,6 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 "recipe_count": str(payload.get("recipe_count", "")).strip(),
                 "cover_mode2_quality": str(payload.get("cover_mode2_quality", "")).strip(),
                 "cover_mode2_count": str(payload.get("cover_mode2_count", "")).strip(),
-                "source_output_dir": str(source_dir) if action == "regenerate_image" else "",
                 "queued_at": time.time(),
             }
             if waiting_ahead == 0:
