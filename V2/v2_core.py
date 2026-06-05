@@ -1233,6 +1233,48 @@ def save_dish_idea_record_file(output_dir: Path, dish_payload: dict[str, str]) -
     return str(output_file)
 
 
+def load_dish_idea_record_from_dir(output_dir: Path) -> dict[str, str]:
+    """从已有输出目录读取造菜信息 txt，供「指定造菜」复用同一文件夹。"""
+    if not output_dir.exists() or not output_dir.is_dir():
+        raise FileNotFoundError(f"输出目录不存在：{output_dir}")
+    record_files = sorted(output_dir.glob("*_造菜信息.txt"))
+    if not record_files:
+        raise FileNotFoundError(f"目录内未找到造菜信息文件：{output_dir}")
+    record_file = record_files[0]
+    parsed: dict[str, str] = {}
+    for raw_line in record_file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or "：" not in line:
+            continue
+        key, _, value = line.partition("：")
+        parsed[key.strip()] = value.strip()
+    dish_name = parsed.get("菜名", "").strip() or infer_dish_name_from_folder(output_dir.name)
+    notes = parsed.get("菜名描述", "").strip()
+    if notes == "无":
+        notes = ""
+    return {
+        "dish_name": dish_name,
+        "notes": notes,
+        "region_label": parsed.get("参考菜系", "").strip(),
+        "reference_dish": parsed.get("参考菜品", "").strip(),
+        "record_file": str(record_file),
+    }
+
+
+def infer_dish_name_from_folder(folder_name: str) -> str:
+    import re
+
+    matched = re.match(r"^\d+_(.+)$", folder_name)
+    if matched:
+        return matched.group(1).strip()
+    parts = folder_name.split("_", 2)
+    if len(parts) >= 3 and parts[2].strip():
+        return parts[2].strip()
+    if len(parts) >= 2 and parts[-1].strip():
+        return parts[-1].strip()
+    return folder_name.strip()
+
+
 V2_PUBLISH_PLATFORM_SPECS: tuple[tuple[str, str, int], ...] = (
     ("douyin", "抖音", 4),
     ("xiaohongshu", "小红书", 10),

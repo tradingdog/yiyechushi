@@ -25,6 +25,7 @@ from v2_core import (
     persist_v2_dish_record,
     persist_v2_publish_copy_assets,
     load_cankao_group_template,
+    load_dish_idea_record_from_dir,
     load_manual_dish_idea,
     parse_bool_env,
     save_generated_images,
@@ -37,7 +38,7 @@ from v2_core import (
 def resolve_auto_generate_enabled(mode: str | None) -> bool:
     if mode == "auto":
         return True
-    if mode == "file":
+    if mode in {"file", "target"}:
         return False
     return parse_bool_env("AUTO_GENERATE_DISH_IDEA", default=False)
 
@@ -115,18 +116,26 @@ def generate_group_images(
     return saved_images, image_error
 
 
-def run_v2_mode2(mode: str | None = None) -> dict[str, object]:
+def run_v2_mode2(mode: str | None = None, *, target_output_dir: str | Path | None = None) -> dict[str, object]:
     from v2_core import ensure_runtime_config_loaded
 
     ensure_runtime_config_loaded()
     doubao_client = build_doubao_client()
     image_client = build_openai_image_client()
 
-    dish_payload = prepare_dish_payload(mode, doubao_client)
+    if mode == "target" or target_output_dir:
+        run_output_dir = Path(target_output_dir).resolve()
+        dish_payload = load_dish_idea_record_from_dir(run_output_dir)
+        write_dish_idea_file(dish_payload["dish_name"], dish_payload.get("notes", ""), idea_file=IDEA_FILE)
+        print(f"指定造菜：复用已有目录 {run_output_dir}")
+        print(f"造菜信息来源：{dish_payload.get('record_file', '')}")
+    else:
+        dish_payload = prepare_dish_payload(mode, doubao_client)
+        timestamp = get_timestamp()
+        run_output_dir = build_run_output_dir(timestamp, dish_payload["dish_name"])
     dish_name = dish_payload["dish_name"]
     notes = dish_payload.get("notes", "")
     timestamp = get_timestamp()
-    run_output_dir = build_run_output_dir(timestamp, dish_name)
     publish_dir = run_output_dir / "publish"
     print(f"输出目录：{run_output_dir}")
     print("流程：海报 -> 细节图 -> 菜谱图 -> 封面图")

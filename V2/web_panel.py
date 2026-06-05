@@ -32,6 +32,7 @@ from v2_core import (
     get_cover_image_count,
     get_image_settings,
     get_timestamp,
+    load_dish_idea_record_from_dir,
     save_generated_images,
     save_text_output,
 )
@@ -39,7 +40,7 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.63"
+PANEL_VERSION = "v0.64"
 REPO_ROOT = ROOT_DIR.parent
 
 PUBLISH_PLATFORMS: dict[str, dict[str, str]] = {
@@ -345,7 +346,7 @@ HTML_PAGE = """<!doctype html>
     .section-card{border:1px solid #283449;background:var(--panel-soft);border-radius:10px;padding:10px}
     .sec-title{margin:0 0 8px;font-size:14px;font-weight:700}
     .sec-desc{margin:0 0 8px;font-size:12px;color:var(--sub)}
-    .mode{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .mode{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
     .mode-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:stretch}
     .mode2-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
     .mode2-item{border:1px solid #283449;border-radius:8px;padding:8px;background:#0f172a}
@@ -426,19 +427,32 @@ HTML_PAGE = """<!doctype html>
     .thumb{flex:0 0 auto;width:86px;height:64px;border:1px solid #344155;border-radius:8px;padding:2px;background:#0f172a;cursor:pointer;display:block}
     .thumb img{width:100%;height:100%;object-fit:cover;border-radius:6px}
     .thumb.active{border-color:#60a5fa;box-shadow:0 0 0 2px rgba(96,165,250,.25)}
-    .history-grid{display:flex;flex-direction:column;gap:8px}
-    .history-empty{color:var(--sub);font-size:12px}
+    .history-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
+    .history-head .panel-title{margin:0}
+    .history-head-actions{display:flex;gap:6px;align-items:center}
+    .history-head-actions button{
+      width:auto;padding:5px 9px;border:1px solid #475569;border-radius:7px;background:#101a2a;color:#dbe7ff;cursor:pointer;font-size:11px;
+    }
+    .history-head-actions .danger-btn{border-color:#7f1d1d;color:#fecaca;background:#2b1313}
+    .history-head-actions .hidden{display:none}
+    .history-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:8px;align-content:start}
+    .history-empty{color:var(--sub);font-size:12px;grid-column:1/-1}
     .history-item{
       position:relative;border:1px solid #2f3b55;border-radius:10px;background:#0f172a;overflow:hidden;cursor:pointer;
       transition:transform .15s ease,border-color .15s ease;
-      display:grid;grid-template-columns:64px 1fr;grid-template-areas:"cover meta" "ops ops";gap:8px;align-items:center;padding:8px;
+      display:grid;grid-template-columns:18px 52px 1fr;grid-template-areas:"check cover meta" "ops ops ops";gap:6px;align-items:center;padding:8px;
     }
+    .history-check{grid-area:check;display:none;align-items:flex-start;padding-top:2px}
+    .history-check input{width:14px;height:14px;margin:0;accent-color:#22c55e;cursor:pointer}
+    .history-grid.batch-mode .history-check{display:flex}
+    .history-grid.batch-mode .history-ops{display:none}
+    .history-item.batch-selected{border-color:#f59e0b;box-shadow:0 0 0 2px rgba(245,158,11,.22)}
     .history-item:hover{transform:translateY(-1px);border-color:#60a5fa;box-shadow:0 0 0 2px rgba(96,165,250,.18)}
     .history-item.active{border-color:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,.22)}
-    .history-cover{grid-area:cover;width:64px;height:64px;background:#111827;border-radius:7px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+    .history-cover{grid-area:cover;width:52px;height:52px;background:#111827;border-radius:7px;display:flex;align-items:center;justify-content:center;overflow:hidden}
     .history-cover img{width:100%;height:100%;object-fit:cover}
     .history-meta{grid-area:meta;padding:0;min-width:0}
-    .history-name{font-size:13px;font-weight:700;line-height:1.3;word-break:break-all}
+    .history-name{font-size:12px;font-weight:700;line-height:1.3;word-break:break-all;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
     .history-time{font-size:12px;color:var(--sub);margin-top:4px}
     .history-ops{
       grid-area:ops;position:static;display:flex;gap:6px;justify-content:flex-end;padding-top:6px;
@@ -513,7 +527,13 @@ HTML_PAGE = """<!doctype html>
 
     <div id="fourColLayout" class="four-col">
       <section class="panel panel-left">
-        <h3 class="panel-title">菜品池</h3>
+        <div class="history-head">
+          <h3 class="panel-title">菜品池</h3>
+          <div class="history-head-actions">
+            <button id="batchDeleteBtn" type="button">批量删除</button>
+            <button id="batchDeleteAllBtn" type="button" class="danger-btn hidden">全部删除</button>
+          </div>
+        </div>
         <div id="history" class="history-grid"></div>
         <div id="historyLoadMore" class="load-more">
           <button id="loadMoreBtn" type="button">加载更多</button>
@@ -528,7 +548,9 @@ HTML_PAGE = """<!doctype html>
           <div class="mode">
             <button id="modeAutoBtn" class="active" type="button">自动造菜</button>
             <button id="modeFileBtn" type="button">手动点名</button>
+            <button id="modeTargetBtn" type="button">指定造菜</button>
           </div>
+          <div id="targetModeHint" class="sec-desc" style="display:none;margin-top:8px">在左侧菜品池选中一项后，将自动读取菜名与描述，并在原目录内生成图片与文案。</div>
           <div id="cuisineCard" style="margin-top:8px">
             <label>自动造菜菜系</label>
             <select id="cuisineMode">
@@ -732,7 +754,10 @@ HTML_PAGE = """<!doctype html>
       activeTextCategory: "",
       activeTextFilePath: "",
       publishLogIndex: 0,
-      publishPolling: false
+      publishPolling: false,
+      batchDeleteMode: false,
+      batchDeleteSelected: new Set(),
+      selectedHistoryItem: null
     };
     const $ = (id) => document.getElementById(id);
     const QUALITY_INDEX = { low: 0, medium: 1, high: 2, auto: 3 };
@@ -765,25 +790,65 @@ HTML_PAGE = """<!doctype html>
       return map[String(code)] || code || "-";
     }
 
+    function applyTargetDishFromItem(item){
+      if(!item){ return; }
+      $("dishName").value = item.dish_name || "";
+      $("dishNotes").value = item.idea_notes || "";
+    }
+
     function setMode(mode){
       state.mode = mode;
       $("modeAutoBtn").classList.toggle("active", mode === "auto");
       $("modeFileBtn").classList.toggle("active", mode === "file");
+      $("modeTargetBtn").classList.toggle("active", mode === "target");
       const manual = mode === "file";
-      $("cuisineCard").style.display = manual ? "none" : "block";
-      $("dishName").disabled = !manual;
-      $("dishName").classList.toggle("input-disabled", !manual);
-      $("dishNotes").disabled = !manual;
-      $("dishNotes").classList.toggle("input-disabled", !manual);
-      $("notesCard").style.display = manual ? "block" : "none";
+      const target = mode === "target";
+      $("cuisineCard").style.display = mode === "auto" ? "block" : "none";
+      $("targetModeHint").style.display = target ? "block" : "none";
+      $("dishName").disabled = target;
+      $("dishName").classList.toggle("input-disabled", target);
+      $("dishNotes").disabled = target;
+      $("dishNotes").classList.toggle("input-disabled", target);
+      $("notesCard").style.display = (manual || target) ? "block" : "none";
+      if(target && state.selectedHistoryItem){
+        applyTargetDishFromItem(state.selectedHistoryItem);
+      }
       syncIdeaCountUi();
     }
 
     function syncIdeaCountUi(){
       const manual = state.mode === "file";
-      $("ideaCount").disabled = manual;
-      $("ideaCount").classList.toggle("input-disabled", manual);
+      const target = state.mode === "target";
+      $("ideaCount").disabled = manual || target;
+      $("ideaCount").classList.toggle("input-disabled", manual || target);
       if(manual){ $("ideaCount").value = "1"; }
+    }
+
+    function setBatchDeleteMode(enabled){
+      state.batchDeleteMode = Boolean(enabled);
+      state.batchDeleteSelected = new Set();
+      $("history").classList.toggle("batch-mode", state.batchDeleteMode);
+      $("batchDeleteBtn").textContent = state.batchDeleteMode ? "取消批量" : "批量删除";
+      $("batchDeleteAllBtn").classList.toggle("hidden", !state.batchDeleteMode);
+      $("batchDeleteAllBtn").disabled = true;
+      Array.from($("history").querySelectorAll(".history-item")).forEach((el) => {
+        el.classList.remove("batch-selected");
+        const checkbox = el.querySelector(".history-check input");
+        if(checkbox){ checkbox.checked = false; }
+      });
+    }
+
+    function updateBatchDeleteUi(){
+      const count = state.batchDeleteSelected.size;
+      $("batchDeleteAllBtn").disabled = count < 1;
+      $("batchDeleteAllBtn").textContent = count > 0 ? `全部删除（${count}）` : "全部删除";
+    }
+
+    function toggleBatchDeletePath(path, checked){
+      if(!path){ return; }
+      if(checked){ state.batchDeleteSelected.add(path); }
+      else{ state.batchDeleteSelected.delete(path); }
+      updateBatchDeleteUi();
     }
 
     function setStatus(text, level=""){
@@ -1277,7 +1342,54 @@ HTML_PAGE = """<!doctype html>
       const data = await res.json();
       if(!res.ok){ throw new Error(data.error || "删除失败"); }
       setStatus("历史记录已删除。", "ok");
+      if(state.selectedHistoryPath === path){
+        state.selectedHistoryPath = "";
+        state.selectedHistoryItem = null;
+      }
       await loadHistory(true);
+    }
+
+    async function 批量删除历史(paths){
+      const list = (paths || []).filter(Boolean);
+      if(!list.length){
+        setStatus("请先勾选要删除的菜品。", "warn");
+        return;
+      }
+      const ok = window.confirm(`确定删除选中的 ${list.length} 个菜品及其文件夹吗？`);
+      if(!ok){ return; }
+      const res = await fetch("/api/history_batch_delete", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({paths: list})
+      });
+      const data = await res.json();
+      if(!res.ok){ throw new Error(data.error || "批量删除失败"); }
+      setStatus(`已删除 ${data.deleted_count || list.length} 个菜品。`, "ok");
+      if(list.includes(state.selectedHistoryPath)){
+        state.selectedHistoryPath = "";
+        state.selectedHistoryItem = null;
+      }
+      setBatchDeleteMode(false);
+      await loadHistory(true);
+    }
+
+    async function selectHistoryItem(item, card){
+      state.selectedHistoryPath = item.path;
+      state.selectedHistoryItem = item;
+      Array.from($("history").querySelectorAll(".history-item")).forEach((el) => el.classList.remove("active"));
+      if(card){ card.classList.add("active"); }
+      const 历史参考菜 = item.reference_dish || "未记录参考菜";
+      const 历史菜系 = item.region_label || "未记录菜系";
+      更新结果信息(item.dish_name, 历史参考菜, 历史菜系, item.path, "", "", "", "", [], "");
+      const allImages = item.images || (item.preview_image ? [item.preview_image] : []);
+      const publishImages = item.publish_images || [];
+      setGallerySource(allImages, publishImages);
+      if(state.mode === "target"){
+        applyTargetDishFromItem(item);
+      }
+      await loadTextAssets(item.path);
+      $("resultMsg").textContent = "已切换为菜品预览。";
+      $("resultMsg").className = "status";
     }
 
     function createHistoryCard(item){
@@ -1289,6 +1401,9 @@ HTML_PAGE = """<!doctype html>
         : `<div class="history-empty">暂无图片</div>`;
       const timeText = item.created_at || item.name.split("_").slice(0,2).join(" ");
       div.innerHTML = `
+        <label class="history-check" title="勾选删除">
+          <input type="checkbox" data-path="${item.path || ""}" />
+        </label>
         <div class="history-cover">${cover}</div>
         <div class="history-meta">
           <div class="history-name">${item.dish_name || item.name}</div>
@@ -1300,19 +1415,22 @@ HTML_PAGE = """<!doctype html>
           <button data-op="delete" class="del">删除</button>
         </div>
       `;
+      const checkbox = div.querySelector(".history-check input");
+      checkbox.onchange = (e) => {
+        e.stopPropagation();
+        const checked = Boolean(checkbox.checked);
+        div.classList.toggle("batch-selected", checked);
+        toggleBatchDeletePath(item.path, checked);
+      };
+      checkbox.onclick = (e) => e.stopPropagation();
       div.onclick = async () => {
-        state.selectedHistoryPath = item.path;
-        Array.from($("history").querySelectorAll(".history-item")).forEach((el) => el.classList.remove("active"));
-        div.classList.add("active");
-        const 历史参考菜 = item.reference_dish || "未记录参考菜";
-        const 历史菜系 = item.region_label || "未记录菜系";
-        更新结果信息(item.dish_name, 历史参考菜, 历史菜系, item.path, "", "", "", "", [], "");
-        const allImages = item.images || (item.preview_image ? [item.preview_image] : []);
-        const publishImages = item.publish_images || [];
-        setGallerySource(allImages, publishImages);
-        await loadTextAssets(item.path);
-        $("resultMsg").textContent = "已切换为菜品预览。";
-        $("resultMsg").className = "status";
+        if(state.batchDeleteMode){
+          checkbox.checked = !checkbox.checked;
+          div.classList.toggle("batch-selected", checkbox.checked);
+          toggleBatchDeletePath(item.path, checkbox.checked);
+          return;
+        }
+        await selectHistoryItem(item, div);
       };
       const ops = div.querySelector(".history-ops");
       ops.onclick = async (e) => {
@@ -1364,6 +1482,17 @@ HTML_PAGE = """<!doctype html>
         });
         state.historyOffset += items.length;
         markSelectedHistoryCard();
+        if(state.batchDeleteMode){
+          $("history").classList.add("batch-mode");
+          Array.from($("history").querySelectorAll(".history-item")).forEach((el) => {
+            const path = el.dataset.path || "";
+            const checked = state.batchDeleteSelected.has(path);
+            const checkbox = el.querySelector(".history-check input");
+            if(checkbox){ checkbox.checked = checked; }
+            el.classList.toggle("batch-selected", checked);
+          });
+          updateBatchDeleteUi();
+        }
         $("loadMoreBtn").style.display = state.historyHasMore ? "inline-block" : "none";
         if(!$("history").children.length){
           $("history").innerHTML = '<div class="history-empty">暂无菜品</div>';
@@ -1470,9 +1599,13 @@ HTML_PAGE = """<!doctype html>
       const cuisineText = data.config.AUTO_GENERATE_DISH_IDEA === "1"
         ? 菜系文案(data.config.AUTO_DISH_CUISINE_MODE || "1")
         : "";
-      $("envMode").textContent = data.config.AUTO_GENERATE_DISH_IDEA === "1"
-        ? `自动造菜 / ${cuisineText}`
-        : "手动点名";
+      if(state.mode === "target"){
+        $("envMode").textContent = "指定造菜";
+      }else{
+        $("envMode").textContent = data.config.AUTO_GENERATE_DISH_IDEA === "1"
+          ? `自动造菜 / ${cuisineText}`
+          : "手动点名";
+      }
       $("cuisineMode").value = data.config.AUTO_DISH_CUISINE_MODE || "1";
       $("posterCount").value = data.config.MODE2_POSTER_IMAGE_COUNT || data.config.OPENAI_IMAGE_COUNT;
       $("posterQuality").value = data.config.MODE2_POSTER_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
@@ -1529,9 +1662,14 @@ HTML_PAGE = """<!doctype html>
         $("dishName").focus();
         return;
       }
+      if(state.mode === "target" && !state.selectedHistoryPath){
+        setStatus("指定造菜请先在左侧菜品池选中一个菜品。", "danger");
+        return;
+      }
       await submitTask({
         action: "run",
         mode: state.mode,
+        target_output_dir: state.mode === "target" ? state.selectedHistoryPath : "",
         cuisine_mode: $("cuisineMode").value.trim(),
         dish_name: $("dishName").value.trim(),
         notes: $("dishNotes").value.trim(),
@@ -1611,6 +1749,15 @@ HTML_PAGE = """<!doctype html>
     function bindEvents(){
       $("modeAutoBtn").onclick = () => setMode("auto");
       $("modeFileBtn").onclick = () => setMode("file");
+      $("modeTargetBtn").onclick = () => setMode("target");
+      $("batchDeleteBtn").onclick = () => setBatchDeleteMode(!state.batchDeleteMode);
+      $("batchDeleteAllBtn").onclick = async () => {
+        try{
+          await 批量删除历史(Array.from(state.batchDeleteSelected));
+        }catch(err){
+          setStatus("批量删除失败：" + err.message, "warn");
+        }
+      };
       $("imageTabBtn").onclick = () => setRightTab("image");
       $("textTabBtn").onclick = () => setRightTab("text");
       $("runBtn").onclick = runNow;
@@ -1829,6 +1976,15 @@ def list_history(limit: int = 12, offset: int = 0) -> list[dict[str, Any]]:
         dish_name = meta.get("dish_name", "") or infer_dish_name_from_folder(folder.name)
         region_label = meta.get("region_label", "")
         reference_dish = meta.get("reference_dish", "")
+        idea_notes = ""
+        try:
+            idea_payload = load_dish_idea_record_from_dir(folder)
+            dish_name = idea_payload.get("dish_name", "") or dish_name
+            idea_notes = str(idea_payload.get("notes", "")).strip()
+            region_label = region_label or str(idea_payload.get("region_label", "")).strip()
+            reference_dish = reference_dish or str(idea_payload.get("reference_dish", "")).strip()
+        except Exception:
+            pass
         # 兜底：当前会话里最新结果尚未落盘时，优先用内存结果补上关键字段。
         if (not region_label or not reference_dish) and isinstance(LAST_RESULT, dict):
             current_output_dir = str(LAST_RESULT.get("output_dir", "")).strip()
@@ -1849,9 +2005,22 @@ def list_history(limit: int = 12, offset: int = 0) -> list[dict[str, Any]]:
                 "preview_image": preview,
                 "images": images,
                 "publish_images": publish_images,
+                "idea_notes": idea_notes,
             }
         )
     return rows
+
+
+def delete_history_folders(raw_paths: list[str]) -> list[str]:
+    deleted: list[str] = []
+    for raw_path in raw_paths:
+        path_text = str(raw_path or "").strip()
+        if not path_text:
+            continue
+        deleted.append(str(delete_history_folder(path_text)))
+    if not deleted:
+        raise ValueError("没有可删除的菜品目录。")
+    return deleted
 
 
 def delete_history_folder(raw_path: str) -> Path:
@@ -1972,7 +2141,7 @@ def current_config_snapshot() -> dict[str, str]:
 
 def apply_runtime_overrides(payload: dict[str, Any]) -> None:
     mode = str(payload.get("mode", "")).strip().lower()
-    if mode in {"auto", "file"}:
+    if mode in {"auto", "file", "target"}:
         os.environ["AUTO_GENERATE_DISH_IDEA"] = "1" if mode == "auto" else "0"
     cuisine_mode = str(payload.get("cuisine_mode", "")).strip()
     if cuisine_mode in {"0", "1", "2", "3", "4", "5", "6", "7"}:
@@ -2059,7 +2228,13 @@ def run_task_worker(task: dict[str, Any]) -> None:
             else:
                 if mode == "file":
                     write_idea_file(str(task.get("dish_name", "")).strip(), str(task.get("notes", "")).strip())
-                result = run_v2_mode2(mode=mode if mode in {"auto", "file"} else None)
+                if mode == "target":
+                    target_output_dir = str(task.get("target_output_dir", "")).strip()
+                    if not target_output_dir:
+                        raise ValueError("指定造菜需要选中菜品目录。")
+                    result = run_v2_mode2(mode="target", target_output_dir=target_output_dir)
+                else:
+                    result = run_v2_mode2(mode=mode if mode in {"auto", "file"} else None)
         with RUN_LOCK:
             LAST_RESULT = result
             LAST_ERROR = ""
@@ -2209,6 +2384,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             "/api/history_delete",
             "/api/publish_start",
             "/api/publish_login_confirm",
+            "/api/history_batch_delete",
         }:
             self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
             return
@@ -2232,6 +2408,16 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             try:
                 deleted = delete_history_folder(str(payload.get("path", "")).strip())
                 self._send_json({"ok": True, "deleted": str(deleted)})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
+            return
+        if parsed.path == "/api/history_batch_delete":
+            try:
+                raw_paths = payload.get("paths") or []
+                if not isinstance(raw_paths, list):
+                    raise ValueError("paths 必须是数组。")
+                deleted = delete_history_folders([str(item) for item in raw_paths])
+                self._send_json({"ok": True, "deleted": deleted, "deleted_count": len(deleted)})
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": str(exc)}, code=400)
             return
