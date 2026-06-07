@@ -16,6 +16,7 @@ from v2_core import (
     build_doubao_client,
     build_openai_image_client,
     build_run_output_dir,
+    dedupe_archive_duplicate_dish_folders,
     generate_cankao_prompt_by_template,
     generate_cankao_prompt_with_images,
     generate_images_by_prompt,
@@ -494,6 +495,18 @@ def run_v2_mode2(mode: str | None = None, *, target_output_dir: str | Path | Non
     close_image = getattr(image_client, "close", None)
     if callable(close_image):
         close_image()
+
+    is_new_output_dir = not (mode == "target" or target_output_dir)
+    if is_new_output_dir and dish_name.strip():
+        try:
+            archived = dedupe_archive_duplicate_dish_folders(dish_name, keep_dir=run_output_dir)
+            if archived:
+                print(
+                    f"菜品去重完成：保留最新目录 {run_output_dir.name}，"
+                    f"已归档 {len(archived)} 个同名旧目录。"
+                )
+        except Exception as dedupe_exc:
+            print(f"菜品去重失败：{dedupe_exc}")
 
     image_error = "\n".join(errors).strip()
     return {

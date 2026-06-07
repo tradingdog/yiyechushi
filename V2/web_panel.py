@@ -25,6 +25,7 @@ from idea_batch import run_idea_batch, DISH_POOL_DIR
 from v2_core import (
     IDEA_FILE,
     OUTPUT_DIR,
+    archive_dish_folder,
     build_openai_image_client,
     build_run_output_dir,
     ensure_runtime_config_loaded,
@@ -3073,29 +3074,9 @@ def list_history(limit: int = 30, offset: int = 0, sort: str = "favorite") -> li
     return rows
 
 
-def build_archive_destination(folder: Path) -> Path:
-    dish_pool_root = DISH_POOL_DIR.resolve()
-    output_root = OUTPUT_DIR.resolve()
-    if dish_pool_root in folder.parents or folder == dish_pool_root:
-        relative = folder.relative_to(dish_pool_root)
-        return DISH_ARCHIVE_DIR / "dish_pool" / relative
-    if output_root in folder.parents or folder == output_root:
-        relative = folder.relative_to(output_root)
-        return DISH_ARCHIVE_DIR / "output" / relative
-    raise ValueError("只能归档 V2/output 或 V2/dish_pool 下的菜品目录。")
-
-
 def archive_history_folder(raw_path: str) -> Path:
     folder = resolve_output_path(raw_path)
-    if folder.resolve() in {OUTPUT_DIR.resolve(), DISH_POOL_DIR.resolve()}:
-        raise ValueError("不能移出根目录。")
-    destination = build_archive_destination(folder)
-    if destination.exists():
-        destination = destination.parent / f"{destination.name}_{get_timestamp()}"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(folder), str(destination))
-    remove_dish_favorite(str(folder.resolve()))
-    return destination
+    return archive_dish_folder(folder)
 
 
 def delete_history_folders(raw_paths: list[str]) -> list[str]:

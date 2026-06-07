@@ -36,6 +36,9 @@ CAIPU_TEMPLATE_FILE = CANKAO_DIR / "caipu.txt"
 FENGMIAN_TEMPLATE_FILE = CANKAO_DIR / "fengmian.txt"
 CHARACTER_REFERENCE_FILE = CANKAO_DIR / "juese.png"
 OUTPUT_DIR = ROOT_DIR / "output"
+DISH_POOL_DIR = ROOT_DIR / "dish_pool"
+DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
+FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 
 DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-pro-260215"
@@ -1365,6 +1368,118 @@ def build_run_output_dir(timestamp: str, dish_name: str) -> Path:
     run_dir = OUTPUT_DIR / f"{timestamp}_{sanitize_file_name(dish_name)}"
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
+
+
+def normalize_dish_name_key(name: str) -> str:
+    return re.sub(r"\s+", "", str(name or "").strip())
+
+
+def collect_dish_pool_dirs() -> list[Path]:
+    dirs: list[Path] = []
+    if OUTPUT_DIR.exists():
+        dirs.extend(path for path in OUTPUT_DIR.iterdir() if path.is_dir())
+    if DISH_POOL_DIR.exists():
+        for batch_dir in DISH_POOL_DIR.iterdir():
+            if not batch_dir.is_dir() or not batch_dir.name.endswith("_batch"):
+                continue
+            dirs.extend(path for path in batch_dir.iterdir() if path.is_dir())
+    return dirs
+
+
+def resolve_dish_name_for_folder(folder: Path) -> str:
+    try:
+        payload = load_dish_idea_record_from_dir(folder)
+        name = str(payload.get("dish_name", "")).strip()
+        if name:
+            return name
+    except Exception:
+        pass
+    meta_file = folder / "_run_meta.json"
+    if meta_file.is_file():
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            name = str(meta.get("dish_name", "")).strip()
+            if name:
+                return name
+        except Exception:
+            pass
+    return infer_dish_name_from_folder(folder.name)
+
+
+def _remove_dish_favorite_entry(folder: Path) -> None:
+    if not FAVORITES_FILE.exists():
+        return
+    try:
+        payload = json.loads(FAVORITES_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return
+    paths = payload.get("paths")
+    if not isinstance(paths, dict):
+        return
+    key = str(folder.resolve())
+    if key not in paths:
+        return
+    paths.pop(key, None)
+    FAVORITES_FILE.write_text(
+        json.dumps({"paths": paths}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _build_archive_destination(folder: Path) -> Path:
+    folder = folder.resolve()
+    dish_pool_root = DISH_POOL_DIR.resolve()
+    output_root = OUTPUT_DIR.resolve()
+    if dish_pool_root in folder.parents:
+        relative = folder.relative_to(dish_pool_root)
+        return DISH_ARCHIVE_DIR / "dish_pool" / relative
+    if output_root in folder.parents:
+        relative = folder.relative_to(output_root)
+        return DISH_ARCHIVE_DIR / "output" / relative
+    raise ValueError(f"只能归档 output 或 dish_pool 下的菜品目录：{folder}")
+
+
+def archive_dish_folder(folder: Path) -> Path:
+    folder = folder.resolve()
+    if folder in {OUTPUT_DIR.resolve(), DISH_POOL_DIR.resolve()}:
+        raise ValueError("不能移出根目录。")
+    destination = _build_archive_destination(folder)
+    if destination.exists():
+        destination = destination.parent / f"{destination.name}_{get_timestamp()}"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(folder), str(destination))
+    _remove_dish_favorite_entry(folder)
+    return destination
+
+
+def find_duplicate_dish_folders(dish_name: str, *, keep_dir: Path) -> list[Path]:
+    key = normalize_dish_name_key(dish_name)
+    if not key:
+        return []
+    keep_resolved = keep_dir.resolve()
+    duplicates: list[Path] = []
+    for folder in collect_dish_pool_dirs():
+        resolved = folder.resolve()
+        if resolved == keep_resolved:
+            continue
+        if normalize_dish_name_key(resolve_dish_name_for_folder(folder)) != key:
+            continue
+        duplicates.append(folder)
+    return duplicates
+
+
+def dedupe_archive_duplicate_dish_folders(dish_name: str, *, keep_dir: str | Path) -> list[str]:
+    """同名菜品只保留 keep_dir，其余目录移入 dish_archive。"""
+    keep_path = Path(keep_dir).resolve()
+    archived_paths: list[str] = []
+    for folder in find_duplicate_dish_folders(dish_name, keep_dir=keep_path):
+        try:
+            destination = archive_dish_folder(folder)
+            archived_paths.append(str(destination))
+            print(f"菜品去重：已移出旧目录 {folder.name} -> {destination}")
+        except Exception as exc:
+            print(f"菜品去重：移出失败 {folder}：{exc}")
+    return archived_paths
 
 
 def save_text_output(content: str, output_file: Path) -> None:
