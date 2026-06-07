@@ -1,0 +1,42 @@
+{
+  "files.watcherExclude": {
+    "**/tools/chrome_automation_profile/**": true,
+    "**/tools/chrome_manual_cdp/**": true,
+    "**/.venv/**": true,
+    "**/output/**": true,
+    "**/V2/dish_pool/**": true,
+    "**/V2/dish_archive/**": true,
+    "**/V2/output/**": true,
+    "**/__pycache__/**": true
+  },
+  "search.exclude": {
+    "**/tools/chrome_automation_profile": true,
+    "**/tools/chrome_manual_cdp": true,
+    "**/.venv": true,
+    "**/output": true,
+    "**/V2/dish_pool": true,
+    "**/V2/dish_archive": true,
+    "**/V2/output": true
+  },
+  "files.exclude": {
+    "**/__pycache__": true,
+    "tools/chrome_automation_profile": true,
+    "tools/chrome_manual_cdp": true
+  },
+  "python.analysis.diagnosticMode": "openFilesOnly",
+  "python.analysis.exclude": [
+    "**/tools/chrome_automation_profile",
+    "**/tools/chrome_manual_cdp",
+    "**/.venv",
+    "**/output",
+    "**/V2/dish_pool",
+    "**/V2/dish_archive",
+    "**/V2/output"
+  ],
+  "python.analysis.ignore": [
+    "**/tools/chrome_automation_profile",
+    "**/tools/chrome_manual_cdp"
+  ],
+  "terminal.integrated.scrollback": 2000,
+  "git.autorefresh": false
+}

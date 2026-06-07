@@ -61,8 +61,20 @@ from publish_final_assets import (  # noqa: E402
 
 DEFAULT_V2_OUTPUT_DIR = V2_DIR / "output" / "20260604_210303_葱香陈皮羊排"
 DEFAULT_FINAL_DIR_NAME = "publish/final"
-WECHAT_DESCRIPTION_SUFFIX = "_微信视频号和公众号图文描述.txt"
-WECHAT_TOPIC_SUFFIX = "_微信视频号和公众号话题.txt"
+WECHAT_TITLE_SUFFIXES = (
+    "_微信视频号标题.txt",
+    "_微信视频号和公众号标题.txt",
+    "_图文标题.txt",
+)
+WECHAT_DESCRIPTION_SUFFIXES = (
+    "_微信视频号图文描述.txt",
+    "_微信视频号和公众号图文描述.txt",
+)
+WECHAT_TOPIC_SUFFIXES = (
+    "_微信视频号话题.txt",
+    "_微信视频号和公众号话题.txt",
+)
+MAX_CHANNELS_TOPIC_COUNT = 30
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,7 +95,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--url-keyword", default=DEFAULT_URL_KEYWORD)
     parser.add_argument("--chrome-path", default="")
     parser.add_argument("--automation-profile-dir", default=str(DEFAULT_AUTOMATION_PROFILE_DIR))
-    parser.add_argument("--allow-auto-launch-browser", action="store_true")
+    parser.add_argument("--no-auto-launch-browser", action="store_true", help="不自动拉起 Chrome，连不上 CDP 时直接失败。")
     parser.add_argument("--cdp-ready-timeout-ms", type=int, default=DEFAULT_CDP_READY_TIMEOUT_MS)
     parser.add_argument("--typing-delay-ms", type=int, default=DEFAULT_TYPING_DELAY_MS)
     parser.add_argument("--login-marker", default=str(DEFAULT_LOGIN_MARKER))
@@ -98,27 +110,31 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _find_output_file(output_dir: Path, suffixes: tuple[str, ...], label: str) -> Path:
+    for suffix in suffixes:
+        matches = sorted(output_dir.glob(f"*{suffix}"))
+        if matches:
+            if suffix != suffixes[0]:
+                print(f"未找到{label}首选文件，回退使用：{matches[-1].name}")
+            return matches[-1]
+    raise RuntimeError(f"未找到{label}文件（已尝试：{', '.join(suffixes)}）：{output_dir}")
+
+
 def _resolve_topic_tags(output_dir: Path, fallback_topics_line: str) -> tuple[str, ...]:
-    topic_files = sorted(output_dir.glob(f"*{WECHAT_TOPIC_SUFFIX}"))
+    topic_tags: tuple[str, ...] = ()
+    topic_files = [path for suffix in WECHAT_TOPIC_SUFFIXES for path in sorted(output_dir.glob(f"*{suffix}"))]
     if topic_files:
         topic_tags = parse_topic_tags(read_utf8_text(topic_files[-1]))
         if topic_tags:
             print(f"话题来自专用文件（{len(topic_tags)} 个）：{topic_files[-1].name}")
-            return topic_tags
-    topic_tags = parse_topic_tags(fallback_topics_line)
-    if topic_tags:
-        print(f"话题来自图文描述第 2 行（{len(topic_tags)} 个）。")
+    if not topic_tags:
+        topic_tags = parse_topic_tags(fallback_topics_line)
+        if topic_tags:
+            print(f"话题来自图文描述第 2 行（{len(topic_tags)} 个）。")
+    if len(topic_tags) > MAX_CHANNELS_TOPIC_COUNT:
+        print(f"视频号话题超过 {MAX_CHANNELS_TOPIC_COUNT} 个，已截断为前 {MAX_CHANNELS_TOPIC_COUNT} 个。")
+        topic_tags = topic_tags[:MAX_CHANNELS_TOPIC_COUNT]
     return topic_tags
-
-
-def _find_title_file(output_dir: Path) -> Path:
-    for suffix in ("_微信视频号和公众号标题.txt", "_图文标题.txt"):
-        matches = sorted(output_dir.glob(f"*{suffix}"))
-        if matches:
-            if suffix == "_图文标题.txt":
-                print(f"未找到微信专用标题，回退使用通用图文标题：{matches[-1].name}")
-            return matches[-1]
-    raise RuntimeError(f"未找到图文标题文件：{output_dir}")
 
 
 def resolve_final_dir(output_dir: Path, final_dir_text: str) -> Path:
@@ -145,7 +161,7 @@ def resolve_settings(args: argparse.Namespace) -> WeixinChannelsPublishSettings:
         url_keyword=str(args.url_keyword or DEFAULT_URL_KEYWORD).strip() or DEFAULT_URL_KEYWORD,
         chrome_path=chrome_path,
         automation_profile_dir=resolve_path(args.automation_profile_dir),
-        auto_launch_browser=bool(args.allow_auto_launch_browser),
+        auto_launch_browser=not bool(args.no_auto_launch_browser),
         cdp_ready_timeout_ms=max(0, int(args.cdp_ready_timeout_ms)),
         typing_delay_ms=max(0, int(args.typing_delay_ms)),
         login_marker_path=resolve_path(args.login_marker),
@@ -173,8 +189,8 @@ def resolve_channels_assets(args: argparse.Namespace) -> WeixinChannelsPublishAs
     output_dir = settings.output_dir
     final_dir = resolve_final_dir(output_dir, str(args.final_dir or ""))
 
-    title_file = _find_title_file(output_dir)
-    description_file = find_single_file(output_dir, WECHAT_DESCRIPTION_SUFFIX)
+    title_file = _find_output_file(output_dir, WECHAT_TITLE_SUFFIXES, "视频号标题")
+    description_file = _find_output_file(output_dir, WECHAT_DESCRIPTION_SUFFIXES, "视频号图文描述")
     title_text = read_utf8_text(title_file)
     description_body, topics_line = split_wechat_description_parts(read_utf8_text(description_file))
     topic_tags = _resolve_topic_tags(output_dir, topics_line)

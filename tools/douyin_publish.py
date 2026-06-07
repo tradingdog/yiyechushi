@@ -7,7 +7,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Callable, Literal, Sequence
 from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import urlopen
@@ -314,10 +314,17 @@ def resolve_publish_assets(settings: PublishSettings) -> PublishAssets:
     if not publish_dir.exists() or not publish_dir.is_dir():
         raise RuntimeError(f"publish 目录不存在：{publish_dir}")
 
-    try:
-        title_file = find_single_file(settings.output_dir, "_图文标题.txt")
-    except RuntimeError:
-        title_file = find_single_file(settings.output_dir, "_抖音图文标题.txt")
+    title_file = None
+    for suffix in ("_图文标题.txt", "_抖音标题.txt", "_抖音图文标题.txt"):
+        try:
+            title_file = find_single_file(settings.output_dir, suffix)
+            break
+        except RuntimeError:
+            continue
+    if title_file is None:
+        raise RuntimeError(
+            f"未找到标题文件（已尝试 _图文标题 / _抖音标题 / _抖音图文标题）：{settings.output_dir}"
+        )
     description_file = find_single_file(settings.output_dir, "_抖音图文描述.txt")
     title_text = read_utf8_text(title_file)
     description_text = read_utf8_text(description_file)
@@ -448,6 +455,75 @@ def find_target_page(browser: Browser, url_keyword: str) -> Page:
     page.wait_for_load_state("domcontentloaded")
     print(f"已锁定抖音页面：{page.url}")
     return page
+
+
+def resolve_page_by_keyword(
+    browser: Browser,
+    *,
+    url_keyword: str,
+    creator_home_url: str,
+    platform_label: str,
+    page_priority: Callable[[str], int] | None = None,
+) -> Page:
+    matched_pages: list[Page] = []
+    for context in browser.contexts:
+        matched_pages.extend(page for page in context.pages if url_keyword in page.url)
+
+    if matched_pages:
+        if page_priority is not None:
+            page = min(matched_pages, key=lambda item: (page_priority(item.url), item.url))
+        else:
+            page = matched_pages[-1]
+        page.bring_to_front()
+        page.wait_for_load_state("domcontentloaded")
+        print(f"已锁定{platform_label}页面：{page.url}")
+        return page
+
+    if not browser.contexts:
+        raise RuntimeError("Chrome 已连接，但没有任何可用浏览器上下文。")
+
+    print(
+        f"未在已打开的 Chrome 标签页里找到包含 {url_keyword} 的页面，"
+        f"正在自动打开{platform_label}：{creator_home_url}"
+    )
+    context = browser.contexts[0]
+    page = context.new_page()
+    page.goto(creator_home_url, wait_until="domcontentloaded")
+    page.wait_for_timeout(2000)
+    print(f"已打开{platform_label}页面：{page.url}")
+    return page
+
+
+def wait_for_manual_login_continue(
+    *,
+    platform_label: str,
+    prompt: str = "完成扫码登录后按回车继续：",
+) -> None:
+    print(f"当前{platform_label}尚未登录，请在自动化 Chrome 窗口中完成登录。")
+    print(prompt)
+    try:
+        input()
+    except EOFError as exc:
+        raise RuntimeError(
+            f"{platform_label}尚未登录，且当前为非交互环境，无法等待手动登录。"
+        ) from exc
+
+
+def resolve_target_page(browser: Browser, settings: PublishSettings) -> Page:
+    return resolve_page_by_keyword(
+        browser,
+        url_keyword=settings.url_keyword,
+        creator_home_url=settings.creator_home_url,
+        platform_label="抖音",
+    )
+
+
+def ensure_douyin_logged_in(page: Page) -> None:
+    while is_login_required_page(page):
+        wait_for_manual_login_continue(platform_label="抖音创作者页")
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_timeout(1500)
+    print("抖音创作者页登录态已就绪。")
 
 
 def is_login_required_page(page: Page) -> bool:
@@ -713,9 +789,9 @@ def location_select_locators(page: Page) -> tuple[Locator, ...]:
 
 def location_option_locators(page: Page, location_name: str) -> tuple[Locator, ...]:
     return (
-        page.locator("div.collection-v2-mrP_OU div.name-TgOwA3").filter(has_text=location_name, exact=True),
-        page.locator("div.detail-v2-uZaTIm div.name-TgOwA3").filter(has_text=location_name, exact=True),
-        page.locator("div.name-TgOwA3").filter(has_text=location_name, exact=True),
+        page.locator("div.detail-v2-uZaTIm div.name-TgOwA3").filter(has_text=location_name),
+        page.locator("div.collection-v2-mrP_OU div.name-TgOwA3").filter(has_text=location_name),
+        page.get_by_text(location_name, exact=True),
     )
 
 
@@ -870,16 +946,27 @@ def submit_declaration(page: Page, settings: PublishSettings) -> None:
 
 def select_publish_location(page: Page, settings: PublishSettings) -> None:
     location_name = DEFAULT_PUBLISH_LOCATION
-    click_locator(page, location_select_locators(page), description="位置选择输入框", timeout_ms=30_000)
-    type_text_humanly(page, location_name, delay_ms=settings.typing_delay_ms)
-    page.wait_for_timeout(DEFAULT_AFTER_LOCATION_INPUT_WAIT_MS)
-    click_locator(
-        page,
-        location_option_locators(page, location_name),
-        description=f"位置选项「{location_name}」",
-        timeout_ms=10_000,
-    )
-    print(f"已选择发布位置：{location_name}。")
+    try:
+        click_locator(page, location_select_locators(page), description="位置选择输入框", timeout_ms=15_000)
+        type_text_humanly(page, location_name, delay_ms=settings.typing_delay_ms)
+        page.wait_for_timeout(DEFAULT_AFTER_LOCATION_INPUT_WAIT_MS)
+        # 优先用键盘选第一项，避免误点页面其它控件（如「添加合集」下拉）。
+        page.keyboard.press("ArrowDown")
+        page.wait_for_timeout(400)
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(400)
+        print(f"已选择发布位置：{location_name}。")
+    except Exception as exc:
+        option_locator = find_optional_locator(
+            page,
+            location_option_locators(page, location_name),
+            timeout_ms=5_000,
+        )
+        if option_locator is not None:
+            option_locator.click()
+            print(f"已选择发布位置：{location_name}（点击备选）。")
+            return
+        print(f"位置选择未自动完成，请手动确认位置（不影响其余已填内容）：{exc}")
 
 
 def submit_final_publish(page: Page) -> None:
@@ -915,14 +1002,8 @@ def run_publish(settings: PublishSettings, assets: PublishAssets) -> None:
                 ) from exc
             raise
 
-        page = find_target_page(browser, settings.url_keyword)
-
-        if is_login_required_page(page):
-            raise RuntimeError(
-                "当前自动化 Chrome 打开的抖音创作者页还没有登录，所以脚本还不能继续点发布入口。\n"
-                "这不是 publish 图片问题，也不是标签页没匹配到；当前页面已经锁定成功，但它属于独立的自动化 Chrome 资料目录。\n"
-                "请先在这个自动化 Chrome 窗口里完成一次抖音登录，然后重新运行脚本。"
-            )
+        page = resolve_target_page(browser, settings)
+        ensure_douyin_logged_in(page)
 
         try:
             ensure_publish_editor_ready(page)
@@ -931,7 +1012,10 @@ def run_publish(settings: PublishSettings, assets: PublishAssets) -> None:
             input_publish_description(page, assets, settings)
             upload_cover(page, assets, settings)
             submit_declaration(page, settings)
-            select_publish_location(page, settings)
+            try:
+                select_publish_location(page, settings)
+            except Exception as exc:
+                print(f"位置选择步骤跳过：{exc}")
             if settings.auto_submit_publish:
                 submit_final_publish(page)
             else:

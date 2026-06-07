@@ -7,6 +7,7 @@ from typing import Any
 from v2_core import (
     CAIPU_TEMPLATE_FILE,
     CHARACTER_REFERENCE_FILE,
+    snapshot_mode2_image_settings,
     FENGMIAN_TEMPLATE_FILE,
     HAIBAO_TEMPLATE_FILE,
     IDEA_FILE,
@@ -22,6 +23,7 @@ from v2_core import (
     generate_poster_bubble_copy,
     get_mode2_group_settings,
     get_timestamp,
+    is_moderation_blocked_error,
     persist_v2_dish_record,
     persist_v2_publish_copy_assets,
     load_cankao_group_template,
@@ -31,6 +33,7 @@ from v2_core import (
     save_generated_images,
     save_text_output,
     select_and_publish_image_group,
+    soften_detail_image_prompt,
     write_dish_idea_file,
 )
 
@@ -69,6 +72,43 @@ def prepare_dish_payload(mode: str | None, doubao_client) -> dict[str, str]:
     return dish_payload
 
 
+def build_detail_reference_paths(poster_selected_image: str) -> list[str]:
+    poster_path = str(poster_selected_image or "").strip()
+    if not poster_path:
+        raise RuntimeError("细节图生图缺少海报参考图。")
+    if not Path(poster_path).exists():
+        raise RuntimeError(f"细节图生图海报参考图不存在：{poster_path}")
+    if not CHARACTER_REFERENCE_FILE.exists():
+        raise RuntimeError(f"角色参考图不存在：{CHARACTER_REFERENCE_FILE}")
+    refs = [poster_path, str(CHARACTER_REFERENCE_FILE.resolve())]
+    print(f"细节图生图参考图：海报={refs[0]}，角色={refs[1]}")
+    return refs
+
+
+def build_image_generation_attempts(
+    *,
+    prompt_text: str,
+    reference_paths: list[str | Path],
+    moderation_fallback: bool,
+) -> list[tuple[str, list[str | Path]]]:
+    full_refs = list(reference_paths)
+    attempts: list[tuple[str, list[str | Path]]] = [(prompt_text, full_refs)]
+    if not moderation_fallback:
+        return attempts
+
+    poster_only_refs = [
+        path
+        for path in reference_paths
+        if "juese" not in Path(str(path)).name.lower()
+    ]
+    softened_prompt = soften_detail_image_prompt(prompt_text)
+    if softened_prompt != prompt_text:
+        attempts.append((softened_prompt, full_refs))
+    if poster_only_refs and poster_only_refs != full_refs:
+        attempts.append((softened_prompt if softened_prompt != prompt_text else prompt_text, list(poster_only_refs)))
+    return attempts
+
+
 def generate_group_images(
     *,
     image_client,
@@ -80,39 +120,65 @@ def generate_group_images(
     dish_name: str,
     name_suffix: str,
     stage_label: str,
+    moderation_fallback: bool = False,
 ) -> tuple[list[str], str]:
     image_error = ""
     saved_images: list[str] = []
-    try:
-        if reference_paths:
-            image_items = generate_images_from_references(
-                client=image_client,
-                prompt_text=prompt_text,
-                reference_paths=reference_paths,
-                settings=settings,
+    attempts = build_image_generation_attempts(
+        prompt_text=prompt_text,
+        reference_paths=reference_paths,
+        moderation_fallback=moderation_fallback,
+    )
+    last_exc: Exception | None = None
+    for attempt_idx, (attempt_prompt, attempt_refs) in enumerate(attempts):
+        try:
+            if attempt_refs:
+                image_items = generate_images_from_references(
+                    client=image_client,
+                    prompt_text=attempt_prompt,
+                    reference_paths=attempt_refs,
+                    settings=settings,
+                )
+            else:
+                image_items = generate_images_by_prompt(
+                    client=image_client,
+                    prompt_text=attempt_prompt,
+                    settings=settings,
+                )
+            saved_images = save_generated_images(
+                image_items=image_items,
+                output_dir=output_dir,
+                timestamp=timestamp,
+                dish_name=dish_name,
+                name_suffix=name_suffix,
             )
-        else:
-            image_items = generate_images_by_prompt(
-                client=image_client,
-                prompt_text=prompt_text,
-                settings=settings,
+            for image_file in saved_images:
+                print(f"已保存{stage_label}：{image_file}")
+            if attempt_idx > 0:
+                print(f"{stage_label}已通过降级策略生成（策略 {attempt_idx + 1}/{len(attempts)}）")
+            return saved_images, ""
+        except Exception as image_exc:
+            last_exc = image_exc
+            can_retry = (
+                moderation_fallback
+                and is_moderation_blocked_error(image_exc)
+                and attempt_idx < len(attempts) - 1
             )
-        saved_images = save_generated_images(
-            image_items=image_items,
-            output_dir=output_dir,
-            timestamp=timestamp,
-            dish_name=dish_name,
-            name_suffix=name_suffix,
-        )
-        for image_file in saved_images:
-            print(f"已保存{stage_label}：{image_file}")
-    except Exception as image_exc:
-        image_error = f"{stage_label}生图失败：{image_exc}"
-        save_text_output(
-            f"{stage_label}生图失败。\n失败原因：{image_exc}",
-            output_dir / f"{stage_label}生图失败原因.txt",
-        )
-        print(image_error)
+            if can_retry:
+                print(
+                    f"{stage_label}内容审核拦截，正在降级重试"
+                    f"（{attempt_idx + 2}/{len(attempts)}）..."
+                )
+                continue
+            image_error = f"{stage_label}生图失败：{image_exc}"
+            save_text_output(
+                f"{stage_label}生图失败。\n失败原因：{image_exc}",
+                output_dir / f"{stage_label}生图失败原因.txt",
+            )
+            print(image_error)
+            break
+    if last_exc is not None and not image_error:
+        image_error = f"{stage_label}生图失败：{last_exc}"
     return saved_images, image_error
 
 
@@ -275,13 +341,14 @@ def run_v2_mode2(mode: str | None = None, *, target_output_dir: str | Path | Non
                 detail_saved_images, detail_error = generate_group_images(
                     image_client=image_client,
                     prompt_text=detail_prompt_result["prompt"],
-                    reference_paths=[poster_selected_image, str(CHARACTER_REFERENCE_FILE)],
+                    reference_paths=build_detail_reference_paths(poster_selected_image),
                     settings=detail_settings,
                     output_dir=run_output_dir,
                     timestamp=timestamp,
                     dish_name=dish_name,
                     name_suffix="细节图",
                     stage_label="细节图",
+                    moderation_fallback=True,
                 )
                 if detail_error:
                     errors.append(detail_error)
@@ -402,23 +469,10 @@ def run_v2_mode2(mode: str | None = None, *, target_output_dir: str | Path | Non
     ]
     if publish_selected_for_ps:
         try:
-            from tools.apply_photoshop_template_batch import apply_photoshop_template_batch_to_dir
-
-            print(
-                f"publish 已选入 {len(publish_selected_for_ps)} 张图，"
-                f"开始 Photoshop 合成到 {publish_final_dir}（不覆盖 publish 原图）..."
-            )
-            processed_file_map = apply_photoshop_template_batch_to_dir(
-                input_dir=publish_dir,
-                output_dir=publish_final_dir,
-            )
-            from publish_final_assets import apply_final_image_sequence_names
-
-            photoshop_processed_files = apply_final_image_sequence_names(
-                publish_final_dir=publish_final_dir,
+            photoshop_processed_files = rerun_photoshop_for_publish_dir(
+                publish_dir=publish_dir,
                 timestamp=timestamp,
                 dish_name=dish_name,
-                processed_file_map=processed_file_map,
                 poster_source=poster_selected_image,
                 detail_source=detail_selected_image,
                 recipe_source=recipe_selected_image,
@@ -490,5 +544,454 @@ def run_v2_mode2(mode: str | None = None, *, target_output_dir: str | Path | Non
         "publish_platform_description_files": publish_copy_assets.get("publish_platform_description_files", {}),
         "publish_copy_prompt_file": publish_copy_assets.get("publish_copy_prompt_file", ""),
         "publish_copy_error": str(publish_copy_assets.get("publish_copy_error", "")).strip(),
+        "image_generation_settings": snapshot_mode2_image_settings(),
+    }
+
+
+def find_publish_image_by_kind(publish_dir: Path, kind_keyword: str) -> str:
+    matches = sorted(
+        path
+        for path in publish_dir.iterdir()
+        if path.is_file() and kind_keyword in path.stem and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+    )
+    return str(matches[0].resolve()) if matches else ""
+
+
+def extract_timestamp_from_publish_name(path_text: str) -> str:
+    import re
+
+    match = re.search(r"(\d{8}_\d{6})_", Path(path_text).name)
+    return match.group(1) if match else get_timestamp()
+
+
+def rerun_photoshop_for_publish_dir(
+    *,
+    publish_dir: Path,
+    timestamp: str,
+    dish_name: str,
+    poster_source: str,
+    detail_source: str,
+    recipe_source: str,
+    cover_source: str,
+    only_kinds: set[str] | None = None,
+    force_all: bool = False,
+) -> list[str]:
+    from tools.apply_photoshop_template_batch import apply_photoshop_template_batch_to_files
+    from publish_final_assets import (
+        apply_final_image_sequence_names,
+        collect_existing_final_paths,
+        resolve_photoshop_sources_to_process,
+    )
+
+    publish_final_dir = publish_dir / "final"
+    sources_to_process, skipped_labels = resolve_photoshop_sources_to_process(
+        publish_final_dir=publish_final_dir,
+        poster_source=poster_source,
+        detail_source=detail_source,
+        recipe_source=recipe_source,
+        cover_source=cover_source,
+        only_kinds=only_kinds,
+        force_all=force_all,
+    )
+    if not sources_to_process:
+        existing_finals = collect_existing_final_paths(
+            publish_final_dir=publish_final_dir,
+            poster_source=poster_source,
+            detail_source=detail_source,
+            recipe_source=recipe_source,
+            cover_source=cover_source,
+        )
+        if skipped_labels:
+            print(f"无需 Photoshop 合成，已跳过：{', '.join(skipped_labels)}。")
+        return existing_finals
+
+    print(
+        f"本次待 Photoshop 合成 {len(sources_to_process)} 张"
+        f"{'（仅新生成/变更图）' if only_kinds else ''} -> publish/final"
+    )
+    processed_file_map = apply_photoshop_template_batch_to_files(
+        sources_to_process,
+        output_dir=publish_final_dir,
+    )
+    return apply_final_image_sequence_names(
+        publish_final_dir=publish_final_dir,
+        timestamp=timestamp,
+        dish_name=dish_name,
+        processed_file_map=processed_file_map,
+        poster_source=poster_source,
+        detail_source=detail_source,
+        recipe_source=recipe_source,
+        cover_source=cover_source,
+    )
+
+
+def retry_detail_stage_for_output_dir(run_output_dir: str | Path) -> dict[str, object]:
+    """仅补跑细节图：生图 -> 豆包筛选 -> 重新 PS 合成四张发布图。"""
+    from v2_core import ensure_runtime_config_loaded
+
+    ensure_runtime_config_loaded()
+    run_output_dir = Path(run_output_dir).resolve()
+    dish_payload = load_dish_idea_record_from_dir(run_output_dir)
+    dish_name = dish_payload["dish_name"]
+    publish_dir = run_output_dir / "publish"
+    if not publish_dir.exists():
+        raise RuntimeError(f"publish 目录不存在：{publish_dir}")
+
+    poster_selected_image = find_publish_image_by_kind(publish_dir, "海报")
+    recipe_selected_image = find_publish_image_by_kind(publish_dir, "菜谱图")
+    cover_selected_image = find_publish_image_by_kind(publish_dir, "封面图")
+    if not poster_selected_image:
+        raise RuntimeError(f"publish 目录缺少海报图：{publish_dir}")
+
+    timestamp = extract_timestamp_from_publish_name(poster_selected_image)
+    detail_prompt_path = run_output_dir / f"{dish_name}_细节图_文生图prompt.txt"
+    if not detail_prompt_path.exists():
+        raise RuntimeError(f"细节图提示词不存在：{detail_prompt_path}")
+    prompt_text = soften_detail_image_prompt(detail_prompt_path.read_text(encoding="utf-8"))
+    save_text_output(prompt_text, detail_prompt_path)
+
+    doubao_client = build_doubao_client()
+    image_client = build_openai_image_client()
+    detail_settings = get_mode2_group_settings("detail")
+    print(
+        f"补跑细节图：quality={detail_settings['quality']}，"
+        f"n={detail_settings['image_count']}，目录={run_output_dir}"
+    )
+    detail_saved_images, detail_error = generate_group_images(
+        image_client=image_client,
+        prompt_text=prompt_text,
+        reference_paths=build_detail_reference_paths(poster_selected_image),
+        settings=detail_settings,
+        output_dir=run_output_dir,
+        timestamp=timestamp,
+        dish_name=dish_name,
+        name_suffix="细节图",
+        stage_label="细节图",
+        moderation_fallback=True,
+    )
+    if detail_error:
+        raise RuntimeError(detail_error)
+    if not detail_saved_images:
+        raise RuntimeError("细节图生图未返回任何图片。")
+
+    detail_selected_image, detail_selection_mode, detail_selection_result = select_and_publish_image_group(
+        doubao_client,
+        publish_dir=publish_dir,
+        candidate_paths=detail_saved_images,
+        image_kind="细节图",
+        selection_report_name="细节图筛选结果.json",
+    )
+    if not detail_selected_image:
+        raise RuntimeError("细节图筛选未选出发布图。")
+
+    photoshop_processed_files = rerun_photoshop_for_publish_dir(
+        publish_dir=publish_dir,
+        timestamp=timestamp,
+        dish_name=dish_name,
+        poster_source=poster_selected_image,
+        detail_source=detail_selected_image,
+        recipe_source=recipe_selected_image,
+        cover_source=cover_selected_image,
+        only_kinds={"detail"},
+    )
+    close_doubao = getattr(doubao_client, "close", None)
+    if callable(close_doubao):
+        close_doubao()
+    close_image = getattr(image_client, "close", None)
+    if callable(close_image):
+        close_image()
+
+    return {
+        "dish_name": dish_name,
+        "output_dir": str(run_output_dir),
+        "detail_saved_images": detail_saved_images,
+        "detail_selected_image": detail_selected_image,
+        "detail_selection_mode": detail_selection_mode,
+        "detail_selection_result": detail_selection_result,
+        "photoshop_processed_files": photoshop_processed_files,
+    }
+
+
+VALID_SUPPLEMENT_TARGETS = frozenset({"poster", "detail", "recipe", "cover", "copy", "photoshop"})
+
+
+def resolve_output_dir_timestamp(run_output_dir: Path, dish_name: str, poster_path: str = "") -> str:
+    if poster_path:
+        return extract_timestamp_from_publish_name(poster_path)
+    import re
+
+    pattern = re.compile(rf"(\d{{8}}_\d{{6}})_{re.escape(dish_name)}")
+    for path in sorted(run_output_dir.iterdir(), reverse=True):
+        if not path.is_file():
+            continue
+        match = pattern.search(path.name)
+        if match:
+            return match.group(1)
+    return get_timestamp()
+
+
+def run_supplement_for_output_dir(
+    run_output_dir: str | Path,
+    *,
+    targets: list[str],
+) -> dict[str, object]:
+    """按用户勾选项补生指定图片、平台文案或 PS 合成。"""
+    from v2_core import ensure_runtime_config_loaded
+
+    ensure_runtime_config_loaded()
+    selected_targets = [str(item).strip() for item in targets if str(item).strip()]
+    normalized_targets = [item for item in selected_targets if item in VALID_SUPPLEMENT_TARGETS]
+    if not normalized_targets:
+        raise ValueError("请至少选择一项可补生内容。")
+
+    run_output_dir = Path(run_output_dir).resolve()
+    dish_payload = load_dish_idea_record_from_dir(run_output_dir)
+    dish_name = dish_payload["dish_name"]
+    notes = dish_payload.get("notes", "")
+    publish_dir = run_output_dir / "publish"
+    publish_dir.mkdir(parents=True, exist_ok=True)
+
+    doubao_client = build_doubao_client()
+    image_client = build_openai_image_client()
+    errors: list[str] = []
+    all_saved_images: list[str] = []
+
+    poster_selected_image = find_publish_image_by_kind(publish_dir, "海报")
+    detail_selected_image = find_publish_image_by_kind(publish_dir, "细节图")
+    recipe_selected_image = find_publish_image_by_kind(publish_dir, "菜谱图")
+    cover_selected_image = find_publish_image_by_kind(publish_dir, "封面图")
+    timestamp = resolve_output_dir_timestamp(run_output_dir, dish_name, poster_selected_image)
+
+    print(f"补生目录：{run_output_dir}")
+    print(f"补生项目：{', '.join(normalized_targets)}")
+
+    image_targets = {"poster", "detail", "recipe", "cover"}
+    if image_targets.intersection(normalized_targets) and not poster_selected_image and "poster" not in normalized_targets:
+        raise RuntimeError("补生图片需要 publish 中已有海报图，或同时勾选「海报图」。")
+
+    if "poster" in normalized_targets:
+        haibao_template = load_cankao_group_template(HAIBAO_TEMPLATE_FILE)
+        poster_prompt_result = generate_cankao_prompt_by_template(
+            client=doubao_client,
+            dish_name=dish_name,
+            notes=notes,
+            template_text=haibao_template,
+        )
+        poster_prompt_path = run_output_dir / f"{dish_name}_海报_文生图prompt.txt"
+        save_text_output(poster_prompt_result["prompt"], poster_prompt_path)
+        poster_settings = get_mode2_group_settings("poster")
+        poster_saved_images, poster_error = generate_group_images(
+            image_client=image_client,
+            prompt_text=poster_prompt_result["prompt"],
+            reference_paths=[],
+            settings=poster_settings,
+            output_dir=run_output_dir,
+            timestamp=timestamp,
+            dish_name=dish_name,
+            name_suffix="海报",
+            stage_label="海报图",
+        )
+        if poster_error:
+            errors.append(poster_error)
+        all_saved_images.extend(poster_saved_images)
+        if poster_saved_images:
+            poster_selected_image, _, _ = select_and_publish_image_group(
+                doubao_client,
+                publish_dir=publish_dir,
+                candidate_paths=poster_saved_images,
+                image_kind="图文海报",
+                selection_report_name="海报筛选结果.json",
+            )
+        if not poster_selected_image:
+            raise RuntimeError("海报图补生失败，未选出发布图。")
+
+    if not poster_selected_image:
+        raise RuntimeError("缺少海报参考图，无法继续补生。")
+
+    poster_path = Path(poster_selected_image)
+    bubble_text = ""
+    bubble_path = run_output_dir / f"{dish_name}_气泡文案.txt"
+    if "detail" in normalized_targets:
+        try:
+            bubble_result = generate_poster_bubble_copy(doubao_client, poster_path, dish_name=dish_name)
+            save_text_output(bubble_result["content"], bubble_path)
+            bubble_text = bubble_result["content"]
+            print(f"气泡文案已生成：{bubble_path}")
+        except Exception as bubble_exc:
+            errors.append(f"气泡文案失败：{bubble_exc}")
+            if bubble_path.exists():
+                bubble_text = bubble_path.read_text(encoding="utf-8").strip()
+
+    if "detail" in normalized_targets:
+        if not CHARACTER_REFERENCE_FILE.exists():
+            errors.append(f"角色参考图不存在：{CHARACTER_REFERENCE_FILE}")
+        else:
+            xijietu_template = load_cankao_group_template(XIJIETU_TEMPLATE_FILE)
+            detail_prompt_result = generate_cankao_prompt_with_images(
+                client=doubao_client,
+                dish_name=dish_name,
+                notes=notes,
+                template_text=xijietu_template,
+                image_paths=[poster_path, CHARACTER_REFERENCE_FILE],
+                bubble_text=bubble_text,
+                stage_name="细节图模板",
+            )
+            detail_prompt_path = run_output_dir / f"{dish_name}_细节图_文生图prompt.txt"
+            save_text_output(detail_prompt_result["prompt"], detail_prompt_path)
+            detail_settings = get_mode2_group_settings("detail")
+            detail_saved_images, detail_error = generate_group_images(
+                image_client=image_client,
+                prompt_text=detail_prompt_result["prompt"],
+                reference_paths=build_detail_reference_paths(poster_selected_image),
+                settings=detail_settings,
+                output_dir=run_output_dir,
+                timestamp=timestamp,
+                dish_name=dish_name,
+                name_suffix="细节图",
+                stage_label="细节图",
+                moderation_fallback=True,
+            )
+            if detail_error:
+                errors.append(detail_error)
+            all_saved_images.extend(detail_saved_images)
+            if detail_saved_images:
+                detail_selected_image, _, _ = select_and_publish_image_group(
+                    doubao_client,
+                    publish_dir=publish_dir,
+                    candidate_paths=detail_saved_images,
+                    image_kind="细节图",
+                    selection_report_name="细节图筛选结果.json",
+                )
+
+    if "recipe" in normalized_targets:
+        caipu_template = load_cankao_group_template(CAIPU_TEMPLATE_FILE)
+        recipe_prompt_result = generate_cankao_prompt_by_template(
+            client=doubao_client,
+            dish_name=dish_name,
+            notes=notes,
+            template_text=caipu_template,
+        )
+        recipe_prompt_path = run_output_dir / f"{dish_name}_菜谱图_文生图prompt.txt"
+        save_text_output(recipe_prompt_result["prompt"], recipe_prompt_path)
+        recipe_settings = get_mode2_group_settings("recipe")
+        recipe_saved_images, recipe_error = generate_group_images(
+            image_client=image_client,
+            prompt_text=recipe_prompt_result["prompt"],
+            reference_paths=[poster_selected_image],
+            settings=recipe_settings,
+            output_dir=run_output_dir,
+            timestamp=timestamp,
+            dish_name=dish_name,
+            name_suffix="菜谱图",
+            stage_label="菜谱图",
+        )
+        if recipe_error:
+            errors.append(recipe_error)
+        all_saved_images.extend(recipe_saved_images)
+        if recipe_saved_images:
+            recipe_selected_image, _, _ = select_and_publish_image_group(
+                doubao_client,
+                publish_dir=publish_dir,
+                candidate_paths=recipe_saved_images,
+                image_kind="菜谱图",
+                selection_report_name="菜谱图筛选结果.json",
+            )
+
+    if "cover" in normalized_targets:
+        fengmian_template = load_cankao_group_template(FENGMIAN_TEMPLATE_FILE)
+        cover_prompt_result = generate_cankao_prompt_by_template(
+            client=doubao_client,
+            dish_name=dish_name,
+            notes=notes,
+            template_text=fengmian_template,
+        )
+        cover_prompt_path = run_output_dir / f"{dish_name}_封面图_文生图prompt.txt"
+        save_text_output(cover_prompt_result["prompt"], cover_prompt_path)
+        cover_settings = get_mode2_group_settings("cover")
+        cover_saved_images, cover_error = generate_group_images(
+            image_client=image_client,
+            prompt_text=cover_prompt_result["prompt"],
+            reference_paths=[poster_selected_image],
+            settings=cover_settings,
+            output_dir=run_output_dir,
+            timestamp=timestamp,
+            dish_name=dish_name,
+            name_suffix="封面图",
+            stage_label="封面图",
+        )
+        if cover_error:
+            errors.append(cover_error)
+        all_saved_images.extend(cover_saved_images)
+        if cover_saved_images:
+            cover_selected_image, _, _ = select_and_publish_image_group(
+                doubao_client,
+                publish_dir=publish_dir,
+                candidate_paths=cover_saved_images,
+                image_kind="封面图",
+                selection_report_name="封面图筛选结果.json",
+            )
+
+    publish_copy_assets: dict[str, Any] = {}
+    if "copy" in normalized_targets:
+        publish_copy_assets = persist_v2_publish_copy_assets(
+            client=doubao_client,
+            output_dir=run_output_dir,
+            timestamp=timestamp,
+            dish_payload=dish_payload,
+            poster_image_path=poster_selected_image,
+        )
+        publish_copy_error = str(publish_copy_assets.get("publish_copy_error", "")).strip()
+        if publish_copy_error:
+            errors.append(f"平台文案生成失败：{publish_copy_error}")
+
+    photoshop_processed_files: list[str] = []
+    image_targets = {"poster", "detail", "recipe", "cover"}
+    regenerated_kinds = image_targets.intersection(normalized_targets)
+    need_photoshop = "photoshop" in normalized_targets or bool(regenerated_kinds)
+    if need_photoshop:
+        try:
+            only_kinds: set[str] | None
+            if "photoshop" in normalized_targets and not regenerated_kinds:
+                only_kinds = None
+            else:
+                only_kinds = set(regenerated_kinds) if regenerated_kinds else None
+            photoshop_processed_files = rerun_photoshop_for_publish_dir(
+                publish_dir=publish_dir,
+                timestamp=timestamp,
+                dish_name=dish_name,
+                poster_source=poster_selected_image,
+                detail_source=detail_selected_image,
+                recipe_source=recipe_selected_image,
+                cover_source=cover_selected_image,
+                only_kinds=only_kinds,
+            )
+        except Exception as ps_exc:
+            errors.append(f"Photoshop 合成失败：{ps_exc}")
+
+    close_doubao = getattr(doubao_client, "close", None)
+    if callable(close_doubao):
+        close_doubao()
+    close_image = getattr(image_client, "close", None)
+    if callable(close_image):
+        close_image()
+
+    return {
+        "workflow_mode": "supplement",
+        "dish_name": dish_name,
+        "output_dir": str(run_output_dir),
+        "supplement_targets": normalized_targets,
+        "poster_selected_image": poster_selected_image,
+        "detail_selected_image": detail_selected_image,
+        "recipe_selected_image": recipe_selected_image,
+        "cover_selected_image": cover_selected_image,
+        "photoshop_processed_files": photoshop_processed_files,
+        "saved_images": all_saved_images,
+        "publish_title_file": publish_copy_assets.get("publish_title_file", ""),
+        "publish_description_file": publish_copy_assets.get("publish_description_file", ""),
+        "publish_description_body_file": publish_copy_assets.get("publish_description_body_file", ""),
+        "publish_platform_topic_files": publish_copy_assets.get("publish_platform_topic_files", {}),
+        "publish_platform_description_files": publish_copy_assets.get("publish_platform_description_files", {}),
+        "image_error": "\n".join(errors).strip(),
+        "image_generation_settings": snapshot_mode2_image_settings(),
     }
 

@@ -37,6 +37,7 @@ from tools.douyin_publish import (  # noqa: E402
     click_locator_via_dom,
     ensure_cdp_browser_available,
     find_optional_locator,
+    resolve_page_by_keyword,
     type_text_humanly,
     wait_for_locator,
 )
@@ -45,6 +46,7 @@ from tools.weixin_mp_publish import confirm_windows_open_dialog, paste_text_to_c
 
 
 DEFAULT_URL_KEYWORD = "channels.weixin.qq.com"
+DEFAULT_CHANNELS_HOME_URL = "https://channels.weixin.qq.com/platform"
 DEFAULT_LOGIN_MARKER = ROOT_DIR / "V2" / "assets" / "weixin_channels_logged_in_marker.png"
 DEFAULT_MENU_CONTENT_MANAGE_MARKER = ROOT_DIR / "V2" / "assets" / "weixin_channels_menu_content_manage.png"
 DEFAULT_MENU_GRAPHIC_MARKER = ROOT_DIR / "V2" / "assets" / "weixin_channels_menu_graphic.png"
@@ -352,22 +354,17 @@ def _channels_page_priority(url: str) -> int:
 
 
 def find_channels_page(browser, url_keyword: str) -> Page:
-    matched_pages = [
-        page
-        for context in browser.contexts
-        for page in context.pages
-        if url_keyword in page.url
-    ]
-    if not matched_pages:
-        raise RuntimeError(
-            f"未在已打开的 Chrome 标签页里找到包含 {url_keyword} 的页面。"
-            "请先自行打开微信视频号助手并登录，然后重新运行脚本。"
-        )
-    page = min(matched_pages, key=lambda item: (_channels_page_priority(item.url), item.url))
-    page.bring_to_front()
-    page.wait_for_load_state("domcontentloaded")
-    print(f"已锁定视频号页面：{page.url}")
-    return page
+    return resolve_channels_page(browser, url_keyword)
+
+
+def resolve_channels_page(browser, url_keyword: str) -> Page:
+    return resolve_page_by_keyword(
+        browser,
+        url_keyword=url_keyword,
+        creator_home_url=DEFAULT_CHANNELS_HOME_URL,
+        platform_label="微信视频号",
+        page_priority=_channels_page_priority,
+    )
 
 
 def close_stray_file_dialog(page: Page) -> None:
@@ -669,7 +666,7 @@ def to_cdp_settings(settings: WeixinChannelsPublishSettings) -> PublishSettings:
         chrome_path=settings.chrome_path,
         automation_profile_dir=settings.automation_profile_dir,
         auto_launch_browser=settings.auto_launch_browser,
-        creator_home_url=f"https://{DEFAULT_URL_KEYWORD}/",
+        creator_home_url=DEFAULT_CHANNELS_HOME_URL,
         cdp_ready_timeout_ms=settings.cdp_ready_timeout_ms,
         typing_delay_ms=settings.typing_delay_ms,
         after_upload_wait_ms=0,
@@ -686,20 +683,12 @@ def run_weixin_channels_publish(
     settings: WeixinChannelsPublishSettings,
     assets: WeixinChannelsPublishAssets,
 ) -> None:
-    if settings.auto_launch_browser:
+    if not settings.dry_run:
         ensure_cdp_browser_available(to_cdp_settings(settings))
-    elif not settings.dry_run:
-        from tools.douyin_publish import is_cdp_endpoint_ready
-
-        if not is_cdp_endpoint_ready(settings.cdp_url):
-            raise RuntimeError(
-                f"无法连接到 Chrome 远程调试端口：{settings.cdp_url}\n"
-                "请先自行打开 Chrome 并登录 channels.weixin.qq.com，再运行本脚本。"
-            )
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(settings.cdp_url)
-        page = find_channels_page(browser, settings.url_keyword)
+        page = resolve_channels_page(browser, settings.url_keyword)
 
         try:
             open_graphic_publish_editor(page, settings)

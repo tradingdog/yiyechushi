@@ -36,13 +36,16 @@ from tools.douyin_publish import (  # noqa: E402
     click_locator,
     ensure_cdp_browser_available,
     find_optional_locator,
+    resolve_page_by_keyword,
     type_text_humanly,
     wait_for_locator,
+    wait_for_manual_login_continue,
 )
 from tools.weixin_mp_publish import confirm_windows_open_dialog, paste_text_to_clipboard  # noqa: E402
 
 
 DEFAULT_URL_KEYWORD = "cp.kuaishou.com"
+DEFAULT_KUAISHOU_HOME_URL = "https://cp.kuaishou.com/"
 DEFAULT_AFTER_PUBLISH_WORK_WAIT_MS = 15_000
 DEFAULT_AFTER_GRAPHIC_TAB_WAIT_MS = 5_000
 DEFAULT_AFTER_UPLOAD_BUTTON_WAIT_MS = 3_000
@@ -255,22 +258,38 @@ def _kuaishou_page_priority(url: str) -> int:
 
 
 def find_kuaishou_page(browser, url_keyword: str) -> Page:
-    matched_pages = [
-        page
-        for context in browser.contexts
-        for page in context.pages
-        if url_keyword in page.url
-    ]
-    if not matched_pages:
-        raise RuntimeError(
-            f"未在已打开的 Chrome 标签页里找到包含 {url_keyword} 的页面。"
-            "请先自行打开快手创作者中心并登录，然后重新运行脚本。"
-        )
-    page = min(matched_pages, key=lambda item: (_kuaishou_page_priority(item.url), item.url))
-    page.bring_to_front()
-    page.wait_for_load_state("domcontentloaded")
-    print(f"已锁定快手页面：{page.url}")
-    return page
+    return resolve_kuaishou_page(browser, url_keyword)
+
+
+def resolve_kuaishou_page(browser, url_keyword: str) -> Page:
+    return resolve_page_by_keyword(
+        browser,
+        url_keyword=url_keyword,
+        creator_home_url=DEFAULT_KUAISHOU_HOME_URL,
+        platform_label="快手",
+        page_priority=_kuaishou_page_priority,
+    )
+
+
+def is_kuaishou_login_required(page: Page) -> bool:
+    if find_optional_locator(page, publish_work_button_locators(page), timeout_ms=2_000) is not None:
+        return False
+    login_keywords = ("扫码登录", "密码登录", "立即登录", "登录/注册", "手机号登录")
+    for keyword in login_keywords:
+        try:
+            if page.get_by_text(keyword, exact=False).first.is_visible(timeout=500):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def ensure_kuaishou_logged_in(page: Page) -> None:
+    while is_kuaishou_login_required(page):
+        wait_for_manual_login_continue(platform_label="快手创作者中心")
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_timeout(1500)
+    print("快手创作者中心登录态已就绪。")
 
 
 def close_stray_file_dialog(page: Page) -> None:
@@ -533,10 +552,9 @@ def fill_work_description(page: Page, assets: KuaishouPublishAssets, settings: K
     print(f"已输入快手作品描述标题：{assets.title_text}")
 
     type_text_humanly(page, assets.description_body, delay_ms=settings.typing_delay_ms)
-    page.keyboard.press("Enter")
-    page.wait_for_timeout(settings.typing_delay_ms)
-    page.keyboard.press("Enter")
-    page.wait_for_timeout(settings.typing_delay_ms)
+    for _ in range(4):
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(settings.typing_delay_ms)
     print(f"已输入快手作品描述正文（第 1 行），长度 {len(assets.description_body)}。")
 
     editor.click()
@@ -628,7 +646,7 @@ def to_cdp_settings(settings: KuaishouPublishSettings) -> PublishSettings:
         chrome_path=settings.chrome_path,
         automation_profile_dir=settings.automation_profile_dir,
         auto_launch_browser=settings.auto_launch_browser,
-        creator_home_url=f"https://{DEFAULT_URL_KEYWORD}/",
+        creator_home_url=DEFAULT_KUAISHOU_HOME_URL,
         cdp_ready_timeout_ms=settings.cdp_ready_timeout_ms,
         typing_delay_ms=settings.typing_delay_ms,
         after_upload_wait_ms=0,
@@ -642,22 +660,15 @@ def to_cdp_settings(settings: KuaishouPublishSettings) -> PublishSettings:
 
 
 def run_kuaishou_publish(settings: KuaishouPublishSettings, assets: KuaishouPublishAssets) -> None:
-    if settings.auto_launch_browser:
+    if not settings.dry_run:
         ensure_cdp_browser_available(to_cdp_settings(settings))
-    elif not settings.dry_run:
-        from tools.douyin_publish import is_cdp_endpoint_ready
-
-        if not is_cdp_endpoint_ready(settings.cdp_url):
-            raise RuntimeError(
-                f"无法连接到 Chrome 远程调试端口：{settings.cdp_url}\n"
-                "请先自行打开 Chrome 并登录 cp.kuaishou.com，再运行本脚本。"
-            )
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(settings.cdp_url)
-        page = find_kuaishou_page(browser, settings.url_keyword)
+        page = resolve_kuaishou_page(browser, settings.url_keyword)
 
         try:
+            ensure_kuaishou_logged_in(page)
             open_graphic_publish_flow(page, settings)
             upload_main_images(page, assets, settings)
             fill_work_description(page, assets, settings)

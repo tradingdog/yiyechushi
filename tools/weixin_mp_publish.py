@@ -41,7 +41,7 @@ from tools.douyin_publish import (  # noqa: E402
     ensure_cdp_browser_available,
     find_default_chrome_path,
     find_optional_locator,
-    find_target_page,
+    resolve_page_by_keyword,
     resolve_path,
     type_text_humanly,
     wait_for_locator,
@@ -384,24 +384,18 @@ def confirm_windows_open_dialog(image_paths: Sequence[Path], *, wait_ms: int, fo
 
     time.sleep(wait_ms / 1000)
     resolved_paths = [path.resolve() for path in image_paths]
-    target_folder = resolved_paths[0].parent
 
-    pyautogui.hotkey("alt", "d")
-    time.sleep(0.4)
-    paste_text_to_clipboard(str(target_folder))
-    pyautogui.hotkey("ctrl", "v")
-    time.sleep(0.2)
-    pyautogui.press("enter")
-    time.sleep(0.8)
-
-    quoted_paths = " ".join(f'"{path}"' for path in resolved_paths)
+    # 不用 Alt+D：会与豆包等软件的「Alt+D 语音通话」快捷键冲突。
+    # 直接在「文件名」框粘贴完整路径（单张）或带引号的多路径（多张）。
     pyautogui.hotkey("alt", "n")
     time.sleep(0.4)
-    paste_text_to_clipboard(quoted_paths)
+    if len(resolved_paths) == 1:
+        payload = str(resolved_paths[0])
+    else:
+        payload = " ".join(f'"{path}"' for path in resolved_paths)
+    paste_text_to_clipboard(payload)
     pyautogui.hotkey("ctrl", "v")
-    time.sleep(0.5)
-    pyautogui.hotkey("alt", "o")
-    time.sleep(0.4)
+    time.sleep(0.3)
     pyautogui.press("enter")
     print(f"已在 Windows 打开对话框确认 {len(resolved_paths)} 张图片。")
     for path in image_paths:
@@ -537,12 +531,22 @@ def to_cdp_settings(settings: WeixinPublishSettings) -> PublishSettings:
     )
 
 
+def resolve_weixin_mp_page(browser: Browser, settings: WeixinPublishSettings) -> Page:
+    return resolve_page_by_keyword(
+        browser,
+        url_keyword=settings.url_keyword,
+        creator_home_url=settings.weixin_home_url,
+        platform_label="微信公众号",
+    )
+
+
 def run_weixin_publish(settings: WeixinPublishSettings, assets: WeixinPublishAssets) -> None:
-    ensure_cdp_browser_available(to_cdp_settings(settings))
+    if not settings.dry_run:
+        ensure_cdp_browser_available(to_cdp_settings(settings))
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(settings.cdp_url)
-        page = find_target_page(browser, settings.url_keyword)
+        page = resolve_weixin_mp_page(browser, settings)
         editor_page = page
 
         try:

@@ -103,10 +103,15 @@ def resolve_v2_publish_assets(args: argparse.Namespace) -> PublishAssets:
     output_dir = settings.output_dir
     final_dir = resolve_final_dir(output_dir, str(args.final_dir or ""))
 
-    try:
-        title_file = find_single_file(output_dir, "_图文标题.txt")
-    except RuntimeError:
-        title_file = find_single_file(output_dir, "_抖音图文标题.txt")
+    title_file = None
+    for suffix in ("_图文标题.txt", "_抖音标题.txt", "_抖音图文标题.txt"):
+        try:
+            title_file = find_single_file(output_dir, suffix)
+            break
+        except RuntimeError:
+            continue
+    if title_file is None:
+        raise RuntimeError(f"未找到标题文件（已尝试 _图文标题 / _抖音标题 / _抖音图文标题）：{output_dir}")
     description_file = find_single_file(output_dir, "_抖音图文描述.txt")
 
     title_text = read_utf8_text(title_file)

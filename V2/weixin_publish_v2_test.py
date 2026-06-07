@@ -61,8 +61,20 @@ from publish_final_assets import (  # noqa: E402
 
 DEFAULT_V2_OUTPUT_DIR = V2_DIR / "output" / "20260604_210303_葱香陈皮羊排"
 DEFAULT_FINAL_DIR_NAME = "publish/final"
-WECHAT_TITLE_SUFFIX = "_微信视频号和公众号标题.txt"
-WECHAT_DESCRIPTION_SUFFIX = "_微信视频号和公众号图文描述.txt"
+WECHAT_TITLE_SUFFIXES = (
+    "_微信公众号标题.txt",
+    "_微信视频号和公众号标题.txt",
+    "_图文标题.txt",
+)
+WECHAT_DESCRIPTION_SUFFIXES = (
+    "_微信公众号图文描述.txt",
+    "_微信视频号和公众号图文描述.txt",
+)
+WECHAT_TOPIC_SUFFIXES = (
+    "_微信公众号话题.txt",
+    "_微信视频号和公众号话题.txt",
+)
+MAX_WEIXIN_MP_TOPIC_COUNT = 10
 
 
 def parse_args() -> argparse.Namespace:
@@ -103,14 +115,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _find_wechat_title_file(output_dir: Path) -> Path:
-    for suffix in (WECHAT_TITLE_SUFFIX, "_图文标题.txt"):
+def _find_output_file(output_dir: Path, suffixes: tuple[str, ...], label: str) -> Path:
+    for suffix in suffixes:
         matches = sorted(output_dir.glob(f"*{suffix}"))
         if matches:
-            if suffix != WECHAT_TITLE_SUFFIX:
-                print(f"未找到公众号专用标题文件，回退使用：{matches[-1].name}")
+            if suffix != suffixes[0]:
+                print(f"未找到{label}首选文件，回退使用：{matches[-1].name}")
             return matches[-1]
-    raise RuntimeError(f"未找到公众号标题文件：{output_dir}")
+    raise RuntimeError(f"未找到{label}文件（已尝试：{', '.join(suffixes)}）：{output_dir}")
+
+
+def _limit_topic_line(topic_text: str, *, max_count: int) -> str:
+    import re
+
+    tags = list(dict.fromkeys(re.findall(r"#\S+", str(topic_text or ""))))
+    if not tags:
+        return ""
+    if len(tags) > max_count:
+        print(f"公众号话题超过 {max_count} 个，已截断为前 {max_count} 个。")
+        tags = tags[:max_count]
+    return " ".join(tags)
 
 
 def resolve_final_dir(output_dir: Path, final_dir_text: str) -> Path:
@@ -170,10 +194,20 @@ def resolve_weixin_assets(args: argparse.Namespace) -> WeixinPublishAssets:
     output_dir = settings.output_dir
     final_dir = resolve_final_dir(output_dir, str(args.final_dir or ""))
 
-    title_file = _find_wechat_title_file(output_dir)
-    description_file = find_single_file(output_dir, WECHAT_DESCRIPTION_SUFFIX)
+    title_file = _find_output_file(output_dir, WECHAT_TITLE_SUFFIXES, "公众号标题")
+    description_file = _find_output_file(output_dir, WECHAT_DESCRIPTION_SUFFIXES, "公众号图文描述")
     title_text = read_utf8_text(title_file)
-    description_body, description_topics = split_wechat_description_parts(read_utf8_text(description_file))
+    description_text = read_utf8_text(description_file)
+    description_body, description_topics = split_wechat_description_parts(description_text)
+    topic_files = [path for suffix in WECHAT_TOPIC_SUFFIXES for path in sorted(output_dir.glob(f"*{suffix}"))]
+    if topic_files:
+        description_topics = _limit_topic_line(
+            read_utf8_text(topic_files[-1]),
+            max_count=MAX_WEIXIN_MP_TOPIC_COUNT,
+        )
+        print(f"公众号话题来自：{topic_files[-1].name}")
+    else:
+        description_topics = _limit_topic_line(description_topics, max_count=MAX_WEIXIN_MP_TOPIC_COUNT)
 
     if not title_text:
         raise RuntimeError(f"公众号标题为空：{title_file}")

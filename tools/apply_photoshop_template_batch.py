@@ -9,7 +9,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -271,6 +271,32 @@ def is_local_photoshop_running() -> bool:
     return "Photoshop.exe" in result.stdout
 
 
+def close_running_local_photoshop(*, wait_seconds: int = 30) -> bool:
+    """若 Photoshop 已在运行则强制结束，确保批处理可独占启动。"""
+    if not is_local_photoshop_running():
+        return False
+
+    print("检测到 Photoshop 已在运行，正在关闭以便执行模板合成…")
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "Photoshop.exe"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    else:
+        raise RuntimeError("当前系统暂不支持自动关闭 Photoshop，请先手动关闭后再运行。")
+
+    deadline = time.time() + max(5, wait_seconds)
+    while time.time() < deadline:
+        if not is_local_photoshop_running():
+            print("Photoshop 已关闭。")
+            return True
+        time.sleep(0.5)
+
+    raise RuntimeError("无法关闭正在运行的 Photoshop，请手动结束 Photoshop.exe 后重试。")
+
+
 def build_local_photoshop_jsx(
     *,
     template_file: Path,
@@ -325,6 +351,7 @@ def run_local_photoshop_job(
     should_process_image: bool,
     output_target: Path | None = None,
 ) -> Path | None:
+    close_running_local_photoshop()
     with tempfile.TemporaryDirectory(prefix="yiye_ps_local_") as temp_dir_text:
         temp_dir = Path(temp_dir_text)
         result_file = temp_dir / "result.txt"
@@ -387,8 +414,7 @@ def validate_local_photoshop_setup(
         jpeg_quality=jpeg_quality,
         dry_run=True,
     )
-    if is_local_photoshop_running():
-        raise RuntimeError("检测到 Photoshop 已在运行。为避免关闭你当前的 Photoshop 工作区，请先手动关闭 Photoshop，再运行本地模式。")
+    close_running_local_photoshop()
     run_local_photoshop_job(
         settings,
         input_file=None,
@@ -463,8 +489,8 @@ def apply_photoshop_template_to_image(
     return str(output_path.resolve())
 
 
-def apply_photoshop_template_batch_to_dir(
-    input_dir: str | Path,
+def apply_photoshop_template_batch_to_files(
+    image_files: Sequence[str | Path],
     *,
     output_dir: str | Path | None = None,
     template_file: str | Path | None = None,
@@ -474,8 +500,14 @@ def apply_photoshop_template_batch_to_dir(
     jpeg_quality: int | None = None,
     dry_run: bool = False,
 ) -> dict[str, str]:
+    resolved_files = [resolve_path(path) for path in image_files if str(path).strip()]
+    if not resolved_files:
+        print("没有需要 Photoshop 合成的图片。")
+        return {}
+
+    parent_dir = resolved_files[0].parent
     settings = resolve_local_photoshop_settings(
-        input_dir=input_dir,
+        input_dir=parent_dir,
         output_dir=output_dir,
         template_file=template_file,
         smart_object_layer=smart_object_layer,
@@ -484,17 +516,14 @@ def apply_photoshop_template_batch_to_dir(
         jpeg_quality=jpeg_quality,
         dry_run=dry_run,
     )
-    if settings.input_dir is None:
-        raise RuntimeError("缺少要处理的图片目录。")
 
-    input_files = list_supported_images(settings.input_dir)
+    input_files = [path for path in resolved_files if path.is_file() and path.suffix.lower() in SUPPORTED_INPUT_SUFFIXES]
     if not input_files:
-        print("指定目录下没有可处理的图片文件；当前只处理 .jpg/.jpeg/.png。")
+        print("指定列表中没有可处理的 .jpg/.jpeg/.png 文件。")
         return {}
 
-    print(f"已找到 {len(input_files)} 个待处理文件，开始校验本地 Photoshop 模板。")
+    print(f"已指定 {len(input_files)} 个待处理文件，开始校验本地 Photoshop 模板。")
     print(f"当前 PSD 模板：{settings.template_file}")
-    print(f"当前图片目录：{settings.input_dir}")
     if settings.output_dir is not None:
         print(f"当前导出目录：{settings.output_dir}")
     print(f"当前本地 Photoshop：{settings.local_photoshop_exe}")
@@ -528,6 +557,47 @@ def apply_photoshop_template_batch_to_dir(
     for output_path in generated_output_paths:
         print(f"- {output_path}")
     return processed_file_map
+
+
+def apply_photoshop_template_batch_to_dir(
+    input_dir: str | Path,
+    *,
+    output_dir: str | Path | None = None,
+    template_file: str | Path | None = None,
+    smart_object_layer: str | None = None,
+    local_photoshop_exe: str | Path | None = None,
+    job_timeout_seconds: int | None = None,
+    jpeg_quality: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, str]:
+    settings = resolve_local_photoshop_settings(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        template_file=template_file,
+        smart_object_layer=smart_object_layer,
+        local_photoshop_exe=local_photoshop_exe,
+        job_timeout_seconds=job_timeout_seconds,
+        jpeg_quality=jpeg_quality,
+        dry_run=dry_run,
+    )
+    if settings.input_dir is None:
+        raise RuntimeError("缺少要处理的图片目录。")
+
+    input_files = list_supported_images(settings.input_dir)
+    if not input_files:
+        print("指定目录下没有可处理的图片文件；当前只处理 .jpg/.jpeg/.png。")
+        return {}
+
+    return apply_photoshop_template_batch_to_files(
+        input_files,
+        output_dir=settings.output_dir,
+        template_file=settings.template_file,
+        smart_object_layer=settings.smart_object_layer,
+        local_photoshop_exe=settings.local_photoshop_exe,
+        job_timeout_seconds=settings.job_timeout_seconds,
+        jpeg_quality=settings.jpeg_quality,
+        dry_run=settings.dry_run,
+    )
 
 
 def main() -> int:

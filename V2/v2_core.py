@@ -38,7 +38,7 @@ CHARACTER_REFERENCE_FILE = CANKAO_DIR / "juese.png"
 OUTPUT_DIR = ROOT_DIR / "output"
 
 DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-mini-260428"
+DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-pro-260215"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_IMAGE_SIZE = "1024x1536"
@@ -200,6 +200,36 @@ def is_timeout_error(exc: Exception) -> bool:
         if "timed out" in message or "timeout" in message:
             return True
     return False
+
+
+def is_moderation_blocked_error(exc: Exception) -> bool:
+    for error in iter_exception_chain(exc):
+        message = str(error).lower()
+        if "moderation_blocked" in message or "safety system" in message:
+            return True
+    return False
+
+
+def soften_detail_image_prompt(prompt_text: str) -> str:
+    """弱化易触发 OpenAI 内容审核的面部/进食特写描述，改为手部局部特写。"""
+    replacements = [
+        (
+            "特写人物下半张脸（仅露出嘴巴和下巴，绝对不能出现眼睛和鼻子），人物正张嘴准备进食",
+            "特写人物双手持筷或持勺的局部，仅露出白色厨师服袖口和酒红色围裙一角，绝对不出现面部",
+        ),
+        (
+            "人物嘴旁边放置一个黄色填充、黑色粗描边的圆角气泡对话框",
+            "画面右上角放置一个黄色填充、黑色粗描边的圆角气泡对话框",
+        ),
+        ("使用 @juese.png 的人物角色（白色厨师服 + 酒红色围裙）", "使用固定 VI 角色（白色厨师服 + 酒红色围裙）"),
+        ("使用 @juese.pgn 的人物角色（白色厨师服 + 酒红色围裙）", "使用固定 VI 角色（白色厨师服 + 酒红色围裙）"),
+        ("@juese.png", "固定VI角色"),
+        ("@juese.pgn", "固定VI角色"),
+    ]
+    softened = prompt_text
+    for old, new in replacements:
+        softened = softened.replace(old, new)
+    return softened
 
 
 def get_text_temperature() -> float:
@@ -387,6 +417,31 @@ def render_cankao_template_by_replacements(template_text: str, replacements: lis
     return rendered.strip()
 
 
+EATING_ACTION_PLACEHOLDER_MARKERS = (
+    "互动内容",
+    "夹取本菜",
+    "代表性一口",
+    "细节特写一",
+)
+
+EATING_ACTION_GUIDANCE = (
+    "海报图夹起的主菜、细节图人物送嘴的主菜，均须是人类吃这道菜时通常会食用的部分。"
+)
+
+
+def template_needs_eating_action_guidance(placeholders: list[str]) -> bool:
+    return any(
+        any(marker in placeholder for marker in EATING_ACTION_PLACEHOLDER_MARKERS)
+        for placeholder in placeholders
+    )
+
+
+def append_eating_action_guidance(system_prompt: str, placeholders: list[str]) -> str:
+    if not template_needs_eating_action_guidance(placeholders):
+        return system_prompt
+    return f"{system_prompt}\n\n{EATING_ACTION_GUIDANCE}"
+
+
 def encode_image_as_data_url(image_path: Path) -> str:
     mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
     encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
@@ -547,7 +602,8 @@ def generate_cankao_prompt_by_template(
     if not placeholders:
         return {"model": model, "prompt": template_text.strip()}
 
-    system_prompt = """
+    system_prompt = append_eating_action_guidance(
+        """
 你是菜谱视觉策划总监。你的任务是只为模板里的变量位提供替换值。
 强制要求：
 1) 你不能改写模板任何固定文本，只输出变量替换值。
@@ -555,7 +611,9 @@ def generate_cankao_prompt_by_template(
 3) replacement 数组长度必须与变量位数量完全一致。
 4) 输出 JSON：{"replacements":["值1","值2",...]}，不要输出其它内容。
 5) 每个变量位形如 {标签，示例}，请结合菜名与补充说明生成贴合该菜的替换值，不要照抄示例。
-""".strip()
+""".strip(),
+        placeholders,
+    )
 
     placeholder_lines = "\n".join(f"{index + 1}. {placeholder}" for index, placeholder in enumerate(placeholders))
     user_prompt = f"""
@@ -572,38 +630,72 @@ def generate_cankao_prompt_by_template(
 """.strip()
 
     max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
-    response = None
     last_error: Exception | None = None
+    feedback = ""
     for _ in range(max_retry):
+        attempt_user = user_prompt
+        if feedback:
+            attempt_user = user_prompt + f"\n\n上次输出不合格：{feedback}\n请修正 replacements。"
         try:
             response = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "user", "content": attempt_user},
                 ],
                 max_tokens=2200,
                 temperature=temperature,
             )
-            break
         except Exception as exc:
             last_error = exc
-    if response is None:
-        raise RuntimeError(f"豆包模板改写失败：{last_error}")
+            feedback = str(exc)
+            continue
 
-    raw_text = extract_chat_text_output(response).strip()
-    if not raw_text:
-        raise ValueError("豆包未返回有效内容。")
-    payload = extract_json_object_from_text(raw_text)
-    replacements_raw = payload.get("replacements")
-    if not isinstance(replacements_raw, list):
-        raise ValueError("豆包返回 JSON 缺少 replacements 数组。")
-    replacements = [str(item).strip() for item in replacements_raw]
-    if len(replacements) != len(placeholders):
-        raise ValueError(f"变量替换数量不匹配：需要 {len(placeholders)} 个，实际 {len(replacements)} 个。")
+        raw_text = extract_chat_text_output(response).strip()
+        if not raw_text:
+            feedback = "豆包未返回有效内容。"
+            continue
+        try:
+            payload = extract_json_object_from_text(raw_text)
+            replacements_raw = payload.get("replacements")
+            if not isinstance(replacements_raw, list):
+                raise ValueError("豆包返回 JSON 缺少 replacements 数组。")
+            replacements = [str(item).strip() for item in replacements_raw]
+            if len(replacements) != len(placeholders):
+                raise ValueError(f"变量替换数量不匹配：需要 {len(placeholders)} 个，实际 {len(replacements)} 个。")
 
-    prompt_text = render_cankao_template_by_replacements(template_text=template_text, replacements=replacements)
-    return {"model": model, "prompt": prompt_text}
+            prompt_text = render_cankao_template_by_replacements(
+                template_text=template_text, replacements=replacements
+            )
+            return {"model": model, "prompt": prompt_text}
+        except ValueError as exc:
+            feedback = str(exc)
+            last_error = exc
+
+    raise RuntimeError(f"豆包模板改写失败：{last_error or '未知错误'}")
+
+
+def validate_detail_prompt_dish_consistency(dish_name: str, prompt_text: str) -> None:
+    """拒绝细节图 prompt 仍残留其它菜的模板示例用语。"""
+    stale_markers = ("仔姜爆猪颈肉", "猪颈肉", "仔姜爆", "金黄脆壳的猪")
+    dish_name = dish_name.strip()
+    if not dish_name:
+        return
+    for marker in stale_markers:
+        if marker not in prompt_text:
+            continue
+        if marker in dish_name or dish_name in prompt_text:
+            continue
+        raise ValueError(
+            f"细节图 prompt 仍含模板示例「{marker}」，与当前菜「{dish_name}」不符，请严格依据参考海报重写。"
+        )
+    core_name = dish_name.replace(" ", "")
+    if core_name and core_name not in prompt_text.replace(" ", ""):
+        dish_keyword = core_name[: min(2, len(core_name))]
+        if dish_keyword and dish_keyword not in prompt_text:
+            raise ValueError(
+                f"细节图 prompt 未体现当前菜「{dish_name}」，请严格依据参考海报中的同一道菜重写。"
+            )
 
 
 def generate_cankao_prompt_with_images(
@@ -622,7 +714,8 @@ def generate_cankao_prompt_with_images(
     if not placeholders:
         return {"model": model, "prompt": template_text.strip()}
 
-    system_prompt = """
+    system_prompt = append_eating_action_guidance(
+        """
 你是抖音美食图文视觉策划。请结合参考图片，只为模板变量位提供替换值。
 要求：
 1) 不得改写模板固定文本，只输出 replacements 数组。
@@ -630,10 +723,14 @@ def generate_cankao_prompt_with_images(
 3) 只输出 JSON：{"replacements":["值1","值2",...]}。
 4) 变量位含“海报图”时，用一句话描述参考海报中的菜品视觉，不要写“见上图”。
 5) 变量位含“豆包生成的气泡话语”时，必须使用用户提供的已定稿气泡文案。
-""".strip()
+6) 每个变量位形如 {标签，示例}，必须结合菜名、补充说明与「参考海报图」生成，严禁照抄模板示例中的其它菜名或食材。
+7) 所有 replacements 必须描述参考海报中的同一道菜，不得混入模板示例菜。
+""".strip(),
+        placeholders,
+    )
 
     placeholder_lines = "\n".join(f"{index + 1}. {placeholder}" for index, placeholder in enumerate(placeholders))
-    bubble_block = f"\n已定稿气泡文案：{bubble_text}" if bubble_text.strip() else ""
+    bubble_block = f"\n气泡台词（原样填入）：{bubble_text}" if bubble_text.strip() else ""
     user_prompt = f"""
 菜名：{dish_name}
 补充说明：{notes or "无"}{bubble_block}
@@ -651,46 +748,66 @@ def generate_cankao_prompt_with_images(
     for image_path in image_paths:
         if not image_path.exists():
             raise FileNotFoundError(f"参考图不存在：{image_path}")
-        user_content.append({"type": "text", "text": f"参考图：{image_path.name}"})
+        is_character_ref = "juese" in image_path.name.lower()
+        if is_character_ref:
+            label = "角色参考图（仅 VI 人物造型；菜品外观必须以参考海报图为准）"
+        else:
+            label = "参考海报图（细节图文案必须与本图菜品完全一致）"
+        user_content.append({"type": "text", "text": label})
         user_content.append({"type": "image_url", "image_url": {"url": encode_image_as_data_url(image_path)}})
 
     max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
-    response = None
     last_error: Exception | None = None
+    feedback = ""
     for _ in range(max_retry):
+        attempt_content = list(user_content)
+        if feedback:
+            attempt_content[0] = {
+                "type": "text",
+                "text": user_prompt + f"\n\n上次输出不合格：{feedback}\n请严格按参考海报图重写 replacements。",
+            }
         try:
             response = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
+                    {"role": "user", "content": attempt_content},
                 ],
                 max_tokens=2600,
                 temperature=temperature,
             )
-            break
         except Exception as exc:
             last_error = exc
-    if response is None:
-        raise RuntimeError(f"{stage_name}失败：{last_error}")
+            feedback = str(exc)
+            continue
 
-    raw_text = extract_chat_text_output(response).strip()
-    if not raw_text:
-        raise ValueError(f"{stage_name}未返回有效内容。")
-    payload = extract_json_object_from_text(raw_text)
-    replacements_raw = payload.get("replacements")
-    if not isinstance(replacements_raw, list):
-        raise ValueError(f"{stage_name}返回 JSON 缺少 replacements 数组。")
-    replacements = [str(item).strip() for item in replacements_raw]
-    if len(replacements) != len(placeholders):
-        raise ValueError(f"{stage_name}变量替换数量不匹配：需要 {len(placeholders)} 个，实际 {len(replacements)} 个。")
+        raw_text = extract_chat_text_output(response).strip()
+        if not raw_text:
+            feedback = f"{stage_name}未返回有效内容。"
+            continue
+        try:
+            payload = extract_json_object_from_text(raw_text)
+            replacements_raw = payload.get("replacements")
+            if not isinstance(replacements_raw, list):
+                raise ValueError(f"{stage_name}返回 JSON 缺少 replacements 数组。")
+            replacements = [str(item).strip() for item in replacements_raw]
+            if len(replacements) != len(placeholders):
+                raise ValueError(
+                    f"{stage_name}变量替换数量不匹配：需要 {len(placeholders)} 个，实际 {len(replacements)} 个。"
+                )
 
-    for index, placeholder in enumerate(placeholders):
-        if "豆包生成的气泡话语" in placeholder and bubble_text.strip():
-            replacements[index] = bubble_text.strip()
+            for index, placeholder in enumerate(placeholders):
+                if "豆包生成的气泡话语" in placeholder and bubble_text.strip():
+                    replacements[index] = bubble_text.strip()
 
-    prompt_text = render_cankao_template_by_replacements(template_text=template_text, replacements=replacements)
-    return {"model": model, "prompt": prompt_text}
+            prompt_text = render_cankao_template_by_replacements(template_text=template_text, replacements=replacements)
+            validate_detail_prompt_dish_consistency(dish_name, prompt_text)
+            return {"model": model, "prompt": prompt_text}
+        except ValueError as exc:
+            feedback = str(exc)
+            last_error = exc
+
+    raise RuntimeError(f"{stage_name}失败：{last_error or '未知错误'}")
 
 
 BUBBLE_COPY_MIN_CHARS = 5
@@ -716,24 +833,19 @@ def validate_bubble_copy_text(text: str) -> str:
     char_count = count_bubble_copy_chars(normalized)
     if char_count < BUBBLE_COPY_MIN_CHARS or char_count > BUBBLE_COPY_MAX_CHARS:
         raise ValueError(
-            f"气泡文案必须为 {BUBBLE_COPY_MIN_CHARS} 到 {BUBBLE_COPY_MAX_CHARS} 个汉字，"
-            f"当前为 {char_count} 个：{normalized}"
+            f"气泡文案须 {BUBBLE_COPY_MIN_CHARS}–{BUBBLE_COPY_MAX_CHARS} 个汉字，当前 {char_count} 个。"
         )
-    if not re.search(r"[\u4e00-\u9fff]", normalized):
-        raise ValueError("气泡文案必须包含汉字。")
     return normalized
 
 
 def build_bubble_copy_prompt(*, dish_name: str, retry_feedback: str = "") -> str:
-    dish_line = f"菜名：{dish_name.strip()}\n" if dish_name.strip() else ""
-    feedback_block = f"\n上次不合格原因：{retry_feedback}\n请重写。" if retry_feedback.strip() else ""
-    return f"""{dish_line}请根据参考海报，用「我」的第一人称，只写这道菜入口时的口感与食欲感（如香、嫩、脆、爆汁、入味），让抖音用户立刻想吃。
-硬性要求：
-1) 只输出气泡里要说的一句话，不要标题、不要解释、不要 emoji、不要引号。
-2) 全句仅 {BUBBLE_COPY_MIN_CHARS} 到 {BUBBLE_COPY_MAX_CHARS} 个汉字（标点不计入字数）。
-3) 禁止菜名、禁止“关注/收藏/教程”等引导语，禁止堆砌多个卖点。
-4) 语气口语、有画面感，像刚尝一口忍不住感叹。
-示例（仅示意长度与口吻）：外脆里嫩爆汁！ / 一口香到上头！{feedback_block}"""
+    dish_line = f"菜名：{dish_name.strip()}。" if dish_name.strip() else ""
+    feedback_block = f"（{retry_feedback}）" if retry_feedback.strip() else ""
+    return (
+        f"{dish_line}上图是这道菜的海报，另有阿叶厨师角色参考。"
+        f"写他在品尝这道菜时，气泡里最能勾起食欲的一句话——他是说话的人，不是菜。"
+        f"{BUBBLE_COPY_MIN_CHARS}–{BUBBLE_COPY_MAX_CHARS} 个汉字，只输出这一句{feedback_block}"
+    )
 
 
 def generate_poster_bubble_copy(
@@ -756,6 +868,10 @@ def generate_poster_bubble_copy(
             {"type": "text", "text": build_bubble_copy_prompt(dish_name=dish_name, retry_feedback=retry_feedback)},
             {"type": "image_url", "image_url": {"url": encode_image_as_data_url(poster_image_path)}},
         ]
+        if CHARACTER_REFERENCE_FILE.exists():
+            user_content.append(
+                {"type": "image_url", "image_url": {"url": encode_image_as_data_url(CHARACTER_REFERENCE_FILE)}}
+            )
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -888,6 +1004,10 @@ def select_and_publish_image_group(
         return selected, "fallback_direct", fallback_result
 
 
+def snapshot_mode2_image_settings() -> dict[str, dict[str, Any]]:
+    return {group: get_mode2_group_settings(group) for group in MODE2_GROUP_KEYS}
+
+
 def get_mode2_group_settings(group: str) -> dict[str, Any]:
     if group not in MODE2_GROUP_KEYS:
         raise ValueError(f"未知模式2分组：{group}")
@@ -911,6 +1031,35 @@ def get_mode2_group_settings(group: str) -> dict[str, Any]:
     }
 
 
+def augment_prompt_with_reference_labels(prompt_text: str, reference_paths: list[Path]) -> str:
+    if len(reference_paths) <= 1:
+        return prompt_text
+    labels: list[str] = []
+    for index, path in enumerate(reference_paths, start=1):
+        if "juese" in path.name.lower():
+            labels.append(
+                f"第{index}张参考图为固定VI男性厨师角色造型表（{path.name}），"
+                "人物脸型、短发、白色厨师服与酒红色围裙必须与此图完全一致，严禁替换为其他人物。"
+            )
+        else:
+            labels.append(
+                f"第{index}张参考图为海报原图（{path.name}），"
+                "菜品外观、餐具与餐桌环境必须与此图完全一致。"
+            )
+    return f"{prompt_text.rstrip()}\n\n【参考图说明】{' '.join(labels)}"
+
+
+def open_reference_image_uploads(reference_paths: list[Path]) -> tuple[list[Any], list[Any]]:
+    uploads: list[Any] = []
+    handles: list[Any] = []
+    for path in reference_paths:
+        handle = open(path, "rb")
+        handles.append(handle)
+        mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        uploads.append((path.name, handle, mime_type))
+    return uploads, handles
+
+
 def generate_images_from_references(
     client: OpenAI,
     prompt_text: str,
@@ -918,35 +1067,45 @@ def generate_images_from_references(
     settings: dict[str, Any],
 ) -> list[dict[str, str]]:
     valid_paths = [Path(path) for path in reference_paths if str(path).strip() and Path(path).exists()]
+    if valid_paths:
+        print(
+            "参考图生图输入："
+            + "，".join(f"{path.name}({path.resolve()})" for path in valid_paths)
+            + f"；quality={settings.get('quality')}，n={settings.get('image_count')}"
+        )
     if not valid_paths:
         return generate_images_by_prompt(client=client, prompt_text=prompt_text, settings=settings)
 
     max_retry = parse_int_env("IMAGE_REQUEST_RETRY_COUNT", 2)
     request_timeout = parse_float_env("OPENAI_IMAGE_REQUEST_TIMEOUT_SECONDS", 900.0)
     response = None
-    opened_files: list[Any] = []
+    file_handles: list[Any] = []
     try:
-        for path in valid_paths:
-            opened_files.append(open(path, "rb"))
-        image_arg: Any = opened_files[0] if len(opened_files) == 1 else opened_files
+        uploads, file_handles = open_reference_image_uploads(valid_paths)
+        image_arg: Any = uploads[0] if len(uploads) == 1 else uploads
+        request_prompt = augment_prompt_with_reference_labels(prompt_text, valid_paths)
+        edit_kwargs: dict[str, Any] = {
+            "model": settings["model"],
+            "image": image_arg,
+            "prompt": request_prompt,
+            "size": settings["size"],
+            "quality": settings["quality"],
+            "n": settings["image_count"],
+            "timeout": request_timeout,
+        }
+        model_name = str(settings.get("model", "")).strip().lower()
+        if "gpt-image-2" not in model_name:
+            edit_kwargs["input_fidelity"] = "high"
         for attempt in range(1, max_retry + 1):
             try:
-                response = client.images.edit(
-                    model=settings["model"],
-                    image=image_arg,
-                    prompt=prompt_text,
-                    size=settings["size"],
-                    quality=settings["quality"],
-                    n=settings["image_count"],
-                    timeout=request_timeout,
-                )
+                response = client.images.edit(**edit_kwargs)
                 break
             except Exception as exc:
                 if attempt >= max_retry or not is_timeout_error(exc):
                     raise RuntimeError(f"参考图生图失败：{exc}") from exc
                 print(f"参考图生图超时，正在重试第 {attempt + 1}/{max_retry} 次...")
     finally:
-        for file_obj in opened_files:
+        for file_obj in file_handles:
             file_obj.close()
 
     if response is None:
@@ -1275,17 +1434,48 @@ def infer_dish_name_from_folder(folder_name: str) -> str:
     return folder_name.strip()
 
 
+XIAOHONGSHU_TITLE_MAX_UNITS = 40
+
+
+def count_xiaohongshu_title_units(text: str) -> int:
+    """小红书标题计字：汉字等非 ASCII 计 2，英文/数字等 ASCII 计 1，上限 40（约 20 个汉字）。"""
+    units = 0
+    for char in text:
+        units += 2 if ord(char) > 127 else 1
+    return units
+
+
+def normalize_xiaohongshu_title(title: str) -> str:
+    text = str(title or "").strip()
+    if not text:
+        raise ValueError("xiaohongshu 标题为空。")
+    units = count_xiaohongshu_title_units(text)
+    if units <= XIAOHONGSHU_TITLE_MAX_UNITS:
+        return text
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", text))
+    raise ValueError(
+        f"xiaohongshu 标题超过小红书 20 字（40 字符）上限，"
+        f"当前约 {units} 字符（含 {cjk_count} 个汉字）：{text}"
+    )
+
+
 V2_PUBLISH_PLATFORM_SPECS: tuple[tuple[str, str, int], ...] = (
-    ("douyin", "抖音", 4),
+    ("douyin", "抖音", 5),
     ("xiaohongshu", "小红书", 10),
-    ("wechat", "微信视频号和公众号", 10),
+    ("weixin_mp", "微信公众号", 10),
+    ("weixin_channels", "微信视频号", 30),
     ("kuaishou", "快手", 4),
 )
 
 V2_PUBLISH_PLATFORM_TASKS: dict[str, str] = {
-    "douyin": "为这个新菜写抖音的标题、描述和 4 个话题。要有钩子，符合抖音爆款思路。",
-    "xiaohongshu": "为这个新菜写小红书的标题、描述和 10 个话题。要有钩子，符合小红书图文用户的爆款思路。",
-    "wechat": "为这个新菜写微信视频号和公众号的标题、描述和 10 个话题（不超过 10 个）。要有钩子，符合公众号/视频号图文用户的爆款思路。",
+    "douyin": "为这个新菜写抖音的标题、描述和正好 5 个话题（不超过 5 个）。要有钩子，符合抖音爆款思路。",
+    "xiaohongshu": (
+        "为这个新菜写小红书的标题、描述和 10 个话题。"
+        "标题必须不超过 20 个汉字（40 字符上限；汉字计 2、英文/数字计 1）。"
+        "要有钩子，符合小红书图文用户的爆款思路。"
+    ),
+    "weixin_mp": "为这个新菜写微信公众号的标题、描述和正好 10 个话题（不超过 10 个）。要有钩子，符合公众号图文用户的阅读习惯。",
+    "weixin_channels": "为这个新菜写微信视频号的标题、描述和正好 30 个话题（不超过 30 个）。要有钩子，符合视频号图文传播特点。",
     "kuaishou": "为这个新菜写快手的标题、描述和 4 个话题。要有钩子，符合快手爆款思路。",
 }
 
@@ -1320,11 +1510,14 @@ def build_v2_publish_multimodal_prompt(dish_payload: dict[str, str]) -> str:
 1) 标题、描述都要口语化、有食欲、有画面感，禁止套话（如“先收藏”“原创融合”“想吃时照着做”）。
 2) 描述 2–4 句，写口感、场景、做法亮点，可自然提菜名，但不要写成说明书。
 3) topics 数组每项以 # 开头，不要菜品全名话题，不要 #阿叶造新菜。
-4) 只输出 JSON，不要 Markdown，不要解释。格式如下：
+4) xiaohongshu.title 必须不超过 20 个汉字（40 字符；汉字计 2、英文/数字计 1），超出会被判不合格。
+5) topics 数组长度必须与各平台要求完全一致：抖音 5、小红书 10、微信公众号 10、微信视频号 30、快手 4；不能合并公众号与视频号。
+6) 只输出 JSON，不要 Markdown，不要解释。格式如下：
 {{
   "douyin": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
   "xiaohongshu": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
-  "wechat": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
+  "weixin_mp": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
+  "weixin_channels": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
   "kuaishou": {{"title": "...", "description": "...", "topics": ["#...", "..."]}}
 }}"""
 
@@ -1344,8 +1537,8 @@ def normalize_v2_publish_topics(raw_topics: Any, expected_count: int) -> list[st
         tags.append(tag)
         if len(tags) >= expected_count:
             break
-    if len(tags) < max(1, expected_count // 2):
-        raise ValueError(f"话题数量不足，需要约 {expected_count} 个，实际 {len(tags)} 个。")
+    if len(tags) != expected_count:
+        raise ValueError(f"话题数量必须为 {expected_count} 个，实际 {len(tags)} 个。")
     return tags
 
 
@@ -1356,6 +1549,8 @@ def parse_v2_publish_platform_payload(raw_payload: dict[str, Any]) -> dict[str, 
         if not isinstance(block, dict):
             raise ValueError(f"缺少平台字段：{platform_key}")
         title = str(block.get("title", "")).strip()
+        if platform_key == "xiaohongshu":
+            title = normalize_xiaohongshu_title(title)
         description = str(block.get("description", "")).strip()
         topics = normalize_v2_publish_topics(block.get("topics"), topic_count)
         if not title:
@@ -1467,7 +1662,7 @@ def generate_v2_publish_copy_assets(
             response = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": user_content}],
-                max_tokens=2800,
+                max_tokens=4096,
                 temperature=temperature,
             )
             raw_text = extract_chat_text_output(response).strip()

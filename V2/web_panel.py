@@ -20,7 +20,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from mode2_flow import run_v2_mode2
+from mode2_flow import run_supplement_for_output_dir, run_v2_mode2
 from idea_batch import run_idea_batch, DISH_POOL_DIR
 from v2_core import (
     IDEA_FILE,
@@ -40,7 +40,16 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.66"
+PANEL_VERSION = "v0.83"
+DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
+FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
+VALID_HISTORY_SORTS = {"favorite", "created_desc", "created_asc", "name", "image_first"}
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+SILENT_HTTP_LOG_PATHS = {
+    "/api/run_status",
+    "/api/publish_status",
+    "/api/file",
+}
 REPO_ROOT = ROOT_DIR.parent
 
 PUBLISH_PLATFORMS: dict[str, dict[str, str]] = {
@@ -56,7 +65,7 @@ LOGIN_WAIT_PATTERNS: tuple[tuple[str, str], ...] = (
     ("按回车继续", "enter"),
 )
 
-RUN_LOCK = threading.Lock()
+RUN_LOCK = threading.RLock()
 RUNNING = False
 LAST_RESULT: dict[str, Any] | None = None
 LAST_ERROR = ""
@@ -68,6 +77,8 @@ TASK_QUEUE: list[dict[str, Any]] = []
 CURRENT_TASK: dict[str, Any] | None = None
 TASK_SEQ = 0
 RUN_META_FILE_NAME = "_run_meta.json"
+RUN_LOG_FILE_NAME = "_run_log.txt"
+PUBLISH_LOG_FILE_NAME = "_publish_log.txt"
 
 PUBLISH_LOCK = threading.Lock()
 PUBLISH_RUNNING = False
@@ -88,9 +99,32 @@ def append_run_log(text: str) -> None:
     if not line:
         return
     with RUN_LOCK:
+        maybe_update_live_task_from_log(line)
         RUN_LOG_LINES.append(line)
         if len(RUN_LOG_LINES) > MAX_LOG_LINES:
             del RUN_LOG_LINES[: len(RUN_LOG_LINES) - MAX_LOG_LINES]
+
+
+def maybe_update_live_task_from_log(line: str) -> None:
+    """从运行日志回填当前任务的 live 目录与菜名，供任务条跳转使用。"""
+    global CURRENT_TASK
+    if CURRENT_TASK is None:
+        return
+    output_marker = "输出目录："
+    if output_marker in line:
+        path_text = line.split(output_marker, 1)[1].strip()
+        if path_text:
+            CURRENT_TASK["live_output_dir"] = path_text
+            if not str(CURRENT_TASK.get("dish_name", "")).strip():
+                CURRENT_TASK["dish_name"] = infer_dish_name_from_folder(Path(path_text).name)
+        return
+    target_marker = "指定造菜：复用已有目录 "
+    if target_marker in line:
+        path_text = line.split(target_marker, 1)[1].strip()
+        if path_text:
+            CURRENT_TASK["live_output_dir"] = path_text
+            if not str(CURRENT_TASK.get("dish_name", "")).strip():
+                CURRENT_TASK["dish_name"] = infer_dish_name_from_folder(Path(path_text).name)
 
 
 def append_publish_log(text: str) -> None:
@@ -101,6 +135,57 @@ def append_publish_log(text: str) -> None:
         PUBLISH_LOG_LINES.append(line)
         if len(PUBLISH_LOG_LINES) > MAX_PUBLISH_LOG_LINES:
             del PUBLISH_LOG_LINES[: len(PUBLISH_LOG_LINES) - MAX_PUBLISH_LOG_LINES]
+
+
+def load_dish_favorites() -> dict[str, str]:
+    if not FAVORITES_FILE.exists():
+        return {}
+    try:
+        payload = json.loads(FAVORITES_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    favorites = payload.get("paths")
+    if not isinstance(favorites, dict):
+        return {}
+    return {str(key).strip(): str(value).strip() for key, value in favorites.items() if str(key).strip()}
+
+
+def save_dish_favorites(favorites: dict[str, str]) -> None:
+    FAVORITES_FILE.write_text(
+        json.dumps({"paths": favorites}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def remove_dish_favorite(path_text: str) -> None:
+    path_key = str(Path(path_text).resolve())
+    favorites = load_dish_favorites()
+    if path_key not in favorites:
+        return
+    favorites.pop(path_key, None)
+    save_dish_favorites(favorites)
+
+
+def toggle_dish_favorite(raw_path: str) -> dict[str, Any]:
+    folder = resolve_output_path(raw_path)
+    path_key = str(folder.resolve())
+    favorites = load_dish_favorites()
+    if path_key in favorites:
+        favorites.pop(path_key, None)
+        favorited = False
+        favorited_at = ""
+    else:
+        favorited_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        favorites[path_key] = favorited_at
+        favorited = True
+    save_dish_favorites(favorites)
+    return {
+        "path": path_key,
+        "favorited": favorited,
+        "favorited_at": favorited_at,
+    }
 
 
 def history_revision() -> str:
@@ -160,6 +245,8 @@ def run_single_platform_publish(platform_key: str, output_dir: Path) -> None:
     append_publish_log(f"===== 开始发布：{platform['label']} =====")
     publish_env = os.environ.copy()
     publish_env["PYTHONUNBUFFERED"] = "1"
+    publish_env["PYTHONIOENCODING"] = "utf-8"
+    publish_env["PYTHONUTF8"] = "1"
     proc = subprocess.Popen(
         [sys.executable, str(script_path), str(output_dir)],
         cwd=str(REPO_ROOT),
@@ -195,18 +282,39 @@ def publish_worker(output_dir_text: str, platform_keys: list[str]) -> None:
         with PUBLISH_LOCK:
             PUBLISH_OUTPUT_DIR = str(output_dir)
             PUBLISH_QUEUE = list(platform_keys)
+        failed_platforms: list[str] = []
         for platform_key in platform_keys:
             with PUBLISH_LOCK:
                 PUBLISH_CURRENT_PLATFORM = platform_key
                 if platform_key in PUBLISH_QUEUE:
                     PUBLISH_QUEUE.remove(platform_key)
-            run_single_platform_publish(platform_key, output_dir)
-        append_publish_log("全部所选平台发布流程已执行完成，请在各平台浏览器中核对。")
+            platform_label = PUBLISH_PLATFORMS[platform_key]["label"]
+            try:
+                run_single_platform_publish(platform_key, output_dir)
+            except Exception as exc:  # noqa: BLE001
+                failed_platforms.append(platform_label)
+                append_publish_log(f"===== {platform_label} 发布失败，继续下一平台 =====")
+                append_publish_log(str(exc))
+                append_publish_log(traceback.format_exc())
+        if failed_platforms:
+            summary = f"部分平台发布失败：{', '.join(failed_platforms)}"
+            with PUBLISH_LOCK:
+                PUBLISH_ERROR = summary
+            append_publish_log(f"{summary}。其余平台已继续执行，请在各平台浏览器中核对。")
+        else:
+            append_publish_log("全部所选平台发布流程已执行完成，请在各平台浏览器中核对。")
+        publish_log_file = write_publish_log_file(PUBLISH_OUTPUT_DIR, list(PUBLISH_LOG_LINES))
+        if publish_log_file:
+            append_publish_log(f"发布日志已保存：{publish_log_file}")
     except Exception as exc:  # noqa: BLE001
         with PUBLISH_LOCK:
             PUBLISH_ERROR = str(exc)
-        append_publish_log(f"发布失败：{exc}")
+        append_publish_log(f"发布任务中断：{exc}")
         append_publish_log(traceback.format_exc())
+        publish_log_dir = PUBLISH_OUTPUT_DIR or output_dir_text
+        publish_log_file = write_publish_log_file(publish_log_dir, list(PUBLISH_LOG_LINES))
+        if publish_log_file:
+            append_publish_log(f"发布日志已保存：{publish_log_file}")
     finally:
         with PUBLISH_LOCK:
             PUBLISH_RUNNING = False
@@ -283,6 +391,7 @@ HTML_PAGE = """<!doctype html>
       --splitter:8px;
     }
     *{box-sizing:border-box}
+    .hidden{display:none!important}
     body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:radial-gradient(1200px 600px at 10% -10%, #1b2438 0%, transparent 60%),var(--bg);color:var(--text)}
     .wrap{max-width:1600px;margin:0 auto;padding:14px 16px 84px}
     .top{
@@ -346,7 +455,10 @@ HTML_PAGE = """<!doctype html>
     .section-card{border:1px solid #283449;background:var(--panel-soft);border-radius:10px;padding:10px}
     .sec-title{margin:0 0 8px;font-size:14px;font-weight:700}
     .sec-desc{margin:0 0 8px;font-size:12px;color:var(--sub)}
-    .mode{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+    .mode{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
+    .supplement-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:4px}
+    .supplement-grid label{display:flex;align-items:center;gap:6px;margin:0;font-size:13px;color:var(--text);cursor:pointer}
+    .supplement-grid input[type=checkbox]{width:auto;margin:0}
     .mode-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:stretch}
     .mode2-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
     .mode2-item{border:1px solid #283449;border-radius:8px;padding:8px;background:#0f172a}
@@ -429,7 +541,11 @@ HTML_PAGE = """<!doctype html>
     .thumb.active{border-color:#60a5fa;box-shadow:0 0 0 2px rgba(96,165,250,.25)}
     .history-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
     .history-head .panel-title{margin:0}
-    .history-head-actions{display:flex;gap:6px;align-items:center}
+    .history-head-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+    .history-sort{
+      width:auto;min-width:132px;padding:6px 8px;border:1px solid #3a475f;border-radius:8px;
+      background:#101a2a;color:#dbe7ff;font-size:12px;cursor:pointer;
+    }
     .history-head-actions button{
       width:auto;padding:5px 9px;border:1px solid #475569;border-radius:7px;background:#101a2a;color:#dbe7ff;cursor:pointer;font-size:11px;
     }
@@ -449,10 +565,53 @@ HTML_PAGE = """<!doctype html>
     .history-item.batch-selected{border-color:#f59e0b;box-shadow:0 0 0 2px rgba(245,158,11,.22)}
     .history-item:hover{transform:translateY(-1px);border-color:#60a5fa;box-shadow:0 0 0 2px rgba(96,165,250,.18)}
     .history-item.active{border-color:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,.22)}
+    .history-item.task-running{border-color:#f59e0b;box-shadow:0 0 0 2px rgba(245,158,11,.28)}
+    .history-item.task-queued{border-color:#6366f1;box-shadow:0 0 0 1px rgba(99,102,241,.22)}
+    .history-task-badge{
+      position:absolute;top:5px;left:5px;z-index:2;padding:1px 6px;border-radius:999px;
+      font-size:10px;font-weight:700;line-height:1.4;color:#fff;pointer-events:none;
+    }
+    .history-task-badge.running{background:#d97706}
+    .history-task-badge.queued{background:#4f46e5}
+    .task-bar{
+      position:relative;z-index:28;
+      margin:0 0 10px;padding:10px 12px;border:1px solid #334155;border-radius:12px;
+      background:linear-gradient(180deg,#111b2e 0%,#0d1524 100%);box-shadow:var(--shadow);
+    }
+    .task-bar.hidden{display:none}
+    .task-bar-main{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+    .task-bar-running{flex:1;min-width:220px;font-size:13px;line-height:1.5;color:#e2e8f0}
+    .task-bar-running strong{color:#fbbf24}
+    .task-bar-running .sub{color:#94a3b8;font-size:12px;margin-top:2px}
+    .task-bar-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .task-bar-actions button{
+      width:auto;padding:6px 10px;border:1px solid #475569;border-radius:8px;background:#101a2a;color:#dbe7ff;cursor:pointer;font-size:12px;
+    }
+    .task-bar-actions button.primary{border-color:#2563eb;background:#1d4ed8;color:#eff6ff}
+    .task-bar-queue{margin-top:8px;padding-top:8px;border-top:1px solid #283548;font-size:12px;color:#cbd5e1}
+    .task-bar-queue.hidden{display:none}
+    .task-bar-queue-item{padding:4px 0;display:flex;gap:8px;align-items:baseline}
+    .task-bar-queue-item .tag{color:#a5b4fc;min-width:52px}
+    .task-bar-publish{margin-top:8px;padding-top:8px;border-top:1px dashed #334155;font-size:12px;color:#86efac}
+    .task-bar-publish.hidden{display:none}
+    .view-context-bar{
+      display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;font-size:12px;margin-bottom:8px;
+      padding:7px 10px;border:1px solid #2a364f;border-radius:8px;background:#0b1220;color:#94a3b8;
+    }
+    .view-context-bar strong{color:#e2e8f0;font-weight:700}
+    .running-context.active{color:#fbbf24}
+    .running-context.publish{color:#86efac}
     .history-cover{grid-area:cover;width:52px;height:52px;background:#111827;border-radius:7px;display:flex;align-items:center;justify-content:center;overflow:hidden}
     .history-cover img{width:100%;height:100%;object-fit:cover}
     .history-meta{grid-area:meta;padding:0;min-width:0}
-    .history-name{font-size:12px;font-weight:700;line-height:1.3;word-break:break-all;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .history-meta-top{display:flex;align-items:flex-start;justify-content:space-between;gap:4px}
+    .history-fav{
+      width:22px;height:22px;padding:0;border:none;background:transparent;color:#64748b;
+      font-size:15px;cursor:pointer;line-height:1;flex:0 0 auto;
+    }
+    .history-fav.active{color:#ef4444}
+    .history-fav:hover{color:#f87171}
+    .history-name{font-size:12px;font-weight:700;line-height:1.3;word-break:break-all;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;flex:1;min-width:0}
     .history-time{font-size:12px;color:var(--sub);margin-top:4px}
     .history-ops{
       grid-area:ops;position:static;display:flex;gap:6px;justify-content:flex-end;padding-top:6px;
@@ -470,7 +629,15 @@ HTML_PAGE = """<!doctype html>
     .text-tab,.text-file-btn{width:auto;padding:7px 10px;border:1px solid #3a475f;border-radius:999px;background:#101a2a;color:#dbe7ff;cursor:pointer;font-size:12px}
     .text-file-list{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #26344b}
     .text-file-meta{font-size:12px;color:#94a3b8;margin-bottom:8px;word-break:break-all}
-    .text-content{margin:0;min-height:360px;max-height:calc(100vh - 360px);overflow:auto;white-space:pre-wrap;word-break:break-word;border:1px solid #26344b;border-radius:10px;background:#08111f;padding:12px;color:#e5edf8;font-size:13px;line-height:1.65}
+    .text-editor-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+    .text-editor-hint{font-size:12px;color:#94a3b8}
+    .text-editor-hint.dirty{color:#fcd34d}
+    .text-editor-actions{display:flex;gap:8px;align-items:center}
+    .text-editor-actions button{width:auto;padding:7px 12px;border:1px solid #3a475f;border-radius:8px;background:#101a2a;color:#dbe7ff;cursor:pointer;font-size:12px}
+    .text-editor-actions button.primary{border-color:#2563eb;background:#1d4ed8;color:#eff6ff}
+    .text-editor-actions button:disabled{opacity:.45;cursor:not-allowed}
+    .text-content,.text-editor{margin:0;width:100%;min-height:360px;max-height:calc(100vh - 400px);overflow:auto;white-space:pre-wrap;word-break:break-word;border:1px solid #26344b;border-radius:10px;background:#08111f;padding:12px;color:#e5edf8;font-size:13px;line-height:1.65;box-sizing:border-box;resize:vertical;font-family:ui-monospace,Consolas,monospace}
+    .text-editor:focus{outline:none;border-color:#3b82f6;box-shadow:0 0 0 1px rgba(59,130,246,.35)}
     .log-toggle{
       position:fixed;right:16px;bottom:16px;z-index:55;padding:9px 12px;border-radius:999px;border:1px solid #475569;
       background:#0f172a;color:#e2e8f0;box-shadow:var(--shadow);cursor:pointer;font-size:12px;
@@ -512,10 +679,6 @@ HTML_PAGE = """<!doctype html>
         <div class="sub">四栏布局：菜品池、造菜控制、看图/文字、发布平台；左侧宽度可拖拽并自动记忆。</div>
       </div>
       <div class="chips">
-        <span id="envQuality" class="chip">画质：-</span>
-        <span id="envCount" class="chip">出图数：-</span>
-        <span id="envCoverCount" class="chip">封面数：-</span>
-        <span id="envMode" class="chip">模式：-</span>
         <span class="version-tag">版本：__PANEL_VERSION__</span>
       </div>
       <div class="top-actions">
@@ -525,18 +688,37 @@ HTML_PAGE = """<!doctype html>
       </div>
     </div>
 
+    <div id="taskBar" class="task-bar hidden">
+      <div class="task-bar-main">
+        <div class="task-bar-running" id="taskBarRunning">后台空闲</div>
+        <div class="task-bar-actions">
+          <button id="taskBarJumpBtn" type="button" class="primary hidden">切到运行中菜品</button>
+          <button id="taskBarQueueToggle" type="button" class="hidden">展开队列</button>
+        </div>
+      </div>
+      <div id="taskBarQueue" class="task-bar-queue hidden"></div>
+      <div id="taskBarPublish" class="task-bar-publish hidden"></div>
+    </div>
+
     <div id="fourColLayout" class="four-col">
       <section class="panel panel-left">
         <div class="history-head">
           <h3 class="panel-title">菜品池</h3>
           <div class="history-head-actions">
-            <button id="batchDeleteBtn" type="button">批量删除</button>
-            <button id="batchDeleteAllBtn" type="button" class="danger-btn hidden">全部删除</button>
+            <select id="historySortSelect" class="history-sort" title="菜品池排序">
+              <option value="favorite">收藏优先</option>
+              <option value="image_first">已生图优先</option>
+              <option value="created_desc">创建时间（新→旧）</option>
+              <option value="created_asc">创建时间（旧→新）</option>
+              <option value="name">菜名 A→Z</option>
+            </select>
+            <button id="batchDeleteBtn" type="button">批量移出</button>
+            <button id="batchDeleteAllBtn" type="button" class="danger-btn hidden">全部移出</button>
           </div>
         </div>
         <div id="history" class="history-grid"></div>
         <div id="historyLoadMore" class="load-more">
-          <button id="loadMoreBtn" type="button">加载更多</button>
+          <button id="loadMoreBtn" type="button">载入更多</button>
         </div>
       </section>
 
@@ -546,13 +728,16 @@ HTML_PAGE = """<!doctype html>
         <div class="section-card">
           <h3 class="sec-title">造菜方式</h3>
           <div class="mode">
-            <button id="modeAutoBtn" class="active" type="button">自动造菜</button>
-            <button id="modeFileBtn" type="button">手动点名</button>
-            <button id="modeTargetBtn" type="button">指定造菜</button>
+            <button id="modeAutoBtn" class="active" type="button">自动</button>
+            <button id="modeFileBtn" type="button">手动</button>
+            <button id="modeTargetBtn" type="button">指定</button>
+            <button id="modeSupplementBtn" type="button">补生</button>
+            <button id="modeIdeaBtn" type="button">生菜</button>
           </div>
           <div id="targetModeHint" class="sec-desc" style="display:none;margin-top:8px">在左侧菜品池选中一项后，将自动读取菜名与描述，并在原目录内生成图片与文案。</div>
+          <div id="supplementModeHint" class="sec-desc" style="display:none;margin-top:8px">在左侧菜品池选中一项后，勾选要补生的图片或文案，再点「开始运行」。</div>
           <div id="cuisineCard" style="margin-top:8px">
-            <label>自动造菜菜系</label>
+            <label>自动菜系</label>
             <select id="cuisineMode">
               <option value="1" selected>中华料理</option>
               <option value="0">全部随机</option>
@@ -563,18 +748,32 @@ HTML_PAGE = """<!doctype html>
               <option value="6">东欧</option>
               <option value="7">拉美</option>
             </select>
-            <div class="sec-desc">仅「自动造菜」生效，将写入 AUTO_DISH_CUISINE_MODE。</div>
+            <div class="sec-desc">「自动」与「生菜」批量模式生效。</div>
           </div>
-          <label style="margin-top:8px">手动菜名（仅手动点名生效）</label>
-          <input id="dishName" placeholder="例如：蒜香煎嫩鸡胸肉" />
+          <label id="dishNameLabel" style="margin-top:8px;display:none">手动菜名</label>
+          <input id="dishName" placeholder="例如：蒜香煎嫩鸡胸肉" style="display:none" />
         </div>
 
-        <div class="section-card">
-          <h3 class="sec-title">只生成造菜信息</h3>
-          <div class="sec-desc">仅调用豆包写入 txt，不生成图片。自动造菜可批量；手动点名每次 1 条。</div>
+        <div id="ideaCard" class="section-card" style="display:none">
+          <h3 class="sec-title">生菜</h3>
+          <div class="sec-desc">仅调用豆包写入造菜信息 txt，不生成图片。留空菜名则自动批量；填写菜名则每次 1 条。</div>
           <label>生成数量</label>
           <input id="ideaCount" type="number" min="1" max="30" step="1" value="3" />
-          <button id="ideaOnlyBtn" type="button" style="margin-top:8px;width:100%;padding:10px;border:1px solid #3a475f;border-radius:9px;background:#101a2a;color:#dbe7ff;cursor:pointer;font-weight:700">只生成造菜信息</button>
+          <label style="margin-top:8px">手动菜名（可选）</label>
+          <input id="ideaDishName" placeholder="填写则按手动生成 1 条，留空则自动批量" />
+        </div>
+
+        <div id="supplementCard" class="section-card" style="display:none">
+          <h3 class="sec-title">补生内容</h3>
+          <div class="sec-desc">勾选需要重新生成的图片或文案。补生图片时会使用下方四组图的数量与画质配置。</div>
+          <div class="supplement-grid">
+            <label><input type="checkbox" id="suppPoster" value="poster" />海报图</label>
+            <label><input type="checkbox" id="suppDetail" value="detail" />细节图</label>
+            <label><input type="checkbox" id="suppRecipe" value="recipe" />菜谱图</label>
+            <label><input type="checkbox" id="suppCover" value="cover" />封面图</label>
+            <label><input type="checkbox" id="suppCopy" value="copy" />各平台标题与正文</label>
+            <label><input type="checkbox" id="suppPhotoshop" value="photoshop" />PS 合成</label>
+          </div>
         </div>
 
         <div class="section-card">
@@ -641,6 +840,10 @@ HTML_PAGE = """<!doctype html>
             <button id="textTabBtn" class="view-tab" type="button">文字栏</button>
           </div>
           <div id="imagePane" class="content-pane">
+            <div class="view-context-bar">
+              <span>正在查看：<strong id="viewingDishLabel">未选择</strong></span>
+              <span id="runningContextLabel" class="running-context">后台：空闲</span>
+            </div>
             <div class="gallery-strip">
               <div class="gallery-tools">
                 <div class="gallery-actions">
@@ -738,12 +941,20 @@ HTML_PAGE = """<!doctype html>
       autoRefreshTimer: null,
       logOnlyErrors: false,
       historyOffset: 0,
-      historyLimit: 12,
+      historyLimit: 30,
       historyHasMore: true,
       historyLoading: false,
       historySnapshot: "",
       historyRevision: "",
+      historySort: "favorite",
+      suppressHistoryAutoReload: 0,
       running: false,
+      runningPercent: 0,
+      runningElapsed: 0,
+      runningTaskPath: "",
+      taskQueueSnapshot: {running: null, queued: []},
+      taskQueueExpanded: false,
+      publishSnapshot: {running: false, platform: "", output_dir: ""},
       colLeft: 320,
       colMid: 430,
       activeRightTab: "image",
@@ -754,6 +965,9 @@ HTML_PAGE = """<!doctype html>
       textAssets: null,
       activeTextCategory: "",
       activeTextFilePath: "",
+      textEditorDrafts: {},
+      textEditorDirty: false,
+      textSaveStatus: "",
       publishLogIndex: 0,
       publishPolling: false,
       batchDeleteMode: false,
@@ -764,6 +978,7 @@ HTML_PAGE = """<!doctype html>
     const QUALITY_INDEX = { low: 0, medium: 1, high: 2, auto: 3 };
     const INDEX_QUALITY = ["low", "medium", "high", "auto"];
     const LAYOUT_STORAGE_KEY = "v2_panel_layout_v1";
+    const HISTORY_SORT_STORAGE_KEY = "v2_history_sort_v1";
 
     function 画质文案(value){
       if(value === "low"){ return "标准清晰"; }
@@ -802,10 +1017,20 @@ HTML_PAGE = """<!doctype html>
       $("modeAutoBtn").classList.toggle("active", mode === "auto");
       $("modeFileBtn").classList.toggle("active", mode === "file");
       $("modeTargetBtn").classList.toggle("active", mode === "target");
+      $("modeSupplementBtn").classList.toggle("active", mode === "supplement");
+      $("modeIdeaBtn").classList.toggle("active", mode === "idea");
       const manual = mode === "file";
       const target = mode === "target";
-      $("cuisineCard").style.display = mode === "auto" ? "block" : "none";
+      const supplement = mode === "supplement";
+      const idea = mode === "idea";
+      $("cuisineCard").style.display = (mode === "auto" || idea) ? "block" : "none";
       $("targetModeHint").style.display = target ? "block" : "none";
+      $("supplementModeHint").style.display = supplement ? "block" : "none";
+      $("ideaCard").style.display = idea ? "block" : "none";
+      $("supplementCard").style.display = supplement ? "block" : "none";
+      $("groupParams").style.display = idea ? "none" : "block";
+      $("dishNameLabel").style.display = manual ? "block" : "none";
+      $("dishName").style.display = manual ? "block" : "none";
       $("dishName").disabled = target;
       $("dishName").classList.toggle("input-disabled", target);
       $("dishNotes").disabled = target;
@@ -818,18 +1043,24 @@ HTML_PAGE = """<!doctype html>
     }
 
     function syncIdeaCountUi(){
-      const manual = state.mode === "file";
-      const target = state.mode === "target";
-      $("ideaCount").disabled = manual || target;
-      $("ideaCount").classList.toggle("input-disabled", manual || target);
-      if(manual){ $("ideaCount").value = "1"; }
+      if(state.mode !== "idea"){ return; }
+      const ideaDishName = ($("ideaDishName").value || "").trim();
+      $("ideaCount").disabled = Boolean(ideaDishName);
+      $("ideaCount").classList.toggle("input-disabled", Boolean(ideaDishName));
+      if(ideaDishName){ $("ideaCount").value = "1"; }
+    }
+
+    function collectSupplementTargets(){
+      return ["suppPoster", "suppDetail", "suppRecipe", "suppCover", "suppCopy", "suppPhotoshop"]
+        .filter((id) => $(id)?.checked)
+        .map((id) => $(id).value);
     }
 
     function setBatchDeleteMode(enabled){
       state.batchDeleteMode = Boolean(enabled);
       state.batchDeleteSelected = new Set();
       $("history").classList.toggle("batch-mode", state.batchDeleteMode);
-      $("batchDeleteBtn").textContent = state.batchDeleteMode ? "取消批量" : "批量删除";
+      $("batchDeleteBtn").textContent = state.batchDeleteMode ? "取消批量" : "批量移出";
       $("batchDeleteAllBtn").classList.toggle("hidden", !state.batchDeleteMode);
       $("batchDeleteAllBtn").disabled = true;
       Array.from($("history").querySelectorAll(".history-item")).forEach((el) => {
@@ -842,7 +1073,7 @@ HTML_PAGE = """<!doctype html>
     function updateBatchDeleteUi(){
       const count = state.batchDeleteSelected.size;
       $("batchDeleteAllBtn").disabled = count < 1;
-      $("batchDeleteAllBtn").textContent = count > 0 ? `全部删除（${count}）` : "全部删除";
+      $("batchDeleteAllBtn").textContent = count > 0 ? `全部移出（${count}）` : "全部移出";
     }
 
     function toggleBatchDeletePath(path, checked){
@@ -859,17 +1090,185 @@ HTML_PAGE = """<!doctype html>
 
     function setRunState(running, percent=0){
       state.running = running;
+      state.runningPercent = percent;
+      const runPath = normalizeHistoryPath(state.runningTaskPath || "");
+      const viewPath = normalizeHistoryPath(state.selectedHistoryPath || "");
+      const showOnPreview = running && runPath && viewPath && runPath === viewPath;
       const hasImage = Boolean(state.currentImagePath);
-      $("runSkeleton").style.display = (running && !hasImage) ? "block" : "none";
-      $("runBadge").style.display = running ? "block" : "none";
+      $("runSkeleton").style.display = (showOnPreview && !hasImage) ? "block" : "none";
+      $("runBadge").style.display = showOnPreview ? "block" : "none";
       $("runBadge").textContent = `处理中 ${percent}%`;
       if(running){
         $("runBtn").textContent = `运行中 ${percent}%（可继续排队）`;
         $("runBtn").disabled = false;
+      }else{
+        $("runBtn").textContent = "开始运行";
+        $("runBtn").disabled = false;
+        state.runningTaskPath = "";
+      }
+      updateViewContextBar();
+      applyHistoryTaskBadges();
+    }
+
+    function updateViewContextBar(){
+      const viewing = state.selectedHistoryItem?.dish_name
+        || (state.selectedHistoryPath ? state.selectedHistoryPath.split(/[\\\\/]/).pop() : "")
+        || "未选择";
+      $("viewingDishLabel").textContent = viewing;
+      const run = state.taskQueueSnapshot?.running;
+      const ctx = $("runningContextLabel");
+      if(state.running && run){
+        const elapsed = state.runningElapsed ? ` · 已等 ${state.runningElapsed}s` : "";
+        ctx.textContent = `后台运行：${run.summary}${elapsed}${state.runningPercent ? ` · ${state.runningPercent}%` : ""}`;
+        ctx.className = "running-context active";
         return;
       }
-      $("runBtn").textContent = "开始运行";
-      $("runBtn").disabled = false;
+      if(state.publishSnapshot?.running){
+        const dish = state.publishSnapshot.dish_name || "当前菜品";
+        const platform = state.publishSnapshot.platform || "发布中";
+        ctx.textContent = `后台发布：${dish} → ${platform}`;
+        ctx.className = "running-context publish";
+        return;
+      }
+      ctx.textContent = "后台：空闲";
+      ctx.className = "running-context";
+    }
+
+    function renderTaskBar(){
+      const snap = state.taskQueueSnapshot || {running: null, queued: []};
+      const queued = snap.queued || [];
+      const running = snap.running;
+      const publishing = Boolean(state.publishSnapshot?.running);
+      const hasWork = Boolean(state.running || queued.length || publishing);
+      $("taskBar").classList.toggle("hidden", !hasWork);
+
+      if(state.running && running){
+        const elapsed = state.runningElapsed ? `已等 ${state.runningElapsed}s` : "处理中";
+        const queueHint = queued.length ? ` · 排队 ${queued.length} 个` : "";
+        $("taskBarRunning").innerHTML = `<div><strong>正在运行</strong>：${running.summary}（${elapsed}${queueHint}）</div>`;
+        const canJump = Boolean(running.output_dir || (running.dish_name && running.dish_name !== "自动生成"));
+        $("taskBarJumpBtn").classList.toggle("hidden", !canJump);
+        $("taskBarJumpBtn").dataset.path = running.output_dir || "";
+        $("taskBarJumpBtn").dataset.dish = running.dish_name || "";
+      }else if(publishing){
+        $("taskBarRunning").innerHTML = `<div><strong>正在发布</strong>：${state.publishSnapshot.dish_name || "菜品"} → ${state.publishSnapshot.platform || "…"}</div>`;
+        $("taskBarJumpBtn").classList.add("hidden");
+      }else if(queued.length){
+        $("taskBarRunning").innerHTML = `<div><strong>等待执行</strong>：队列中有 ${queued.length} 个任务</div>`;
+        $("taskBarJumpBtn").classList.add("hidden");
+      }else{
+        $("taskBarRunning").textContent = "后台空闲";
+        $("taskBarJumpBtn").classList.add("hidden");
+      }
+
+      const toggleBtn = $("taskBarQueueToggle");
+      if(queued.length){
+        toggleBtn.classList.remove("hidden");
+        toggleBtn.textContent = state.taskQueueExpanded ? "收起队列" : `展开队列（${queued.length}）`;
+        $("taskBarQueue").classList.toggle("hidden", !state.taskQueueExpanded);
+        $("taskBarQueue").innerHTML = queued.map((item, index) => (
+          `<div class="task-bar-queue-item"><span class="tag">排队${index + 1}</span><span>${item.summary || item.dish_name || "任务"}</span></div>`
+        )).join("");
+      }else{
+        toggleBtn.classList.add("hidden");
+        $("taskBarQueue").classList.add("hidden");
+        $("taskBarQueue").innerHTML = "";
+        state.taskQueueExpanded = false;
+      }
+
+      const pub = $("taskBarPublish");
+      if(publishing){
+        pub.classList.remove("hidden");
+        pub.textContent = `发布平台：${state.publishSnapshot.platform || "…"}（${state.publishSnapshot.output_dir || ""}）`;
+      }else{
+        pub.classList.add("hidden");
+        pub.textContent = "";
+      }
+      updateViewContextBar();
+      applyHistoryTaskBadges();
+    }
+
+    function applyHistoryTaskBadges(){
+      const snap = state.taskQueueSnapshot || {running: null, queued: []};
+      const runningPath = normalizeHistoryPath(snap.running?.output_dir || state.runningTaskPath || "");
+      const queuedPaths = (snap.queued || []).map((item, index) => ({
+        path: normalizeHistoryPath(item.output_dir || ""),
+        index: index + 1,
+      })).filter((item) => item.path);
+      Array.from($("history").querySelectorAll(".history-item")).forEach((el) => {
+        const path = normalizeHistoryPath(el.dataset.path || "");
+        el.classList.remove("task-running", "task-queued");
+        const oldBadge = el.querySelector(".history-task-badge");
+        if(oldBadge){ oldBadge.remove(); }
+        if(runningPath && path === runningPath){
+          el.classList.add("task-running");
+          const badge = document.createElement("span");
+          badge.className = "history-task-badge running";
+          badge.textContent = "运行中";
+          el.appendChild(badge);
+          return;
+        }
+        const queued = queuedPaths.find((item) => item.path === path);
+        if(queued){
+          el.classList.add("task-queued");
+          const badge = document.createElement("span");
+          badge.className = "history-task-badge queued";
+          badge.textContent = `排队${queued.index}`;
+          el.appendChild(badge);
+        }
+      });
+    }
+
+    function findHistoryCardByTask(pathText, dishName){
+      const target = normalizeHistoryPath(pathText || "");
+      const cards = Array.from($("history").querySelectorAll(".history-item"));
+      if(target){
+        const byPath = cards.find((el) => normalizeHistoryPath(el.dataset.path) === target);
+        if(byPath){ return byPath; }
+      }
+      const name = String(dishName || "").trim();
+      if(!name || name === "自动生成"){ return null; }
+      return cards.find((el) => {
+        const cardName = el.querySelector(".history-name")?.textContent?.trim() || "";
+        return cardName === name || cardName.includes(name) || name.includes(cardName);
+      }) || null;
+    }
+
+    async function jumpToRunningDish(rawPath){
+      const running = state.taskQueueSnapshot?.running;
+      const path = String(
+        rawPath
+        || $("taskBarJumpBtn")?.dataset?.path
+        || state.runningTaskPath
+        || running?.output_dir
+        || ""
+      ).trim();
+      const dishName = String(
+        $("taskBarJumpBtn")?.dataset?.dish
+        || running?.dish_name
+        || ""
+      ).trim();
+      let card = findHistoryCardByTask(path, dishName);
+      if(!card){
+        await loadHistory(true);
+        card = findHistoryCardByTask(path, dishName);
+      }
+      if(!card){
+        setStatus(
+          dishName
+            ? `运行中的「${dishName}」尚未出现在菜品池，请稍后再点或刷新菜品池。`
+            : "当前运行任务还没有对应菜品目录。",
+          "warn"
+        );
+        return;
+      }
+      const item = {
+        path: card.dataset.path,
+        dish_name: card.querySelector(".history-name")?.textContent?.trim() || dishName,
+      };
+      await selectHistoryItem(item, card);
+      card.scrollIntoView({block: "nearest", behavior: "smooth"});
+      setStatus(`已切到运行中菜品：${item.dish_name}`, "ok");
     }
 
     function 应用三栏宽度(leftWidth, midWidth){
@@ -957,6 +1356,16 @@ HTML_PAGE = """<!doctype html>
         }else{
           hideLoginModal();
         }
+        const publishDir = data.output_dir || state.selectedHistoryPath || "";
+        const publishDishName = state.selectedHistoryItem?.dish_name
+          || (publishDir ? publishDir.split(/[\\\\/]/).pop() : "");
+        state.publishSnapshot = {
+          running: Boolean(data.running),
+          platform: data.current_platform || "",
+          output_dir: publishDir,
+          dish_name: publishDishName,
+        };
+        renderTaskBar();
         $("publishBtn").disabled = Boolean(data.running);
         $("publishBtn").textContent = data.running
           ? `发布中：${data.current_platform || "…"}`
@@ -1117,7 +1526,39 @@ HTML_PAGE = """<!doctype html>
       $("textPane").classList.toggle("hidden", state.activeRightTab !== "text");
     }
 
+    function captureTextEditorDraft(){
+      const editor = $("textEditor");
+      if(!editor || !state.activeTextFilePath){ return; }
+      state.textEditorDrafts[state.activeTextFilePath] = editor.value;
+    }
+
+    function getActiveTextFile(){
+      const groups = state.textAssets?.groups || [];
+      for(const group of groups){
+        const file = group.files.find((item) => item.path === state.activeTextFilePath);
+        if(file){ return file; }
+      }
+      return null;
+    }
+
+    function resolveTextEditorContent(activeFile){
+      if(!activeFile){ return ""; }
+      if(Object.prototype.hasOwnProperty.call(state.textEditorDrafts, activeFile.path)){
+        return state.textEditorDrafts[activeFile.path];
+      }
+      return activeFile.content || "";
+    }
+
+    function updateTextEditorDirty(activeFile, currentValue){
+      if(!activeFile){
+        state.textEditorDirty = false;
+        return;
+      }
+      state.textEditorDirty = String(currentValue) !== String(activeFile.content || "");
+    }
+
     function renderTextAssets(){
+      captureTextEditorDraft();
       const panel = $("textPanel");
       const payload = state.textAssets;
       const groups = payload?.groups || [];
@@ -1133,6 +1574,8 @@ HTML_PAGE = """<!doctype html>
         state.activeTextFilePath = activeGroup.files[0]?.path || "";
       }
       const activeFile = activeGroup.files.find((file) => file.path === state.activeTextFilePath) || activeGroup.files[0];
+      const editorValue = resolveTextEditorContent(activeFile);
+      updateTextEditorDirty(activeFile, editorValue);
 
       panel.innerHTML = "";
       const tabs = document.createElement("div");
@@ -1172,16 +1615,94 @@ HTML_PAGE = """<!doctype html>
       meta.textContent = activeFile ? activeFile.relative_path : "";
       panel.appendChild(meta);
 
-      const content = document.createElement("pre");
-      content.className = "text-content";
-      content.textContent = activeFile?.content || "";
-      panel.appendChild(content);
+      const bar = document.createElement("div");
+      bar.className = "text-editor-bar";
+      const hint = document.createElement("div");
+      hint.id = "textEditorHint";
+      hint.className = "text-editor-hint" + (state.textEditorDirty ? " dirty" : "");
+      hint.textContent = state.textEditorDirty
+        ? "有未保存修改，编辑后点击保存。"
+        : "可直接编辑文案，Ctrl+S 或点击保存写入磁盘。";
+      const actions = document.createElement("div");
+      actions.className = "text-editor-actions";
+      const saveBtn = document.createElement("button");
+      saveBtn.id = "textSaveBtn";
+      saveBtn.type = "button";
+      saveBtn.className = "primary";
+      saveBtn.textContent = "保存";
+      saveBtn.disabled = !activeFile;
+      saveBtn.onclick = () => { saveTextAsset(); };
+      actions.appendChild(saveBtn);
+      bar.appendChild(hint);
+      bar.appendChild(actions);
+      panel.appendChild(bar);
+
+      const editor = document.createElement("textarea");
+      editor.id = "textEditor";
+      editor.className = "text-editor";
+      editor.spellcheck = false;
+      editor.value = editorValue;
+      editor.disabled = !activeFile;
+      editor.addEventListener("input", () => {
+        if(!activeFile){ return; }
+        state.textEditorDrafts[activeFile.path] = editor.value;
+        updateTextEditorDirty(activeFile, editor.value);
+        const hintEl = $("textEditorHint");
+        const saveEl = $("textSaveBtn");
+        if(hintEl){
+          hintEl.classList.toggle("dirty", state.textEditorDirty);
+          hintEl.textContent = state.textEditorDirty
+            ? "有未保存修改，编辑后点击保存。"
+            : "可直接编辑文案，Ctrl+S 或点击保存写入磁盘。";
+        }
+        if(saveEl){
+          saveEl.textContent = state.textEditorDirty ? "保存*" : "保存";
+        }
+      });
+      panel.appendChild(editor);
+
+      if(state.textSaveStatus){
+        const status = document.createElement("div");
+        status.className = "status";
+        status.textContent = state.textSaveStatus;
+        panel.appendChild(status);
+      }
+    }
+
+    async function saveTextAsset(){
+      const activeFile = getActiveTextFile();
+      const editor = $("textEditor");
+      if(!activeFile || !editor){ return; }
+      const content = editor.value;
+      const saveBtn = $("textSaveBtn");
+      if(saveBtn){ saveBtn.disabled = true; saveBtn.textContent = "保存中…"; }
+      try{
+        const res = await fetch("/api/text_assets_save", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ path: activeFile.path, content }),
+        });
+        const data = await res.json();
+        if(!res.ok){ throw new Error(data.error || "保存失败"); }
+        activeFile.content = content;
+        delete state.textEditorDrafts[activeFile.path];
+        state.textEditorDirty = false;
+        state.textSaveStatus = "已保存：" + activeFile.name;
+        renderTextAssets();
+      }catch(err){
+        state.textSaveStatus = "保存失败：" + String(err.message || err);
+        renderTextAssets();
+      }
     }
 
     async function loadTextAssets(path){
+      captureTextEditorDraft();
       state.textAssets = null;
       state.activeTextCategory = "";
       state.activeTextFilePath = "";
+      state.textEditorDrafts = {};
+      state.textEditorDirty = false;
+      state.textSaveStatus = "";
       $("textPanel").innerHTML = `<div class="text-empty">正在读取文案...</div>`;
       if(!path){
         $("textPanel").innerHTML = `<div class="text-empty">点击左侧某个菜品后，这里会显示它的造菜信息、平台文案、提示词和其他 txt 文案。</div>`;
@@ -1394,46 +1915,67 @@ HTML_PAGE = """<!doctype html>
       $("resultMsg").className = "status " + (hasError ? "warn" : "ok");
     }
 
+    function normalizeHistoryPath(path){
+      return String(path || "").replace(/[\\\\/]+$/, "").replace(/\\\\/g, "/").toLowerCase();
+    }
+
+    function bumpSuppressHistoryAutoReload(){
+      state.suppressHistoryAutoReload = Math.max(state.suppressHistoryAutoReload, 4);
+    }
+
+    function removeHistoryCardFromDom(path){
+      const target = normalizeHistoryPath(path);
+      const card = Array.from($("history").querySelectorAll(".history-item")).find(
+        (el) => normalizeHistoryPath(el.dataset.path) === target
+      );
+      if(card){
+        card.remove();
+        state.historyOffset = Math.max(0, state.historyOffset - 1);
+      }
+      if(!$("history").querySelector(".history-item")){
+        $("history").innerHTML = '<div class="history-empty">暂无菜品</div>';
+        $("loadMoreBtn").style.display = "none";
+      }
+    }
+
     async function 删除历史(path){
-      const ok = window.confirm("确定删除该历史记录及其文件夹吗？");
-      if(!ok){ return; }
       const res = await fetch("/api/history_delete", {
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body: JSON.stringify({path})
       });
       const data = await res.json();
-      if(!res.ok){ throw new Error(data.error || "删除失败"); }
-      setStatus("历史记录已删除。", "ok");
+      if(!res.ok){ throw new Error(data.error || "移出失败"); }
+      setStatus("已移入备用目录：" + (data.archived_to || "dish_archive"), "ok");
+      bumpSuppressHistoryAutoReload();
+      removeHistoryCardFromDom(path);
       if(state.selectedHistoryPath === path){
         state.selectedHistoryPath = "";
         state.selectedHistoryItem = null;
       }
-      await loadHistory(true);
     }
 
     async function 批量删除历史(paths){
       const list = (paths || []).filter(Boolean);
       if(!list.length){
-        setStatus("请先勾选要删除的菜品。", "warn");
+        setStatus("请先勾选要移出的菜品。", "warn");
         return;
       }
-      const ok = window.confirm(`确定删除选中的 ${list.length} 个菜品及其文件夹吗？`);
-      if(!ok){ return; }
       const res = await fetch("/api/history_batch_delete", {
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body: JSON.stringify({paths: list})
       });
       const data = await res.json();
-      if(!res.ok){ throw new Error(data.error || "批量删除失败"); }
-      setStatus(`已删除 ${data.deleted_count || list.length} 个菜品。`, "ok");
+      if(!res.ok){ throw new Error(data.error || "批量移出失败"); }
+      setStatus(`已移入备用目录 ${data.deleted_count || list.length} 个菜品。`, "ok");
       if(list.includes(state.selectedHistoryPath)){
         state.selectedHistoryPath = "";
         state.selectedHistoryItem = null;
       }
       setBatchDeleteMode(false);
-      await loadHistory(true);
+      bumpSuppressHistoryAutoReload();
+      list.forEach((path) => removeHistoryCardFromDom(path));
     }
 
     async function selectHistoryItem(item, card){
@@ -1455,6 +1997,27 @@ HTML_PAGE = """<!doctype html>
       if($("resultMsg").className === "status"){
         $("resultMsg").textContent = "已同步菜品目录状态。";
       }
+      updateViewContextBar();
+      setRunState(state.running, state.runningPercent);
+    }
+
+    async function toggleHistoryFavorite(path, button){
+      if(!path){ return; }
+      try{
+        const res = await fetch("/api/history_favorite", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({path}),
+        });
+        const data = await res.json();
+        if(!res.ok){ throw new Error(data.error || "收藏操作失败"); }
+        if(button){
+          button.classList.toggle("active", Boolean(data.favorited));
+          button.title = data.favorited ? "取消收藏" : "收藏";
+        }
+      }catch(err){
+        setStatus("收藏失败：" + String(err.message || err), "warn");
+      }
     }
 
     function createHistoryCard(item){
@@ -1465,19 +2028,23 @@ HTML_PAGE = """<!doctype html>
         ? `<img src="${fileUrl(item.preview_image)}" alt="${item.dish_name || item.name}" />`
         : `<div class="history-empty">暂无图片</div>`;
       const timeText = item.created_at || item.name.split("_").slice(0,2).join(" ");
+      const favorited = Boolean(item.favorited);
       div.innerHTML = `
-        <label class="history-check" title="勾选删除">
+        <label class="history-check" title="勾选移出">
           <input type="checkbox" data-path="${item.path || ""}" />
         </label>
         <div class="history-cover">${cover}</div>
         <div class="history-meta">
-          <div class="history-name">${item.dish_name || item.name}</div>
+          <div class="history-meta-top">
+            <div class="history-name">${item.dish_name || item.name}</div>
+            <button type="button" class="history-fav${favorited ? " active" : ""}" data-op="favorite" title="${favorited ? "取消收藏" : "收藏"}">♥</button>
+          </div>
           <div class="history-time">${timeText}</div>
         </div>
         <div class="history-ops">
           <button data-op="open">打开</button>
           <button data-op="copy">复制</button>
-          <button data-op="delete" class="del">删除</button>
+          <button data-op="delete" class="del">移出</button>
         </div>
       `;
       const checkbox = div.querySelector(".history-check input");
@@ -1500,13 +2067,26 @@ HTML_PAGE = """<!doctype html>
       const ops = div.querySelector(".history-ops");
       ops.onclick = async (e) => {
         e.stopPropagation();
-        const op = e.target?.dataset?.op;
+        const target = e.target;
+        if(!(target instanceof HTMLElement)){ return; }
+        const op = target.dataset?.op;
+        if(op === "favorite"){
+          await toggleHistoryFavorite(item.path, target);
+          return;
+        }
         if(op === "open"){ await openOutputPath(item.path); }
         if(op === "copy"){ await copyText(item.path, "历史目录路径已复制。"); }
         if(op === "delete"){
-          try{ await 删除历史(item.path); }catch(err){ setStatus("删除失败：" + err.message, "warn"); }
+          try{ await 删除历史(item.path); }catch(err){ setStatus("移出失败：" + err.message, "warn"); }
         }
       };
+      const favBtn = div.querySelector(".history-fav");
+      if(favBtn){
+        favBtn.onclick = async (e) => {
+          e.stopPropagation();
+          await toggleHistoryFavorite(item.path, favBtn);
+        };
+      }
       return div;
     }
 
@@ -1532,7 +2112,8 @@ HTML_PAGE = """<!doctype html>
           $("history").innerHTML = "";
         }
         if(!state.historyHasMore){ return; }
-        const url = `/api/history?offset=${state.historyOffset}&limit=${state.historyLimit}`;
+        const sort = encodeURIComponent(state.historySort || "favorite");
+        const url = `/api/history?offset=${state.historyOffset}&limit=${state.historyLimit}&sort=${sort}`;
         const res = await fetch(url);
         const data = await res.json();
         const items = data.items || [];
@@ -1563,6 +2144,7 @@ HTML_PAGE = """<!doctype html>
           $("history").innerHTML = '<div class="history-empty">暂无菜品</div>';
           $("loadMoreBtn").style.display = "none";
         }
+        applyHistoryTaskBadges();
       }finally{
         state.historyLoading = false;
       }
@@ -1597,13 +2179,23 @@ HTML_PAGE = """<!doctype html>
           appendLogs(data.logs);
           state.logNextIndex = data.next_index || state.logNextIndex;
         }
+        state.taskQueueSnapshot = data.task_queue || {running: data.current_task || null, queued: []};
+        if(data.running && state.taskQueueSnapshot.running){
+          state.runningTaskPath = state.taskQueueSnapshot.running.output_dir || "";
+        }else if(!data.running){
+          state.runningTaskPath = "";
+        }
+        state.runningElapsed = Number(data.elapsed_seconds || 0);
+        renderTaskBar();
+
         if(data.running){
-          const elapsed = Number(data.elapsed_seconds || 0);
+          const elapsed = state.runningElapsed;
           const percent = Math.max(1, Math.min(95, Math.floor((elapsed / 120) * 100)));
           setRunState(true, percent);
-          const queueText = data.queue_length ? `，队列待执行 ${data.queue_length} 个` : "";
+          const queueText = data.queue_length ? `，队列 ${data.queue_length} 个` : "";
+          const runSummary = state.taskQueueSnapshot.running?.summary || "造菜任务";
           if(!silent){
-            setStatus(`运行中 ${percent}%（已等待 ${elapsed}s${queueText}）`);
+            setStatus(`运行中：${runSummary}（${percent}% · ${elapsed}s${queueText}）`);
           }
           startPolling();
           return;
@@ -1623,15 +2215,16 @@ HTML_PAGE = """<!doctype html>
           }
         }
         if(data.history_revision && data.history_revision !== state.historyRevision){
+          const previousRevision = state.historyRevision;
           state.historyRevision = data.history_revision;
-          await loadHistory(true);
-          if(state.selectedHistoryPath){
-            try{ await loadDishDetail(state.selectedHistoryPath); }catch{}
-          }
-        }else if(data.history){
-          const nextSnapshot = buildHistorySnapshot(data.history);
-          if(nextSnapshot !== state.historySnapshot){
-            state.historySnapshot = nextSnapshot;
+          if(state.suppressHistoryAutoReload > 0){
+            state.suppressHistoryAutoReload--;
+          }else if(wasRunning){
+            await loadHistory(true);
+            if(state.selectedHistoryPath){
+              try{ await loadDishDetail(state.selectedHistoryPath); }catch{}
+            }
+          }else if(!previousRevision){
             await loadHistory(true);
           }
         }
@@ -1669,19 +2262,6 @@ HTML_PAGE = """<!doctype html>
     async function loadState(showMsg=false){
       const res = await fetch("/api/state");
       const data = await res.json();
-      $("envQuality").textContent = `海报画质：${画质文案(data.config.MODE2_POSTER_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY)}`;
-      $("envCount").textContent = `海报数：${data.config.MODE2_POSTER_IMAGE_COUNT || data.config.OPENAI_IMAGE_COUNT}`;
-      $("envCoverCount").textContent = `封面数：${data.config.MODE2_COVER_IMAGE_COUNT || "-"}`;
-      const cuisineText = data.config.AUTO_GENERATE_DISH_IDEA === "1"
-        ? 菜系文案(data.config.AUTO_DISH_CUISINE_MODE || "1")
-        : "";
-      if(state.mode === "target"){
-        $("envMode").textContent = "指定造菜";
-      }else{
-        $("envMode").textContent = data.config.AUTO_GENERATE_DISH_IDEA === "1"
-          ? `自动造菜 / ${cuisineText}`
-          : "手动点名";
-      }
       $("cuisineMode").value = data.config.AUTO_DISH_CUISINE_MODE || "1";
       $("posterCount").value = data.config.MODE2_POSTER_IMAGE_COUNT || data.config.OPENAI_IMAGE_COUNT;
       $("posterQuality").value = data.config.MODE2_POSTER_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
@@ -1733,13 +2313,55 @@ HTML_PAGE = """<!doctype html>
     }
 
     async function runNow(){
+      if(state.mode === "idea"){
+        const dishName = $("ideaDishName").value.trim();
+        const mode = dishName ? "file" : "auto";
+        const count = Math.max(1, Math.min(30, Number($("ideaCount").value || "1")));
+        $("ideaCount").value = String(count);
+        await submitTask({
+          action: "idea_only",
+          mode,
+          cuisine_mode: $("cuisineMode").value.trim(),
+          dish_name: dishName,
+          notes: "",
+          idea_count: String(count)
+        }, `生菜任务已提交（共 ${count} 条）。`);
+        return;
+      }
+      if(state.mode === "supplement"){
+        if(!state.selectedHistoryPath){
+          setStatus("补生请先在左侧菜品池选中一个菜品。", "danger");
+          return;
+        }
+        const targets = collectSupplementTargets();
+        if(!targets.length){
+          setStatus("请至少勾选一项补生内容。", "danger");
+          return;
+        }
+        await submitTask({
+          action: "supplement",
+          mode: "supplement",
+          target_output_dir: state.selectedHistoryPath,
+          supplement_targets: targets,
+          model_temperature: $("temperature").value.trim(),
+          poster_quality: $("posterQuality").value.trim(),
+          poster_count: $("posterCount").value.trim(),
+          detail_quality: $("detailQuality").value.trim(),
+          detail_count: $("detailCount").value.trim(),
+          recipe_quality: $("recipeQuality").value.trim(),
+          recipe_count: $("recipeCount").value.trim(),
+          cover_mode2_quality: $("coverMode2Quality").value.trim(),
+          cover_mode2_count: $("coverMode2Count").value.trim()
+        }, `补生任务已提交（${targets.length} 项）。`);
+        return;
+      }
       if(state.mode === "file" && !$("dishName").value.trim()){
-        setStatus("手动点名模式下请先填写菜名。", "danger");
+        setStatus("手动模式下请先填写菜名。", "danger");
         $("dishName").focus();
         return;
       }
       if(state.mode === "target" && !state.selectedHistoryPath){
-        setStatus("指定造菜请先在左侧菜品池选中一个菜品。", "danger");
+        setStatus("指定请先在左侧菜品池选中一个菜品。", "danger");
         return;
       }
       await submitTask({
@@ -1759,24 +2381,6 @@ HTML_PAGE = """<!doctype html>
         cover_mode2_quality: $("coverMode2Quality").value.trim(),
         cover_mode2_count: $("coverMode2Count").value.trim()
       });
-    }
-
-    async function runIdeaOnly(){
-      if(state.mode === "file" && !$("dishName").value.trim()){
-        setStatus("手动点名模式下请先填写菜名。", "danger");
-        $("dishName").focus();
-        return;
-      }
-      const count = Math.max(1, Math.min(30, Number($("ideaCount").value || "1")));
-      $("ideaCount").value = String(count);
-      await submitTask({
-        action: "idea_only",
-        mode: state.mode,
-        cuisine_mode: $("cuisineMode").value.trim(),
-        dish_name: $("dishName").value.trim(),
-        notes: $("dishNotes").value.trim(),
-        idea_count: String(count)
-      }, `造菜信息任务已提交（共 ${count} 条）。`);
     }
 
     async function copyText(text, okMessage){
@@ -1826,7 +2430,16 @@ HTML_PAGE = """<!doctype html>
       $("modeAutoBtn").onclick = () => setMode("auto");
       $("modeFileBtn").onclick = () => setMode("file");
       $("modeTargetBtn").onclick = () => setMode("target");
+      $("modeSupplementBtn").onclick = () => setMode("supplement");
+      $("modeIdeaBtn").onclick = () => setMode("idea");
+      $("ideaDishName").oninput = syncIdeaCountUi;
       $("batchDeleteBtn").onclick = () => setBatchDeleteMode(!state.batchDeleteMode);
+      $("historySortSelect").value = state.historySort || "favorite";
+      $("historySortSelect").onchange = async () => {
+        state.historySort = $("historySortSelect").value || "favorite";
+        localStorage.setItem(HISTORY_SORT_STORAGE_KEY, state.historySort);
+        await loadHistory(true);
+      };
       $("batchDeleteAllBtn").onclick = async () => {
         try{
           await 批量删除历史(Array.from(state.batchDeleteSelected));
@@ -1836,8 +2449,14 @@ HTML_PAGE = """<!doctype html>
       };
       $("imageTabBtn").onclick = () => setRightTab("image");
       $("textTabBtn").onclick = () => setRightTab("text");
+      document.addEventListener("keydown", (event) => {
+        if((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s"){
+          if(state.activeRightTab !== "text" || !state.activeTextFilePath){ return; }
+          event.preventDefault();
+          saveTextAsset();
+        }
+      });
       $("runBtn").onclick = runNow;
-      $("ideaOnlyBtn").onclick = runIdeaOnly;
       $("presetBudgetBtn").onclick = () => applyPreset("budget");
       $("presetQualityBtn").onclick = () => applyPreset("quality");
       $("prevImgBtn").onclick = () => showGalleryImage(state.galleryIndex - 1);
@@ -1861,11 +2480,21 @@ HTML_PAGE = """<!doctype html>
       };
       $("openOutputTopBtn").onclick = async () => { try{ await openOutputPath(); }catch(err){ setStatus("打开目录失败：" + err.message, "warn"); } };
       $("refreshTopBtn").onclick = () => loadState(true);
+      $("taskBar").addEventListener("click", (event) => {
+        const target = event.target;
+        if(!(target instanceof HTMLElement)){ return; }
+        if(target.closest("#taskBarJumpBtn")){
+          event.preventDefault();
+          jumpToRunningDish();
+          return;
+        }
+        if(target.closest("#taskBarQueueToggle")){
+          event.preventDefault();
+          state.taskQueueExpanded = !state.taskQueueExpanded;
+          renderTaskBar();
+        }
+      });
       $("loadMoreBtn").onclick = () => loadHistory(false);
-      $("history").onscroll = () => {
-        const nearBottom = $("history").scrollTop + $("history").clientHeight >= $("history").scrollHeight - 60;
-        if(nearBottom){ loadHistory(false); }
-      };
       $("logToggleBtn").onclick = () => 切换日志抽屉(!$("logDrawer").classList.contains("open"));
       $("logCloseBtn").onclick = () => 切换日志抽屉(false);
       $("logClearBtn").onclick = () => { $("logPanel").textContent = ""; };
@@ -1878,6 +2507,8 @@ HTML_PAGE = """<!doctype html>
     bindEvents();
     绑定参数滑块();
     syncIdeaCountUi();
+    state.historySort = localStorage.getItem(HISTORY_SORT_STORAGE_KEY) || "favorite";
+    if($("historySortSelect")){ $("historySortSelect").value = state.historySort; }
     加载三栏宽度();
     初始化拖拽分栏();
     loadState();
@@ -1920,7 +2551,143 @@ def infer_dish_name_from_folder(folder_name: str) -> str:
 IMAGE_FILE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
 
-def build_run_meta(result: dict[str, Any]) -> dict[str, Any]:
+def task_action_label(task: dict[str, Any]) -> str:
+    action = str(task.get("action", "run")).strip().lower() or "run"
+    mode = str(task.get("mode", "")).strip().lower()
+    if action == "idea_only":
+        return "生菜"
+    if action == "supplement":
+        targets = [str(item).strip() for item in (task.get("supplement_targets") or []) if str(item).strip()]
+        if not targets:
+            return "补生"
+        short = "/".join(targets[:2])
+        if len(targets) > 2:
+            short += "…"
+        return f"补生·{short}"
+    labels = {"auto": "自动", "file": "手动", "target": "指定", "idea": "生菜"}
+    return labels.get(mode, "造菜")
+
+
+def build_task_panel_item(task: dict[str, Any], *, status: str) -> dict[str, Any]:
+    dish_name = str(task.get("dish_name", "")).strip()
+    target_dir = str(task.get("live_output_dir") or task.get("target_output_dir", "")).strip()
+    if not dish_name and target_dir:
+        dish_name = infer_dish_name_from_folder(Path(target_dir).name)
+    action_label = task_action_label(task)
+    display_name = dish_name or "自动生成"
+    return {
+        "task_id": task.get("task_id"),
+        "status": status,
+        "dish_name": display_name,
+        "output_dir": target_dir,
+        "action_label": action_label,
+        "summary": f"{display_name} · {action_label}",
+    }
+
+
+def build_task_queue_snapshot() -> dict[str, Any]:
+    with RUN_LOCK:
+        running_item: dict[str, Any] | None = None
+        if RUNNING and CURRENT_TASK:
+            running_item = build_task_panel_item(CURRENT_TASK, status="running")
+        queued = [build_task_panel_item(task, status="queued") for task in TASK_QUEUE]
+    return {
+        "running": running_item,
+        "queued": queued,
+        "queue_length": len(queued),
+    }
+
+
+def build_task_run_params(task: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": task.get("task_id"),
+        "action": str(task.get("action", "")).strip(),
+        "mode": str(task.get("mode", "")).strip(),
+        "cuisine_mode": str(task.get("cuisine_mode", "")).strip(),
+        "model_temperature": str(task.get("model_temperature", "")).strip(),
+        "poster_quality": str(task.get("poster_quality", "")).strip(),
+        "poster_count": str(task.get("poster_count", "")).strip(),
+        "detail_quality": str(task.get("detail_quality", "")).strip(),
+        "detail_count": str(task.get("detail_count", "")).strip(),
+        "recipe_quality": str(task.get("recipe_quality", "")).strip(),
+        "recipe_count": str(task.get("recipe_count", "")).strip(),
+        "cover_mode2_quality": str(task.get("cover_mode2_quality", "")).strip(),
+        "cover_mode2_count": str(task.get("cover_mode2_count", "")).strip(),
+        "supplement_targets": list(task.get("supplement_targets") or []),
+        "target_output_dir": str(task.get("target_output_dir", "")).strip(),
+    }
+
+
+def resolve_run_log_dir(result: dict[str, Any] | None, task: dict[str, Any]) -> Path | None:
+    if isinstance(result, dict):
+        output_dir_text = str(result.get("output_dir", "")).strip()
+        if output_dir_text:
+            output_dir = Path(output_dir_text)
+            if output_dir.exists() and output_dir.is_dir():
+                return output_dir
+        batch_dir_text = str(result.get("batch_dir", "")).strip()
+        if batch_dir_text:
+            batch_dir = Path(batch_dir_text)
+            if batch_dir.exists() and batch_dir.is_dir():
+                return batch_dir
+    target_output_dir = str(task.get("target_output_dir", "")).strip()
+    if target_output_dir:
+        target_dir = Path(target_output_dir)
+        if target_dir.exists() and target_dir.is_dir():
+            return target_dir
+    return None
+
+
+def write_run_log_file(
+    *,
+    result: dict[str, Any] | None,
+    task: dict[str, Any],
+    log_lines: list[str],
+    success: bool,
+    error_text: str = "",
+) -> str:
+    log_dir = resolve_run_log_dir(result, task)
+    if log_dir is None:
+        return ""
+    header = [
+        f"任务 #{task.get('task_id', '-')}",
+        f"开始时间：{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(float(task.get('queued_at', time.time()))))}",
+        f"结束时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"类型：{task.get('action', 'run')} / {task.get('mode', '')}",
+        f"状态：{'成功' if success else '失败'}",
+    ]
+    if error_text.strip():
+        header.append(f"错误：{error_text.strip()}")
+    header.append(f"运行参数：{json.dumps(build_task_run_params(task), ensure_ascii=False)}")
+    if isinstance(result, dict) and result.get("image_generation_settings"):
+        header.append(
+            "生图配置："
+            + json.dumps(result.get("image_generation_settings"), ensure_ascii=False)
+        )
+    header.append("")
+    content = "\n".join(header + log_lines).rstrip() + "\n"
+    log_file = log_dir / RUN_LOG_FILE_NAME
+    log_file.write_text(content, encoding="utf-8")
+    return str(log_file)
+
+
+def write_publish_log_file(output_dir_text: str, log_lines: list[str]) -> str:
+    if not output_dir_text.strip():
+        return ""
+    output_dir = Path(output_dir_text.strip())
+    if not output_dir.exists() or not output_dir.is_dir():
+        return ""
+    header = [
+        f"发布时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+    ]
+    content = "\n".join(header + log_lines).rstrip() + "\n"
+    log_file = output_dir / PUBLISH_LOG_FILE_NAME
+    log_file.write_text(content, encoding="utf-8")
+    return str(log_file)
+
+
+def build_run_meta(result: dict[str, Any], task: dict[str, Any] | None = None) -> dict[str, Any]:
     ps_files = result.get("photoshop_processed_files") or []
     poster_selected = str(result.get("poster_selected_image", "")).strip()
     workflow_status = ""
@@ -1928,7 +2695,7 @@ def build_run_meta(result: dict[str, Any]) -> dict[str, Any]:
         workflow_status = f"已合成发布图（{len(ps_files)} 张）"
     elif poster_selected:
         workflow_status = "已选图"
-    return {
+    meta: dict[str, Any] = {
         "dish_name": str(result.get("dish_name", "")).strip(),
         "region_label": str(result.get("region_label", "")).strip(),
         "reference_dish": str(result.get("reference_dish", "")).strip(),
@@ -1942,10 +2709,17 @@ def build_run_meta(result: dict[str, Any]) -> dict[str, Any]:
         "cover_selection_mode": str(result.get("cover_selection_mode", "")).strip(),
         "photoshop_count": len(ps_files),
         "workflow_status": workflow_status,
+        "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "image_generation_settings": result.get("image_generation_settings") or {},
+        "run_log_file": str(result.get("run_log_file", "")).strip(),
     }
+    if task is not None:
+        meta["run_params"] = build_task_run_params(task)
+        meta["task_id"] = task.get("task_id")
+    return meta
 
 
-def write_run_meta(result: dict[str, Any]) -> None:
+def write_run_meta(result: dict[str, Any], task: dict[str, Any] | None = None) -> None:
     output_dir_text = str(result.get("output_dir", "")).strip()
     if not output_dir_text:
         return
@@ -1954,7 +2728,7 @@ def write_run_meta(result: dict[str, Any]) -> None:
         return
     meta_file = output_dir / RUN_META_FILE_NAME
     meta_file.write_text(
-        json.dumps(build_run_meta(result), ensure_ascii=False, indent=2) + "\n",
+        json.dumps(build_run_meta(result, task=task), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -1981,6 +2755,10 @@ def read_run_meta(folder: Path) -> dict[str, Any]:
         "cover_selection_mode": str(payload.get("cover_selection_mode", "")).strip(),
         "workflow_status": str(payload.get("workflow_status", "")).strip(),
         "photoshop_count": int(payload.get("photoshop_count", 0) or 0),
+        "finished_at": str(payload.get("finished_at", "")).strip(),
+        "image_generation_settings": payload.get("image_generation_settings") or {},
+        "run_params": payload.get("run_params") or {},
+        "run_log_file": str(payload.get("run_log_file", "")).strip(),
     }
 
 
@@ -2002,6 +2780,25 @@ def _selection_mode_label(payload: dict[str, Any]) -> str:
     if payload.get("winner_image_name") or payload.get("winner_index"):
         return "豆包评分"
     return "未执行"
+
+
+def _existing_file_path(path_text: str) -> str:
+    text = str(path_text or "").strip()
+    if not text:
+        return ""
+    candidate = Path(text)
+    if candidate.is_file():
+        return str(candidate.resolve())
+    return ""
+
+
+def _filter_existing_files(paths: list[str]) -> list[str]:
+    existing: list[str] = []
+    for path_text in paths:
+        resolved = _existing_file_path(path_text)
+        if resolved:
+            existing.append(resolved)
+    return existing
 
 
 def _find_image_by_name(folder: Path, file_name: str) -> str:
@@ -2062,12 +2859,12 @@ def read_dish_output_summary(folder: Path) -> dict[str, Any]:
 
     poster_selected = _find_image_by_name(folder, str(poster_result.get("winner_image_name", "")))
     if not poster_selected:
-        poster_selected = str(meta.get("poster_selected_image", "")).strip()
+        poster_selected = _existing_file_path(str(meta.get("poster_selected_image", "")).strip())
     detail_selected = _find_image_by_name(folder, str(detail_result.get("winner_image_name", "")))
     recipe_selected = _find_image_by_name(folder, str(recipe_result.get("winner_image_name", "")))
     cover_selected = _find_image_by_name(folder, str(cover_result.get("winner_image_name", "")))
     if not cover_selected:
-        cover_selected = str(meta.get("cover_selected_image", "")).strip()
+        cover_selected = _existing_file_path(str(meta.get("cover_selected_image", "")).strip())
 
     photoshop_files = _collect_folder_images(final_dir) if final_dir.is_dir() else []
     if not cover_selected and photoshop_files:
@@ -2081,8 +2878,8 @@ def read_dish_output_summary(folder: Path) -> dict[str, Any]:
     if ps_fail.is_file():
         ps_error = ps_fail.read_text(encoding="utf-8", errors="replace").strip()[:300]
 
-    images = _collect_folder_images(folder, recursive=True)
-    publish_images = photoshop_files or _collect_folder_images(publish_dir, recursive=False)
+    images = _filter_existing_files(_collect_folder_images(folder, recursive=True))
+    publish_images = _filter_existing_files(photoshop_files or _collect_folder_images(publish_dir, recursive=False))
 
     workflow_status = str(meta.get("workflow_status", "")).strip()
     if not workflow_status:
@@ -2124,6 +2921,8 @@ def classify_text_file(path: Path) -> tuple[str, str]:
     name = path.name
     if "造菜信息" in name:
         return "idea", "造菜信息"
+    if name in {RUN_LOG_FILE_NAME, PUBLISH_LOG_FILE_NAME}:
+        return "other", "运行日志"
     if "平台文案" in name or "标题" in name or "话题" in name or "描述" in name:
         return "publish", "平台文案"
     if "prompt" in name.lower() or "提示词" in name:
@@ -2162,6 +2961,16 @@ def read_text_assets(raw_path: str) -> dict[str, Any]:
     return {"path": str(folder), "groups": groups}
 
 
+def save_text_asset(raw_path: str, content: str) -> dict[str, Any]:
+    file_path = resolve_output_file(raw_path)
+    file_path.write_text(content, encoding="utf-8", newline="\n")
+    return {
+        "ok": True,
+        "path": str(file_path),
+        "name": file_path.name,
+    }
+
+
 def format_folder_time(folder_name: str) -> str:
     parts = folder_name.split("_", 2)
     if len(parts) < 2:
@@ -2173,6 +2982,19 @@ def format_folder_time(folder_name: str) -> str:
     return f"{date_text[0:4]}-{date_text[4:6]}-{date_text[6:8]} {time_text[0:2]}:{time_text[2:4]}:{time_text[4:6]}"
 
 
+def folder_has_generated_image(folder: Path) -> bool:
+    for path in folder.iterdir():
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
+            return True
+    publish_dir = folder / "publish"
+    if not publish_dir.is_dir():
+        return False
+    for path in publish_dir.rglob("*"):
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
+            return True
+    return False
+
+
 def collect_history_dirs() -> list[Path]:
     dirs: list[Path] = []
     if OUTPUT_DIR.exists():
@@ -2182,20 +3004,41 @@ def collect_history_dirs() -> list[Path]:
             if not batch_dir.is_dir() or not batch_dir.name.endswith("_batch"):
                 continue
             dirs.extend(path for path in batch_dir.iterdir() if path.is_dir())
-    dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
     return dirs
 
 
-def list_history(limit: int = 12, offset: int = 0) -> list[dict[str, Any]]:
+def sort_history_dirs(dirs: list[Path], sort: str, favorites: dict[str, str]) -> list[Path]:
+    normalized_sort = sort if sort in VALID_HISTORY_SORTS else "favorite"
+    if normalized_sort == "name":
+        return sorted(dirs, key=lambda path: infer_dish_name_from_folder(path.name).lower())
+    if normalized_sort == "created_asc":
+        return sorted(dirs, key=lambda path: path.stat().st_mtime)
+    if normalized_sort == "created_desc":
+        return sorted(dirs, key=lambda path: path.stat().st_mtime, reverse=True)
+    if normalized_sort == "image_first":
+        with_image = [path for path in dirs if folder_has_generated_image(path)]
+        with_image.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        return with_image
+
+    favorite_dirs = [path for path in dirs if str(path.resolve()) in favorites]
+    other_dirs = [path for path in dirs if str(path.resolve()) not in favorites]
+    favorite_dirs.sort(key=lambda path: favorites[str(path.resolve())], reverse=True)
+    other_dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return favorite_dirs + other_dirs
+
+
+def list_history(limit: int = 30, offset: int = 0, sort: str = "favorite") -> list[dict[str, Any]]:
     if offset < 0:
         offset = 0
     if limit < 1:
-        limit = 12
-    dirs = collect_history_dirs()
+        limit = 30
+    favorites = load_dish_favorites()
+    dirs = sort_history_dirs(collect_history_dirs(), sort, favorites)
     rows: list[dict[str, Any]] = []
     sliced = dirs[offset : offset + limit]
 
     for folder in sliced:
+        folder_key = str(folder.resolve())
         summary = read_dish_output_summary(folder)
         if (not summary.get("region_label") or not summary.get("reference_dish")) and isinstance(LAST_RESULT, dict):
             current_output_dir = str(LAST_RESULT.get("output_dir", "")).strip()
@@ -2209,6 +3052,8 @@ def list_history(limit: int = 12, offset: int = 0) -> list[dict[str, Any]]:
                 "region_label": summary.get("region_label", ""),
                 "reference_dish": summary.get("reference_dish", ""),
                 "created_at": format_folder_time(folder.name),
+                "favorited": folder_key in favorites,
+                "favorited_at": favorites.get(folder_key, ""),
                 "path": str(folder),
                 "preview_image": summary.get("preview_image", ""),
                 "images": summary.get("images", []),
@@ -2228,24 +3073,45 @@ def list_history(limit: int = 12, offset: int = 0) -> list[dict[str, Any]]:
     return rows
 
 
+def build_archive_destination(folder: Path) -> Path:
+    dish_pool_root = DISH_POOL_DIR.resolve()
+    output_root = OUTPUT_DIR.resolve()
+    if dish_pool_root in folder.parents or folder == dish_pool_root:
+        relative = folder.relative_to(dish_pool_root)
+        return DISH_ARCHIVE_DIR / "dish_pool" / relative
+    if output_root in folder.parents or folder == output_root:
+        relative = folder.relative_to(output_root)
+        return DISH_ARCHIVE_DIR / "output" / relative
+    raise ValueError("只能归档 V2/output 或 V2/dish_pool 下的菜品目录。")
+
+
+def archive_history_folder(raw_path: str) -> Path:
+    folder = resolve_output_path(raw_path)
+    if folder.resolve() in {OUTPUT_DIR.resolve(), DISH_POOL_DIR.resolve()}:
+        raise ValueError("不能移出根目录。")
+    destination = build_archive_destination(folder)
+    if destination.exists():
+        destination = destination.parent / f"{destination.name}_{get_timestamp()}"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(folder), str(destination))
+    remove_dish_favorite(str(folder.resolve()))
+    return destination
+
+
 def delete_history_folders(raw_paths: list[str]) -> list[str]:
-    deleted: list[str] = []
+    archived: list[str] = []
     for raw_path in raw_paths:
         path_text = str(raw_path or "").strip()
         if not path_text:
             continue
-        deleted.append(str(delete_history_folder(path_text)))
-    if not deleted:
-        raise ValueError("没有可删除的菜品目录。")
-    return deleted
+        archived.append(str(archive_history_folder(path_text)))
+    if not archived:
+        raise ValueError("没有可移出的菜品目录。")
+    return archived
 
 
 def delete_history_folder(raw_path: str) -> Path:
-    folder = resolve_output_path(raw_path)
-    if folder == OUTPUT_DIR.resolve():
-        raise ValueError("不能删除输出根目录。")
-    shutil.rmtree(folder)
-    return folder
+    return archive_history_folder(raw_path)
 
 
 def write_idea_file(dish_name: str, notes: str) -> None:
@@ -2382,17 +3248,35 @@ def apply_runtime_overrides(payload: dict[str, Any]) -> None:
             os.environ[f"MODE2_{prefix}_IMAGE_COUNT"] = count_value
 
 
+def _allowed_output_roots() -> list[Path]:
+    return [OUTPUT_DIR.resolve(), DISH_POOL_DIR.resolve()]
+
+
+def _is_under_allowed_roots(target: Path) -> bool:
+    return any(target == root or root in target.parents for root in _allowed_output_roots())
+
+
 def resolve_output_path(raw_path: str) -> Path:
     if not raw_path.strip():
         raise ValueError("输出目录不能为空。")
     target = Path(raw_path).resolve()
     if target.is_file():
         target = target.parent
-    allowed_roots = [OUTPUT_DIR.resolve(), DISH_POOL_DIR.resolve()]
-    if not any(target == root or root in target.parents for root in allowed_roots):
+    if not _is_under_allowed_roots(target):
         raise ValueError("只允许打开 V2/output 或 V2/dish_pool 下的目录。")
     if not target.exists():
         raise FileNotFoundError(f"目录不存在：{target}")
+    return target
+
+
+def resolve_output_file(raw_path: str) -> Path:
+    if not raw_path.strip():
+        raise ValueError("文件路径不能为空。")
+    target = Path(raw_path).resolve()
+    if not _is_under_allowed_roots(target):
+        raise ValueError("只允许访问 V2/output 或 V2/dish_pool 下的文件。")
+    if not target.is_file():
+        raise FileNotFoundError(f"文件不存在：{target}")
     return target
 
 
@@ -2427,16 +3311,26 @@ def run_task_worker(task: dict[str, Any]) -> None:
     mode = str(task.get("mode", "")).strip().lower()
     dish_name = str(task.get("dish_name", "")).strip()
     if action == "idea_only":
-        action_label = "造菜信息"
+        action_label = "生菜"
+    elif action == "supplement":
+        action_label = "补生"
     elif mode == "target":
-        action_label = "指定造菜"
+        action_label = "指定"
     else:
         action_label = "四组图"
-    mode_label = {"auto": "自动造菜", "file": "手动点名", "target": "指定造菜"}.get(mode, mode or "按配置")
+    mode_label = {
+        "auto": "自动",
+        "file": "手动",
+        "target": "指定",
+        "supplement": "补生",
+        "idea": "生菜",
+    }.get(mode, mode or "按配置")
     append_run_log(
         f"[{time.strftime('%H:%M:%S')}] 开始任务 #{task.get('task_id', '-')}"
         f"（类型：{action_label}，造菜：{mode_label}，菜名：{dish_name or '自动生成'}）"
     )
+    log_start_index = len(RUN_LOG_LINES)
+    result: dict[str, Any] | None = None
     try:
         with redirect_stdout(stream), redirect_stderr(stream):
             apply_runtime_overrides(task)
@@ -2448,6 +3342,19 @@ def run_task_worker(task: dict[str, Any]) -> None:
                     dish_name=dish_name,
                     notes=str(task.get("notes", "")).strip(),
                 )
+            elif action == "supplement":
+                target_output_dir = str(task.get("target_output_dir", "")).strip()
+                if not target_output_dir:
+                    raise ValueError("补生需要选中菜品目录。")
+                supplement_targets = [
+                    str(item).strip()
+                    for item in (task.get("supplement_targets") or [])
+                    if str(item).strip()
+                ]
+                result = run_supplement_for_output_dir(
+                    target_output_dir,
+                    targets=supplement_targets,
+                )
             else:
                 if mode == "file":
                     write_idea_file(str(task.get("dish_name", "")).strip(), str(task.get("notes", "")).strip())
@@ -2458,15 +3365,35 @@ def run_task_worker(task: dict[str, Any]) -> None:
                     result = run_v2_mode2(mode="target", target_output_dir=target_output_dir)
                 else:
                     result = run_v2_mode2(mode=mode if mode in {"auto", "file"} else None)
+        task_log_lines = RUN_LOG_LINES[log_start_index:]
+        run_log_file = write_run_log_file(
+            result=result,
+            task=task,
+            log_lines=task_log_lines,
+            success=True,
+        )
+        if run_log_file:
+            result["run_log_file"] = run_log_file
+            append_run_log(f"[{time.strftime('%H:%M:%S')}] 运行日志已保存：{run_log_file}")
         with RUN_LOCK:
             LAST_RESULT = result
             LAST_ERROR = ""
             try:
-                write_run_meta(result)
+                write_run_meta(result, task=task)
             except Exception as meta_exc:  # noqa: BLE001
                 append_run_log(f"[{time.strftime('%H:%M:%S')}] 写入运行元数据失败：{meta_exc}")
         append_run_log(f"[{time.strftime('%H:%M:%S')}] 任务 #{task.get('task_id', '-')} 完成。")
     except Exception as exc:  # noqa: BLE001
+        task_log_lines = RUN_LOG_LINES[log_start_index:]
+        run_log_file = write_run_log_file(
+            result=result,
+            task=task,
+            log_lines=task_log_lines,
+            success=False,
+            error_text=str(exc),
+        )
+        if run_log_file:
+            append_run_log(f"[{time.strftime('%H:%M:%S')}] 运行日志已保存：{run_log_file}")
         with RUN_LOCK:
             LAST_ERROR = str(exc)
         append_run_log(f"[{time.strftime('%H:%M:%S')}] 任务 #{task.get('task_id', '-')} 失败：{exc}")
@@ -2480,6 +3407,29 @@ def run_task_worker(task: dict[str, Any]) -> None:
 
 
 class V2PanelHandler(BaseHTTPRequestHandler):
+    def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+        safe_message = message if message and message.isascii() else HTTPStatus(code).phrase
+        super().send_error(code, safe_message, explain)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        if len(args) >= 2:
+            request_line = str(args[0])
+            status_code = str(args[1])
+            if status_code.isdigit() and int(status_code) < 400:
+                parts = request_line.split()
+                if len(parts) >= 2:
+                    method = parts[0]
+                    path_only = parts[1].split("?", 1)[0]
+                    if path_only in SILENT_HTTP_LOG_PATHS:
+                        return
+                    # 轮询类 GET（state/history/dish_detail 等）不写终端，避免 Cursor 集成终端刷屏卡顿
+                    if method == "GET" and (
+                        path_only.startswith("/api/")
+                        or path_only in {"/", "/favicon.ico", "/favicon.png"}
+                    ):
+                        return
+        super().log_message(format, *args)
+
     def _send_json(self, payload: dict[str, Any], code: int = 200) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
@@ -2498,7 +3448,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
 
     def _send_file(self, file_path: Path) -> None:
         if not file_path.exists() or not file_path.is_file():
-            self.send_error(HTTPStatus.NOT_FOUND, "文件不存在")
+            self.send_error(HTTPStatus.NOT_FOUND)
             return
         mime = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
         data = file_path.read_bytes()
@@ -2530,17 +3480,26 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/history":
             query = parse_qs(parsed.query)
-            raw_limit = (query.get("limit", ["12"])[0] or "12").strip()
+            raw_limit = (query.get("limit", ["30"])[0] or "30").strip()
             raw_offset = (query.get("offset", ["0"])[0] or "0").strip()
             try:
-                limit = max(1, min(50, int(raw_limit)))
+                limit = max(1, min(60, int(raw_limit)))
             except ValueError:
-                limit = 12
+                limit = 30
             try:
                 offset = max(0, int(raw_offset))
             except ValueError:
                 offset = 0
-            self._send_json({"items": list_history(limit=limit, offset=offset), "offset": offset, "limit": limit})
+            raw_sort = (query.get("sort", ["favorite"])[0] or "favorite").strip()
+            sort = raw_sort if raw_sort in VALID_HISTORY_SORTS else "favorite"
+            self._send_json(
+                {
+                    "items": list_history(limit=limit, offset=offset, sort=sort),
+                    "offset": offset,
+                    "limit": limit,
+                    "sort": sort,
+                }
+            )
             return
         if parsed.path == "/api/run_status":
             query = parse_qs(parsed.query)
@@ -2554,6 +3513,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 logs = RUN_LOG_LINES[from_index:] if from_index < total_logs else []
                 now = time.time()
                 elapsed = int(max(0.0, (now - LAST_STARTED_AT))) if RUNNING and LAST_STARTED_AT > 0 else 0
+                task_queue = build_task_queue_snapshot()
                 payload = {
                     "running": RUNNING,
                     "elapsed_seconds": elapsed,
@@ -2561,8 +3521,9 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                     "next_index": total_logs,
                     "result": LAST_RESULT or {},
                     "error": LAST_ERROR,
-                    "queue_length": len(TASK_QUEUE),
-                    "current_task": CURRENT_TASK or {},
+                    "queue_length": task_queue["queue_length"],
+                    "current_task": task_queue.get("running") or {},
+                    "task_queue": task_queue,
                     "history": list_history(limit=12, offset=0),
                     "history_revision": history_revision(),
                 }
@@ -2604,9 +3565,12 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             raw_path = (query.get("path", [""])[0] or "").strip()
             if not raw_path:
-                self.send_error(HTTPStatus.BAD_REQUEST, "path 不能为空")
+                self.send_error(HTTPStatus.BAD_REQUEST)
                 return
-            self._send_file(Path(raw_path))
+            try:
+                self._send_file(resolve_output_file(raw_path))
+            except (ValueError, FileNotFoundError):
+                self.send_error(HTTPStatus.NOT_FOUND)
             return
         self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
 
@@ -2620,6 +3584,8 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             "/api/publish_start",
             "/api/publish_login_confirm",
             "/api/history_batch_delete",
+            "/api/history_favorite",
+            "/api/text_assets_save",
         }:
             self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
             return
@@ -2641,8 +3607,8 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/history_delete":
             try:
-                deleted = delete_history_folder(str(payload.get("path", "")).strip())
-                self._send_json({"ok": True, "deleted": str(deleted)})
+                archived_to = archive_history_folder(str(payload.get("path", "")).strip())
+                self._send_json({"ok": True, "archived_to": str(archived_to), "deleted": str(archived_to)})
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": str(exc)}, code=400)
             return
@@ -2651,8 +3617,14 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 raw_paths = payload.get("paths") or []
                 if not isinstance(raw_paths, list):
                     raise ValueError("paths 必须是数组。")
-                deleted = delete_history_folders([str(item) for item in raw_paths])
-                self._send_json({"ok": True, "deleted": deleted, "deleted_count": len(deleted)})
+                archived = delete_history_folders([str(item) for item in raw_paths])
+                self._send_json({"ok": True, "archived": archived, "deleted": archived, "deleted_count": len(archived)})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
+            return
+        if parsed.path == "/api/history_favorite":
+            try:
+                self._send_json(toggle_dish_favorite(str(payload.get("path", "")).strip()))
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": str(exc)}, code=400)
             return
@@ -2672,21 +3644,46 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": str(exc)}, code=400)
             return
+        if parsed.path == "/api/text_assets_save":
+            try:
+                raw_path = str(payload.get("path", "")).strip()
+                if not raw_path:
+                    raise ValueError("path 不能为空。")
+                if "content" not in payload:
+                    raise ValueError("content 不能为空。")
+                content = str(payload.get("content", ""))
+                self._send_json(save_text_asset(raw_path, content))
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
+            return
 
         action = str(payload.get("action", "run")).strip().lower() or "run"
-        if action not in {"run", "idea_only"}:
+        if action not in {"run", "idea_only", "supplement"}:
             action = "run"
         mode = str(payload.get("mode", "")).strip().lower()
         dish_name = str(payload.get("dish_name", "")).strip()
         idea_count_raw = str(payload.get("idea_count", "1")).strip() or "1"
 
-        if mode == "file" and not dish_name:
+        if action == "run" and mode == "file" and not dish_name:
             self._send_json({"error": "手动模式下，菜名不能为空。"}, code=400)
             return
         if action == "run" and mode == "target":
             target_output_dir = str(payload.get("target_output_dir", "")).strip()
             if not target_output_dir:
-                self._send_json({"error": "指定造菜请先在菜品池选中一个菜品。"}, code=400)
+                self._send_json({"error": "指定请先在菜品池选中一个菜品。"}, code=400)
+                return
+        if action == "supplement":
+            target_output_dir = str(payload.get("target_output_dir", "")).strip()
+            if not target_output_dir:
+                self._send_json({"error": "补生请先在菜品池选中一个菜品。"}, code=400)
+                return
+            supplement_targets = [
+                str(item).strip()
+                for item in (payload.get("supplement_targets") or [])
+                if str(item).strip()
+            ]
+            if not supplement_targets:
+                self._send_json({"error": "请至少勾选一项补生内容。"}, code=400)
                 return
         if action == "idea_only":
             try:
@@ -2698,17 +3695,23 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "生成数量须在 1～30 之间。"}, code=400)
                 return
             if mode == "file" and idea_count > 1:
-                self._send_json({"error": "手动点名每次只能生成 1 条造菜信息。"}, code=400)
+                self._send_json({"error": "手动生菜每次只能生成 1 条。"}, code=400)
                 return
 
         with RUN_LOCK:
             waiting_ahead = len(TASK_QUEUE) + (1 if RUNNING else 0)
             TASK_SEQ += 1
+            target_output_dir = str(payload.get("target_output_dir", "")).strip()
             task_item = {
                 "task_id": TASK_SEQ,
                 "action": action,
-                "mode": mode if mode in {"auto", "file", "target"} else "",
-                "target_output_dir": str(payload.get("target_output_dir", "")).strip() if mode == "target" else "",
+                "mode": mode if mode in {"auto", "file", "target", "supplement", "idea"} else "",
+                "target_output_dir": target_output_dir if action in {"run", "supplement"} and mode in {"target", "supplement"} else "",
+                "supplement_targets": [
+                    str(item).strip()
+                    for item in (payload.get("supplement_targets") or [])
+                    if str(item).strip()
+                ] if action == "supplement" else [],
                 "cuisine_mode": str(payload.get("cuisine_mode", "")).strip(),
                 "dish_name": dish_name,
                 "notes": str(payload.get("notes", "")).strip(),

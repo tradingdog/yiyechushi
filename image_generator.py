@@ -40,7 +40,7 @@ DEFAULT_DYNAMIC_ACTION = "按菜品结构自行安排最合适的餐具和互动
 DEFAULT_REQUEST_RETRY_COUNT = 2
 DEFAULT_TEXT_REQUEST_RETRY_COUNT = 3
 DEFAULT_TEXT_PROVIDER = "doubao"
-DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-mini-260428"
+DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-pro-260215"
 DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 DEFAULT_TEXT_CONNECT_TIMEOUT_SECONDS = 20.0
 DEFAULT_OPENAI_IMAGE_MODEL = "gpt-image-2-2026-04-21"
@@ -72,13 +72,15 @@ PUBLISH_BANNED_TOPIC_TOKENS: tuple[str, ...] = (
 PUBLISH_PLATFORM_TOPIC_SPECS: tuple[tuple[str, str, int], ...] = (
     ("douyin", "抖音", 5),
     ("xiaohongshu", "小红书", 10),
-    ("wechat", "微信视频号和公众号", 10),
+    ("weixin_mp", "微信公众号", 10),
+    ("weixin_channels", "微信视频号", 30),
     ("kuaishou", "快手", 4),
 )
 PUBLISH_PLATFORM_REQUIRED_TOPIC_ENV: dict[str, str] = {
     "douyin": "PUBLISH_REQUIRED_TOPICS",
     "xiaohongshu": "PUBLISH_REQUIRED_TOPICS_XIAOHONGSHU",
-    "wechat": "PUBLISH_REQUIRED_TOPICS_WECHAT",
+    "weixin_mp": "PUBLISH_REQUIRED_TOPICS_WECHAT",
+    "weixin_channels": "PUBLISH_REQUIRED_TOPICS_WECHAT",
     "kuaishou": "PUBLISH_REQUIRED_TOPICS_KUAISHOU",
 }
 PUBLISH_PLATFORM_TOPIC_FALLBACKS: dict[str, tuple[str, ...]] = {
@@ -114,7 +116,19 @@ PUBLISH_PLATFORM_TOPIC_FALLBACKS: dict[str, tuple[str, ...]] = {
         "请客菜",
         "宴客菜",
     ),
-    "wechat": (
+    "weixin_mp": (
+        "家常菜",
+        "家常菜谱",
+        "今日菜谱",
+        "今日晚餐",
+        "晚餐灵感",
+        "下饭菜",
+        "厨房技巧",
+        "做菜教程",
+        "美食做法",
+        "详细做法",
+    ),
+    "weixin_channels": (
         "家常菜",
         "家常菜谱",
         "今日菜谱",
@@ -574,24 +588,63 @@ def build_auto_dish_generation_system_prompt(region_label: str) -> str:
     return ""
 
 
+def render_traditional_dish_library_text(
+    library: dict[str, dict[str, list[str]]],
+    region_code: str,
+) -> str:
+    profile = AUTO_DISH_REGION_PROFILES[region_code]
+    top_sections = profile["sections"]
+    lines: list[str] = []
+    for top_level, category_map in library.items():
+        if top_level not in top_sections:
+            continue
+        lines.append(f"[{top_level}]")
+        for second_level, items in category_map.items():
+            lines.append(f"[[{second_level}]]")
+            lines.extend(items)
+    if not lines:
+        raise ValueError(f"传统菜库在 AUTO_DISH_CUISINE_MODE={region_code} 范围内为空。")
+    return "\n".join(lines)
+
+
 def build_auto_dish_generation_user_prompt(
     region_label: str,
     reference_dish: str,
+    library_file_name: str,
     region_samples: list[str],
     used_reference_dishes: list[str],
     used_generated_dishes: list[str],
     recent_history_restrictions: dict[str, tuple[str, ...]],
     retry_feedback: str = "",
 ) -> str:
+    del region_samples, used_reference_dishes, used_generated_dishes
     used_generated_text = join_auto_dish_history_items(recent_history_restrictions.get("recent_generated_dishes", ()))
-    banned_ingredient_text = join_auto_dish_history_items(recent_history_restrictions.get("banned_ingredients", ()))
-    banned_flavor_text = join_auto_dish_history_items(recent_history_restrictions.get("banned_flavors", ()))
-    banned_method_text = join_auto_dish_history_items(recent_history_restrictions.get("banned_methods", ()))
+    cuisine_hint = f"菜系范围：{region_label}。" if region_label.strip() else ""
+    history_hint = (
+        f"近10条历史新菜名请勿重复：{used_generated_text}。"
+        if used_generated_text != "无"
+        else ""
+    )
+    feedback_hint = f"\n上次输出不合格：{retry_feedback}" if retry_feedback.strip() else ""
 
-    return f"""
-参考传统菜“{reference_dish}（这里从@chuantongcaipu.txt 里提取）”，生成全新的市场上没有的新菜名并用简短的语言描述这道新菜的做法（食材，配菜，酱汁，烹饪流程和出菜摆盘），满足近10条的禁用规则（近10条历史新菜名：{used_generated_text}；近10条历史禁用主食材：{banned_ingredient_text}；近10条历史禁用口味：{banned_flavor_text}；近10条历史禁用主烹饪方式：{banned_method_text}），你创造的菜名必须搜索确保市面上是没有的，你可以更换食材，口味和烹饪流程来创造全新菜，要求跟关联的文件里的菜品没有重复，生成的菜名控制在3至8个汉子以内，食材要用大众有认知度的，不能太离谱和偏离大众的认知，同时杜绝象征式的比喻式的隐喻式的菜名。
-输出格式：第一行为菜名。第二行为描述（不要空行也不要空段）。
-""".strip()
+    return f"""{cuisine_hint}请阅读随附的「{library_file_name}」传统菜库，以「{reference_dish}」为主要参考，生成市面上没有的新菜名，并用简短语言描述做法（食材、配菜、酱汁、烹饪流程和出菜摆盘）。可更换食材、口味和烹饪流程创造全新菜；菜名 3 至 8 个汉字；食材需大众化；不要比喻式或隐喻式菜名；新菜名不得与附件中的传统菜名重复。{history_hint}
+
+输出格式：第一行菜名，第二行描述，不要空行。{feedback_hint}""".strip()
+
+
+def build_auto_dish_generation_user_content(
+    instruction_text: str,
+    *,
+    library_text: str,
+    library_file_name: str,
+) -> list[dict[str, str]]:
+    return [
+        {"type": "text", "text": instruction_text},
+        {
+            "type": "text",
+            "text": f"【附件：{library_file_name}】\n{library_text.strip()}",
+        },
+    ]
 
 
 def strip_inline_env_comment(raw_value: str) -> str:
@@ -2625,6 +2678,12 @@ def generate_auto_dish_idea(
     used_generated_dishes = [str(entry.get("generated_dish_name", "")).strip() for entry in memory_entries if str(entry.get("generated_dish_name", "")).strip()]
     recent_history_restrictions = build_recent_auto_dish_restriction_profile(used_generated_dishes)
     reference_dish = pick_unused_reference_dish(region_candidate_dishes, set(used_reference_dishes))
+    library_text = render_traditional_dish_library_text(library, region_code)
+    library_file_name = library_file.name
+    print(
+        f"生菜附件：{library_file_name}（{library_text.count(chr(10)) + 1} 行，"
+        f"菜系范围 {region_profile['label']}）"
+    )
 
     sample_pool = [dish_name for dish_name in region_candidate_dishes if dish_name != reference_dish]
     sample_size = min(18, len(sample_pool))
@@ -2634,17 +2693,24 @@ def generate_auto_dish_idea(
     last_error = ""
     last_model = ""
     for _ in range(AUTO_DISH_GENERATION_RETRY_COUNT):
+        instruction_text = build_auto_dish_generation_user_prompt(
+            region_label=region_profile["label"],
+            reference_dish=reference_dish,
+            library_file_name=library_file_name,
+            region_samples=region_samples,
+            used_reference_dishes=used_reference_dishes,
+            used_generated_dishes=used_generated_dishes,
+            recent_history_restrictions=recent_history_restrictions,
+            retry_feedback=last_error,
+        )
         generation_result = request_text_generation(
             client=client,
             system_prompt=build_auto_dish_generation_system_prompt(region_label=region_profile["label"]),
-            user_prompt=build_auto_dish_generation_user_prompt(
-                region_label=region_profile["label"],
-                reference_dish=reference_dish,
-                region_samples=region_samples,
-                used_reference_dishes=used_reference_dishes,
-                used_generated_dishes=used_generated_dishes,
-                recent_history_restrictions=recent_history_restrictions,
-                retry_feedback=last_error,
+            user_prompt=instruction_text,
+            user_content=build_auto_dish_generation_user_content(
+                instruction_text,
+                library_text=library_text,
+                library_file_name=library_file_name,
             ),
             stage_name="自动造菜",
         )
@@ -2946,12 +3012,15 @@ def request_text_generation(
     system_prompt: str,
     user_prompt: str,
     stage_name: str,
+    *,
+    user_content: list[dict[str, Any]] | None = None,
 ) -> dict[str, str]:
     text_model = get_text_model()
     request_timeout = get_text_request_timeout_seconds()
     request_retry_count = get_text_request_retry_count()
     max_output_tokens = get_text_max_output_tokens(stage_name)
     temperature = get_text_temperature()
+    resolved_user_content: str | list[dict[str, Any]] = user_content if user_content else user_prompt
 
     response = None
     print(f"正在生成{stage_name}，调用文本模型：{text_model}")
@@ -2962,7 +3031,7 @@ def request_text_generation(
                 model=text_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "user", "content": resolved_user_content},
                 ],
                 timeout=request_timeout,
                 max_tokens=max_output_tokens,
@@ -3668,7 +3737,7 @@ def build_platform_topic_prompt_system() -> str:
 1. 必须先按“平台最新热门活动/热门话题”方向思考，再补“潜力增长话题”。
 2. 话题标签必须以 # 开头。
 3. 不能输出 #阿叶造新菜，不能输出菜品本身名称相关话题。
-4. 输出必须严格使用下面四个分区，不要加解释：
+4. 输出必须严格使用下面五个分区，不要加解释：
 
 【抖音】
 ...
@@ -3676,7 +3745,10 @@ def build_platform_topic_prompt_system() -> str:
 【小红书】
 ...
 
-【微信视频号和公众号】
+【微信公众号】
+...
+
+【微信视频号】
 ...
 
 【快手】
@@ -3704,11 +3776,12 @@ def build_platform_topic_prompt_user(
 关联新菜品文档（只允许使用这份文档的信息生成话题，不要引用其它来源文档）：
 {topic_reference_text}
 
-请按下面数量输出四个平台的话题（热门优先，再补潜力）：
+请按下面数量输出五个平台的话题（热门优先，再补潜力）：
 1. 抖音：5 个
 2. 小红书：10 个
-3. 微信视频号和公众号：10 个
-4. 快手：4 个
+3. 微信公众号：10 个
+4. 微信视频号：30 个
+5. 快手：4 个
 
 各平台指定必带话题（如为“无”则不强制）：
 {required_topic_block}

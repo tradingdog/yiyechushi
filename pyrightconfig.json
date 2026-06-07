@@ -1,0 +1,16 @@
+{
+  "exclude": [
+    "tools/chrome_automation_profile",
+    "tools/chrome_manual_cdp",
+    ".venv",
+    "output",
+    "V2/dish_pool",
+    "V2/dish_archive",
+    "V2/output",
+    "image",
+    "touxiang",
+    "logs"
+  ],
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "none"
+}

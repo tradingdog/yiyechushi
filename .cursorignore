@@ -1,0 +1,24 @@
+﻿# 浏览器自动化配置（约 1.5 万文件，且运行时持续写入缓存，是 Cursor 卡顿主因）
+tools/chrome_automation_profile/
+tools/chrome_manual_cdp/
+
+# Python 虚拟环境与缓存
+.venv/
+**/__pycache__/
+
+# 大体积输出目录（图片/批次产物，不需 AI 索引）
+output/
+V2/output/
+V2/dish_pool/
+V2/dish_archive/
+
+# 素材与日志
+image/
+touxiang/
+logs/
+V2/logs/
+
+# 临时/截图
+tools/.tmp_*.png
+tools/douyin_publish_last_error.png
+tools/weixin_channels_publish_steps/

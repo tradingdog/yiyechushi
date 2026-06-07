@@ -37,6 +37,7 @@ from tools.douyin_publish import (  # noqa: E402
     click_locator_via_dom,
     ensure_cdp_browser_available,
     find_optional_locator,
+    resolve_page_by_keyword,
     type_text_humanly,
     wait_for_locator,
 )
@@ -45,6 +46,7 @@ from tools.weixin_mp_publish import confirm_windows_open_dialog  # noqa: E402
 
 
 DEFAULT_URL_KEYWORD = "creator.xiaohongshu.com"
+DEFAULT_XIAOHONGSHU_HOME_URL = "https://creator.xiaohongshu.com/"
 DEFAULT_LOGIN_MARKER = ROOT_DIR / "V2" / "assets" / "xiaohongshu_publish_note_marker.png"
 DEFAULT_LOGIN_MATCH_THRESHOLD = 0.9
 DEFAULT_PUBLISH_MENU_HOVER_X = 105
@@ -206,23 +208,19 @@ def _page_priority(url: str) -> int:
 
 
 def find_xiaohongshu_page(browser, url_keyword: str) -> Page:
-    matched_pages = [
-        page
-        for context in browser.contexts
-        for page in context.pages
-        if url_keyword in page.url
-    ]
-    if not matched_pages:
-        raise RuntimeError(
-            f"未在已打开的 Chrome 标签页里找到包含 {url_keyword} 的页面。"
-            "请先自行打开小红书创作者中心并登录，然后重新运行脚本。"
-        )
-    page = min(matched_pages, key=lambda item: (_page_priority(item.url), item.url))
-    if "note-manager" in page.url and len(matched_pages) > 1:
-        print("提示：存在多个小红书标签页，已尽量避开笔记管理页。")
-    page.bring_to_front()
-    page.wait_for_load_state("domcontentloaded")
-    print(f"已锁定小红书页面：{page.url}")
+    return resolve_xiaohongshu_page(browser, url_keyword)
+
+
+def resolve_xiaohongshu_page(browser, url_keyword: str) -> Page:
+    page = resolve_page_by_keyword(
+        browser,
+        url_keyword=url_keyword,
+        creator_home_url=DEFAULT_XIAOHONGSHU_HOME_URL,
+        platform_label="小红书",
+        page_priority=_page_priority,
+    )
+    if "note-manager" in page.url:
+        print("提示：当前锁定的是笔记管理页，后续步骤会尝试进入图文发布编辑页。")
     return page
 
 
@@ -450,7 +448,7 @@ def to_cdp_settings(settings: XiaohongshuPublishSettings) -> PublishSettings:
         chrome_path=settings.chrome_path,
         automation_profile_dir=settings.automation_profile_dir,
         auto_launch_browser=settings.auto_launch_browser,
-        creator_home_url=f"https://{DEFAULT_URL_KEYWORD}/",
+        creator_home_url=DEFAULT_XIAOHONGSHU_HOME_URL,
         cdp_ready_timeout_ms=settings.cdp_ready_timeout_ms,
         typing_delay_ms=settings.typing_delay_ms,
         after_upload_wait_ms=0,
@@ -464,20 +462,12 @@ def to_cdp_settings(settings: XiaohongshuPublishSettings) -> PublishSettings:
 
 
 def run_xiaohongshu_publish(settings: XiaohongshuPublishSettings, assets: XiaohongshuPublishAssets) -> None:
-    if settings.auto_launch_browser:
+    if not settings.dry_run:
         ensure_cdp_browser_available(to_cdp_settings(settings))
-    elif not settings.dry_run:
-        from tools.douyin_publish import is_cdp_endpoint_ready
-
-        if not is_cdp_endpoint_ready(settings.cdp_url):
-            raise RuntimeError(
-                f"无法连接到 Chrome 远程调试端口：{settings.cdp_url}\n"
-                "请先自行打开 Chrome 并登录 creator.xiaohongshu.com，再运行本脚本。"
-            )
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(settings.cdp_url)
-        page = find_xiaohongshu_page(browser, settings.url_keyword)
+        page = resolve_xiaohongshu_page(browser, settings.url_keyword)
 
         try:
             ensure_xiaohongshu_logged_in(page, settings)

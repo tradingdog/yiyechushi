@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chrome-path", default="")
     parser.add_argument("--automation-profile-dir", default=str(DEFAULT_AUTOMATION_PROFILE_DIR))
     parser.add_argument("--cdp-ready-timeout-ms", type=int, default=DEFAULT_CDP_READY_TIMEOUT_MS)
-    parser.add_argument("--allow-auto-launch-browser", action="store_true", help="允许脚本自动拉起 Chrome（默认不自动拉起）。")
+    parser.add_argument("--no-auto-launch-browser", action="store_true", help="不自动拉起 Chrome，连不上 CDP 时直接失败。")
     parser.add_argument("--typing-delay-ms", type=int, default=DEFAULT_TYPING_DELAY_MS)
     parser.add_argument(
         "--after-topic-paste-wait-ms",
@@ -170,7 +170,7 @@ def resolve_settings(args: argparse.Namespace) -> KuaishouPublishSettings:
         url_keyword=str(args.url_keyword or DEFAULT_URL_KEYWORD).strip() or DEFAULT_URL_KEYWORD,
         chrome_path=chrome_path,
         automation_profile_dir=resolve_path(args.automation_profile_dir),
-        auto_launch_browser=bool(args.allow_auto_launch_browser),
+        auto_launch_browser=not bool(args.no_auto_launch_browser),
         cdp_ready_timeout_ms=max(0, int(args.cdp_ready_timeout_ms)),
         typing_delay_ms=max(0, int(args.typing_delay_ms)),
         after_publish_work_wait_ms=DEFAULT_AFTER_PUBLISH_WORK_WAIT_MS,
