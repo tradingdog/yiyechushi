@@ -1,3 +1,3 @@
 @echo off
 cd /d "%~dp0"
-call "%~dp0V2\start_web_panel.bat"
+call "%~dp0restart_v2_web_panel.bat"
