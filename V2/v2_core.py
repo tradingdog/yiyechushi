@@ -125,14 +125,13 @@ def ensure_runtime_config_loaded() -> None:
     if _RUNTIME_CONFIG_LOADED:
         return
 
-    existing_keys = set(os.environ.keys())
     merged_values: dict[str, str] = {}
     merged_values.update(parse_env_file(CONFIG_FILE))
     merged_values.update(parse_env_file(ROOT_DIR.parent / ".env"))
 
+    # 配置文件优先于进程启动前已存在的系统/终端环境变量，避免旧 OPENAI_* 覆盖 .env 与 config.env。
     for key, value in merged_values.items():
-        if key not in existing_keys:
-            os.environ[key] = value
+        os.environ[key] = value
 
     _RUNTIME_CONFIG_LOADED = True
 
@@ -298,6 +297,14 @@ def build_doubao_client() -> OpenAI:
     )
 
 
+def format_openai_image_runtime_label() -> str:
+    ensure_runtime_config_loaded()
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip() or DEFAULT_OPENAI_BASE_URL
+    key_hint = f"{api_key[:10]}..." if len(api_key) > 10 else "(未配置)"
+    return f"OpenAI 生图环境：base_url={base_url}，key={key_hint}"
+
+
 def build_openai_image_client() -> OpenAI:
     ensure_runtime_config_loaded()
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
@@ -305,6 +312,7 @@ def build_openai_image_client() -> OpenAI:
         raise RuntimeError("未找到 OPENAI_API_KEY，请在根目录 .env 中配置。")
     timeout = parse_float_env("OPENAI_IMAGE_REQUEST_TIMEOUT_SECONDS", 900.0)
     base_url = os.getenv("OPENAI_BASE_URL", "").strip() or DEFAULT_OPENAI_BASE_URL
+    print(format_openai_image_runtime_label())
     client_kwargs: dict[str, Any] = {
         "api_key": api_key,
         "timeout": timeout,

@@ -702,14 +702,12 @@ def ensure_runtime_config_loaded() -> None:
     if _RUNTIME_CONFIG_LOADED:
         return
 
-    existing_keys = set(os.environ.keys())
     merged_values: dict[str, str] = {}
     merged_values.update(parse_env_file(DEFAULT_CONFIG_FILE))
     merged_values.update(parse_env_file(ROOT_DIR / ".env"))
 
     for key, value in merged_values.items():
-        if key not in existing_keys:
-            os.environ[key] = value
+        os.environ[key] = value
 
     _RUNTIME_CONFIG_LOADED = True
 
