@@ -121,12 +121,50 @@ def parse_env_file(env_file: Path) -> dict[str, str]:
     return parsed
 
 
+ROOT_CONFIG_FILE = ROOT_DIR.parent / "config.env"
+
+
+def is_silkroad_openai_gateway(base_url: str) -> bool:
+    return "silkroadai.io" in base_url.strip().lower()
+
+
+def resolve_openai_image_model(model: str, base_url: str) -> str:
+    normalized = (model or DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL
+    gateway = (base_url or DEFAULT_OPENAI_BASE_URL).strip() or DEFAULT_OPENAI_BASE_URL
+    if is_silkroad_openai_gateway(gateway) and normalized.startswith("gpt-image-2") and normalized != DEFAULT_IMAGE_MODEL:
+        return DEFAULT_IMAGE_MODEL
+    return normalized
+
+
+def sync_v2_openai_image_settings() -> None:
+    """V2/config.env 的生图配置优先，并在丝路网关上规范化模型名。"""
+    v2_values = parse_env_file(CONFIG_FILE)
+    for key in (
+        "OPENAI_BASE_URL",
+        "OPENAI_IMAGE_MODEL",
+        "OPENAI_IMAGE_SIZE",
+        "OPENAI_IMAGE_QUALITY",
+        "OPENAI_IMAGE_COUNT",
+    ):
+        if key in v2_values:
+            os.environ[key] = v2_values[key]
+
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip() or DEFAULT_OPENAI_BASE_URL
+    model = os.getenv("OPENAI_IMAGE_MODEL", DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL
+    resolved = resolve_openai_image_model(model, base_url)
+    if resolved != model:
+        print(f"OpenAI 生图模型已适配丝路网关：{model} -> {resolved}")
+        os.environ["OPENAI_IMAGE_MODEL"] = resolved
+
+
 def ensure_runtime_config_loaded() -> None:
     global _RUNTIME_CONFIG_LOADED
     if _RUNTIME_CONFIG_LOADED:
+        sync_v2_openai_image_settings()
         return
 
     merged_values: dict[str, str] = {}
+    merged_values.update(parse_env_file(ROOT_CONFIG_FILE))
     merged_values.update(parse_env_file(CONFIG_FILE))
     merged_values.update(parse_env_file(ROOT_DIR.parent / ".env"))
 
@@ -134,6 +172,7 @@ def ensure_runtime_config_loaded() -> None:
     for key, value in merged_values.items():
         os.environ[key] = value
 
+    sync_v2_openai_image_settings()
     _RUNTIME_CONFIG_LOADED = True
 
 
@@ -238,6 +277,8 @@ def classify_image_api_error(exc: Exception) -> str:
     if is_moderation_blocked_error(exc):
         return "moderation_blocked"
     message = " ".join(str(error) for error in iter_exception_chain(exc)).lower()
+    if "model_not_found" in message or "no available channel for model" in message:
+        return "model_not_found"
     if "billing_hard_limit" in message or "billing limit" in message:
         return "billing_limit"
     if "502" in message or "bad gateway" in message:
@@ -262,7 +303,7 @@ def is_retriable_image_api_error(exc: Exception) -> bool:
     if is_moderation_blocked_error(exc):
         return False
     error_kind = classify_image_api_error(exc)
-    if error_kind in {"billing_limit", "moderation_blocked", "api_error"}:
+    if error_kind in {"billing_limit", "moderation_blocked", "model_not_found", "api_error"}:
         return False
     if error_kind in {"timeout", "http_502", "http_503", "http_504", "http_500", "rate_limit", "connection"}:
         return True
@@ -407,14 +448,17 @@ def build_doubao_client() -> OpenAI:
 
 def format_openai_image_runtime_label() -> str:
     ensure_runtime_config_loaded()
+    sync_v2_openai_image_settings()
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     base_url = os.getenv("OPENAI_BASE_URL", "").strip() or DEFAULT_OPENAI_BASE_URL
+    model = os.getenv("OPENAI_IMAGE_MODEL", DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL
     key_hint = f"{api_key[:10]}..." if len(api_key) > 10 else "(未配置)"
-    return f"OpenAI 生图环境：base_url={base_url}，key={key_hint}"
+    return f"OpenAI 生图环境：base_url={base_url}，model={model}，key={key_hint}"
 
 
 def build_openai_image_client() -> OpenAI:
     ensure_runtime_config_loaded()
+    sync_v2_openai_image_settings()
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("未找到 OPENAI_API_KEY，请在根目录 .env 中配置。")
@@ -1285,8 +1329,14 @@ def render_prompt_fallback(template_text: str, dish_name: str, notes: str) -> st
 
 def get_image_settings() -> dict[str, Any]:
     ensure_runtime_config_loaded()
+    sync_v2_openai_image_settings()
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip() or DEFAULT_OPENAI_BASE_URL
+    model = resolve_openai_image_model(
+        os.getenv("OPENAI_IMAGE_MODEL", DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL,
+        base_url,
+    )
     return {
-        "model": os.getenv("OPENAI_IMAGE_MODEL", DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL,
+        "model": model,
         "size": parse_image_size(os.getenv("OPENAI_IMAGE_SIZE", DEFAULT_IMAGE_SIZE).strip() or DEFAULT_IMAGE_SIZE),
         "quality": os.getenv("OPENAI_IMAGE_QUALITY", DEFAULT_IMAGE_QUALITY).strip() or DEFAULT_IMAGE_QUALITY,
         "image_count": parse_int_env("OPENAI_IMAGE_COUNT", DEFAULT_IMAGE_COUNT),
