@@ -39,9 +39,17 @@ from v2_core import (
 )
 
 
-HOST = "127.0.0.1"
-PORT = 8765
-PANEL_VERSION = "v0.94"
+def _panel_port() -> int:
+    raw = os.getenv("V2_PANEL_PORT", "8765").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 8765
+
+
+HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
+PORT = _panel_port()
+PANEL_VERSION = "v0.95"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 VALID_HISTORY_SORTS = {"favorite", "created_desc", "created_asc", "name", "image_first"}

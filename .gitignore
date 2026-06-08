@@ -9,4 +9,7 @@ tools/chrome_automation_profile/
 tools/chrome_manual_cdp/
 tools/.tmp_*.png
 tools/douyin_publish_last_error.png
+tools/cloudflared.exe
+V2/public_tunnel.log
+V2/public_tunnel_url.txt
 
