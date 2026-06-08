@@ -323,41 +323,67 @@ def execute_image_generation_with_retries(
 ) -> list[dict[str, str]]:
     expected_count = max(1, int(settings.get("image_count") or 1))
     max_attempts = get_image_request_max_attempts()
-    print(f"{stage_label}开始请求：{request_label}；最多尝试 {max_attempts} 次")
+    accumulated: list[dict[str, str]] = []
+    print(f"{stage_label}开始请求：{request_label}；目标 n={expected_count}；最多尝试 {max_attempts} 次")
 
     for attempt in range(1, max_attempts + 1):
-        print(f"{stage_label}第 {attempt}/{max_attempts} 次调用生图接口…")
+        remaining = expected_count - len(accumulated)
+        print(
+            f"{stage_label}第 {attempt}/{max_attempts} 次调用生图接口"
+            f"（本轮 n={remaining}，已累计 {len(accumulated)}/{expected_count}）…"
+        )
         try:
-            response = call_api()
-            image_items = extract_image_items(response)
-            got_count = len(image_items)
-            if got_count >= expected_count:
-                if got_count > expected_count:
-                    print(
-                        f"{stage_label}成功：请求 n={expected_count}，实际返回 {got_count} 张，"
-                        f"已取用前 {expected_count} 张。"
-                    )
-                    return image_items[:expected_count]
-                print(f"{stage_label}成功：返回 {got_count}/{expected_count} 张。")
-                return image_items
+            response = call_api(remaining)
+            batch_items = extract_image_items(response)
+            if batch_items:
+                take_count = min(len(batch_items), remaining)
+                accumulated.extend(batch_items[:take_count])
+                if len(accumulated) >= expected_count:
+                    print(f"{stage_label}成功：累计 {len(accumulated)}/{expected_count} 张。")
+                    return accumulated[:expected_count]
+                print(
+                    f"{stage_label}本轮返回 {len(batch_items)} 张，已累计 {len(accumulated)}/{expected_count}，"
+                    f"补生剩余 {expected_count - len(accumulated)} 张…"
+                )
+                if attempt < max_attempts:
+                    continue
+                raise RuntimeError(
+                    f"{failure_prefix}失败：已达最大尝试次数，仍缺图片（{len(accumulated)}/{expected_count}）。"
+                )
 
             print(
-                f"{stage_label}第 {attempt} 次未达要求：请求 n={expected_count}，"
-                f"仅返回 {got_count} 张有效图片。"
+                f"{stage_label}第 {attempt} 次未返回有效图片（本轮 n={remaining}，"
+                f"已累计 {len(accumulated)}/{expected_count}）。"
             )
             if attempt < max_attempts:
                 print(f"{stage_label}将自动重试（{attempt + 1}/{max_attempts}）…")
                 continue
             raise RuntimeError(
-                f"{failure_prefix}失败：连续 {max_attempts} 次均未返回足够图片（{got_count}/{expected_count}）。"
+                f"{failure_prefix}失败：连续 {max_attempts} 次均未凑够图片（{len(accumulated)}/{expected_count}）。"
             )
         except Exception as exc:
             error_kind = classify_image_api_error(exc)
-            print(f"{stage_label}第 {attempt} 次失败：error_type={error_kind}，详情={exc}")
+            print(
+                f"{stage_label}第 {attempt} 次失败：error_type={error_kind}，"
+                f"已累计 {len(accumulated)}/{expected_count}，详情={exc}"
+            )
+            if len(accumulated) >= expected_count:
+                print(f"{stage_label}成功：累计 {len(accumulated)}/{expected_count} 张。")
+                return accumulated[:expected_count]
             if attempt >= max_attempts or not is_retriable_image_api_error(exc):
+                if accumulated:
+                    raise RuntimeError(
+                        f"{failure_prefix}失败：{exc}（已累计 {len(accumulated)}/{expected_count} 张，未凑满）。"
+                    ) from exc
                 raise RuntimeError(f"{failure_prefix}失败：{exc}") from exc
             print(f"{stage_label}命中可重试错误（{error_kind}），准备第 {attempt + 1}/{max_attempts} 次…")
 
+    if accumulated:
+        if len(accumulated) >= expected_count:
+            return accumulated[:expected_count]
+        raise RuntimeError(
+            f"{failure_prefix}失败：接口未凑够图片（{len(accumulated)}/{expected_count}）。"
+        )
     raise RuntimeError(f"{failure_prefix}失败：接口未返回有效图片数据。")
 
 
@@ -1270,7 +1296,7 @@ def generate_images_from_references(
     request_prompt = augment_prompt_with_reference_labels(prompt_text, valid_paths)
     model_name = str(settings.get("model", "")).strip().lower()
 
-    def call_edit_api() -> Any:
+    def call_edit_api(batch_n: int) -> Any:
         file_handles: list[Any] = []
         try:
             uploads, file_handles = open_reference_image_uploads(valid_paths)
@@ -1281,7 +1307,7 @@ def generate_images_from_references(
                 "prompt": request_prompt,
                 "size": settings["size"],
                 "quality": settings["quality"],
-                "n": settings["image_count"],
+                "n": batch_n,
                 "timeout": request_timeout,
             }
             if "gpt-image-2" not in model_name:
@@ -2100,13 +2126,13 @@ def extract_image_items(response: Any) -> list[dict[str, str]]:
 def generate_images_by_prompt(client: OpenAI, prompt_text: str, settings: dict[str, Any]) -> list[dict[str, str]]:
     request_timeout = parse_float_env("OPENAI_IMAGE_REQUEST_TIMEOUT_SECONDS", 900.0)
 
-    def call_generate_api() -> Any:
+    def call_generate_api(batch_n: int) -> Any:
         return client.images.generate(
             model=settings["model"],
             prompt=prompt_text,
             size=settings["size"],
             quality=settings["quality"],
-            n=settings["image_count"],
+            n=batch_n,
             timeout=request_timeout,
         )
 
