@@ -392,30 +392,57 @@ def load_cankao_group_template(template_file: Path) -> str:
     return template
 
 
+def find_cankao_placeholder_spans(template_text: str) -> list[tuple[int, int, str]]:
+    """按花括号嵌套深度识别顶层变量位，示例文案内可含 {…} 子串。"""
+    spans: list[tuple[int, int, str]] = []
+    index = 0
+    length = len(template_text)
+    while index < length:
+        if template_text[index] != "{":
+            index += 1
+            continue
+        depth = 0
+        start = index
+        cursor = index
+        while cursor < length:
+            char = template_text[cursor]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    spans.append((start, cursor + 1, template_text[start : cursor + 1]))
+                    index = cursor + 1
+                    break
+            cursor += 1
+        else:
+            index += 1
+    return spans
+
+
 def collect_cankao_placeholders(template_text: str) -> list[str]:
-    placeholders: list[str] = []
-    for match in CANKAO_PLACEHOLDER_PATTERN.finditer(template_text):
-        placeholders.append(match.group(0))
-    return placeholders
+    return [placeholder for _, _, placeholder in find_cankao_placeholder_spans(template_text)]
 
 
 def render_cankao_template_by_replacements(template_text: str, replacements: list[str]) -> str:
-    replaced_count = 0
+    spans = find_cankao_placeholder_spans(template_text)
+    if len(replacements) != len(spans):
+        raise ValueError(
+            f"变量替换数量不匹配：需要 {len(spans)} 个，实际 {len(replacements)} 个。"
+        )
 
-    def _replace(match: re.Match[str]) -> str:
-        nonlocal replaced_count
-        if replaced_count >= len(replacements):
-            raise ValueError("变量替换数量不足，无法覆盖模板中的所有变量位。")
-        value = str(replacements[replaced_count]).strip()
-        replaced_count += 1
+    parts: list[str] = []
+    last_end = 0
+    for index, (start, end, _) in enumerate(spans):
+        parts.append(template_text[last_end:start])
+        value = str(replacements[index]).strip()
         if not value:
             raise ValueError("变量替换值不能为空。")
-        return value
-
-    rendered = CANKAO_PLACEHOLDER_PATTERN.sub(_replace, template_text)
-    if replaced_count != len(replacements):
-        raise ValueError("变量替换数量超出模板需求。")
-    if CANKAO_PLACEHOLDER_PATTERN.search(rendered):
+        parts.append(value)
+        last_end = end
+    parts.append(template_text[last_end:])
+    rendered = "".join(parts)
+    if find_cankao_placeholder_spans(rendered):
         raise ValueError("模板仍存在未替换的变量占位符。")
     return rendered.strip()
 
