@@ -9,7 +9,7 @@ import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 from openai import APITimeoutError, OpenAI
@@ -48,6 +48,7 @@ DEFAULT_IMAGE_SIZE = "1024x1536"
 DEFAULT_IMAGE_QUALITY = "low"
 DEFAULT_IMAGE_COUNT = 1
 DEFAULT_COVER_IMAGE_COUNT = 1
+DEFAULT_IMAGE_REQUEST_MAX_ATTEMPTS = 3
 DEFAULT_CONTENT_TRACK = "电饭煲一锅出"
 
 _RUNTIME_CONFIG_LOADED = False
@@ -210,6 +211,113 @@ def is_moderation_blocked_error(exc: Exception) -> bool:
         if "moderation_blocked" in message or "safety system" in message:
             return True
     return False
+
+
+def get_image_request_max_attempts() -> int:
+    return max(1, parse_int_env("IMAGE_REQUEST_RETRY_COUNT", 3))
+
+
+def format_image_generation_request_label(
+    settings: dict[str, Any],
+    *,
+    mode: str,
+    reference_paths: list[Path] | None = None,
+) -> str:
+    ref_part = ""
+    if reference_paths:
+        ref_part = f"，参考图={len(reference_paths)}张（{', '.join(path.name for path in reference_paths)}）"
+    return (
+        f"mode={mode}，model={settings.get('model')}，size={settings.get('size')}，"
+        f"quality={settings.get('quality')}，n={settings.get('image_count')}{ref_part}"
+    )
+
+
+def classify_image_api_error(exc: Exception) -> str:
+    if is_timeout_error(exc):
+        return "timeout"
+    if is_moderation_blocked_error(exc):
+        return "moderation_blocked"
+    message = " ".join(str(error) for error in iter_exception_chain(exc)).lower()
+    if "billing_hard_limit" in message or "billing limit" in message:
+        return "billing_limit"
+    if "502" in message or "bad gateway" in message:
+        return "http_502"
+    if "503" in message or "service unavailable" in message:
+        return "http_503"
+    if "504" in message or "gateway timeout" in message:
+        return "http_504"
+    if "429" in message or "rate limit" in message:
+        return "rate_limit"
+    if "connection error" in message or "connection reset" in message:
+        return "connection"
+    for error in iter_exception_chain(exc):
+        if isinstance(error, (httpx.ConnectError, httpx.RemoteProtocolError, ConnectionError)):
+            return "connection"
+    if "internal server error" in message or "error code: 500" in message:
+        return "http_500"
+    return "api_error"
+
+
+def is_retriable_image_api_error(exc: Exception) -> bool:
+    if is_moderation_blocked_error(exc):
+        return False
+    error_kind = classify_image_api_error(exc)
+    if error_kind in {"billing_limit", "moderation_blocked", "api_error"}:
+        return False
+    if error_kind in {"timeout", "http_502", "http_503", "http_504", "http_500", "rate_limit", "connection"}:
+        return True
+    for error in iter_exception_chain(exc):
+        if isinstance(error, (httpx.ConnectError, httpx.RemoteProtocolError, ConnectionError, OSError)):
+            return True
+    return is_timeout_error(exc)
+
+
+def execute_image_generation_with_retries(
+    *,
+    stage_label: str,
+    failure_prefix: str,
+    settings: dict[str, Any],
+    request_label: str,
+    call_api: Any,
+) -> list[dict[str, str]]:
+    expected_count = max(1, int(settings.get("image_count") or 1))
+    max_attempts = get_image_request_max_attempts()
+    print(f"{stage_label}开始请求：{request_label}；最多尝试 {max_attempts} 次")
+
+    for attempt in range(1, max_attempts + 1):
+        print(f"{stage_label}第 {attempt}/{max_attempts} 次调用生图接口…")
+        try:
+            response = call_api()
+            image_items = extract_image_items(response)
+            got_count = len(image_items)
+            if got_count >= expected_count:
+                if got_count > expected_count:
+                    print(
+                        f"{stage_label}成功：请求 n={expected_count}，实际返回 {got_count} 张，"
+                        f"已取用前 {expected_count} 张。"
+                    )
+                    return image_items[:expected_count]
+                print(f"{stage_label}成功：返回 {got_count}/{expected_count} 张。")
+                return image_items
+
+            print(
+                f"{stage_label}第 {attempt} 次未达要求：请求 n={expected_count}，"
+                f"仅返回 {got_count} 张有效图片。"
+            )
+            if attempt < max_attempts:
+                print(f"{stage_label}将自动重试（{attempt + 1}/{max_attempts}）…")
+                continue
+            raise RuntimeError(
+                f"{failure_prefix}失败：连续 {max_attempts} 次均未返回足够图片（{got_count}/{expected_count}）。"
+            )
+        except Exception as exc:
+            error_kind = classify_image_api_error(exc)
+            print(f"{stage_label}第 {attempt} 次失败：error_type={error_kind}，详情={exc}")
+            if attempt >= max_attempts or not is_retriable_image_api_error(exc):
+                raise RuntimeError(f"{failure_prefix}失败：{exc}") from exc
+            print(f"{stage_label}命中可重试错误（{error_kind}），准备第 {attempt + 1}/{max_attempts} 次…")
+
+    raise RuntimeError(f"{failure_prefix}失败：接口未返回有效图片数据。")
 
 
 def soften_detail_image_prompt(prompt_text: str) -> str:
@@ -1114,44 +1222,43 @@ def generate_images_from_references(
     if not valid_paths:
         return generate_images_by_prompt(client=client, prompt_text=prompt_text, settings=settings)
 
-    max_retry = parse_int_env("IMAGE_REQUEST_RETRY_COUNT", 2)
     request_timeout = parse_float_env("OPENAI_IMAGE_REQUEST_TIMEOUT_SECONDS", 900.0)
-    response = None
-    file_handles: list[Any] = []
-    try:
-        uploads, file_handles = open_reference_image_uploads(valid_paths)
-        image_arg: Any = uploads[0] if len(uploads) == 1 else uploads
-        request_prompt = augment_prompt_with_reference_labels(prompt_text, valid_paths)
-        edit_kwargs: dict[str, Any] = {
-            "model": settings["model"],
-            "image": image_arg,
-            "prompt": request_prompt,
-            "size": settings["size"],
-            "quality": settings["quality"],
-            "n": settings["image_count"],
-            "timeout": request_timeout,
-        }
-        model_name = str(settings.get("model", "")).strip().lower()
-        if "gpt-image-2" not in model_name:
-            edit_kwargs["input_fidelity"] = "high"
-        for attempt in range(1, max_retry + 1):
-            try:
-                response = client.images.edit(**edit_kwargs)
-                break
-            except Exception as exc:
-                if attempt >= max_retry or not is_timeout_error(exc):
-                    raise RuntimeError(f"参考图生图失败：{exc}") from exc
-                print(f"参考图生图超时，正在重试第 {attempt + 1}/{max_retry} 次...")
-    finally:
-        for file_obj in file_handles:
-            file_obj.close()
+    request_prompt = augment_prompt_with_reference_labels(prompt_text, valid_paths)
+    model_name = str(settings.get("model", "")).strip().lower()
 
-    if response is None:
-        raise RuntimeError("参考图生图失败：接口未返回有效响应。")
-    image_items = extract_image_items(response)
-    if not image_items:
-        raise RuntimeError("参考图生图失败：接口未返回有效图片数据。")
-    return image_items
+    def call_edit_api() -> Any:
+        file_handles: list[Any] = []
+        try:
+            uploads, file_handles = open_reference_image_uploads(valid_paths)
+            image_arg: Any = uploads[0] if len(uploads) == 1 else uploads
+            edit_kwargs: dict[str, Any] = {
+                "model": settings["model"],
+                "image": image_arg,
+                "prompt": request_prompt,
+                "size": settings["size"],
+                "quality": settings["quality"],
+                "n": settings["image_count"],
+                "timeout": request_timeout,
+            }
+            if "gpt-image-2" not in model_name:
+                edit_kwargs["input_fidelity"] = "high"
+            return client.images.edit(**edit_kwargs)
+        finally:
+            for file_obj in file_handles:
+                file_obj.close()
+
+    request_label = format_image_generation_request_label(
+        settings,
+        mode="images.edit",
+        reference_paths=valid_paths,
+    )
+    return execute_image_generation_with_retries(
+        stage_label="参考图生图",
+        failure_prefix="参考图生图",
+        settings=settings,
+        request_label=request_label,
+        call_api=call_edit_api,
+    )
 
 
 def render_prompt_fallback(template_text: str, dish_name: str, notes: str) -> str:
@@ -1941,31 +2048,26 @@ def extract_image_items(response: Any) -> list[dict[str, str]]:
 
 
 def generate_images_by_prompt(client: OpenAI, prompt_text: str, settings: dict[str, Any]) -> list[dict[str, str]]:
-    max_retry = parse_int_env("IMAGE_REQUEST_RETRY_COUNT", 2)
     request_timeout = parse_float_env("OPENAI_IMAGE_REQUEST_TIMEOUT_SECONDS", 900.0)
-    response = None
-    for attempt in range(1, max_retry + 1):
-        try:
-            response = client.images.generate(
-                model=settings["model"],
-                prompt=prompt_text,
-                size=settings["size"],
-                quality=settings["quality"],
-                n=settings["image_count"],
-                timeout=request_timeout,
-            )
-            break
-        except Exception as exc:
-            if attempt >= max_retry or not is_timeout_error(exc):
-                raise RuntimeError(f"生图失败：{exc}") from exc
-            print(f"生图请求超时，正在重试第 {attempt + 1}/{max_retry} 次...")
-    if response is None:
-        raise RuntimeError("生图失败：接口未返回有效响应。")
 
-    image_items = extract_image_items(response)
-    if not image_items:
-        raise RuntimeError("图片接口未返回有效图片数据。")
-    return image_items
+    def call_generate_api() -> Any:
+        return client.images.generate(
+            model=settings["model"],
+            prompt=prompt_text,
+            size=settings["size"],
+            quality=settings["quality"],
+            n=settings["image_count"],
+            timeout=request_timeout,
+        )
+
+    request_label = format_image_generation_request_label(settings, mode="images.generate")
+    return execute_image_generation_with_retries(
+        stage_label="文生图",
+        failure_prefix="生图",
+        settings=settings,
+        request_label=request_label,
+        call_api=call_generate_api,
+    )
 
 
 def save_generated_images(
