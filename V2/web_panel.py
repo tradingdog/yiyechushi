@@ -41,7 +41,7 @@ from v2_core import (
 
 HOST = "127.0.0.1"
 PORT = 8765
-PANEL_VERSION = "v0.88"
+PANEL_VERSION = "v0.89"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 VALID_HISTORY_SORTS = {"favorite", "created_desc", "created_asc", "name", "image_first"}
@@ -639,6 +639,7 @@ HTML_PAGE = """<!doctype html>
     .text-editor-actions button:disabled{opacity:.45;cursor:not-allowed}
     .text-content,.text-editor{margin:0;width:100%;min-height:360px;max-height:calc(100vh - 400px);overflow:auto;white-space:pre-wrap;word-break:break-word;border:1px solid #26344b;border-radius:10px;background:#08111f;padding:12px;color:#e5edf8;font-size:13px;line-height:1.65;box-sizing:border-box;resize:vertical;font-family:ui-monospace,Consolas,monospace}
     .text-editor:focus{outline:none;border-color:#3b82f6;box-shadow:0 0 0 1px rgba(59,130,246,.35)}
+    .text-editor.readonly{background:#0a101c;color:#cbd5e1;cursor:default;resize:none}
     .log-toggle{
       position:fixed;right:16px;bottom:16px;z-index:55;padding:9px 12px;border-radius:999px;border:1px solid #475569;
       background:#0f172a;color:#e2e8f0;box-shadow:var(--shadow);cursor:pointer;font-size:12px;
@@ -968,6 +969,7 @@ HTML_PAGE = """<!doctype html>
       activeTextFilePath: "",
       textEditorDrafts: {},
       textEditorDirty: false,
+      textEditorEditing: false,
       textSaveStatus: "",
       publishLogIndex: 0,
       publishPolling: false,
@@ -1528,9 +1530,45 @@ HTML_PAGE = """<!doctype html>
     }
 
     function captureTextEditorDraft(){
+      if(!state.textEditorEditing){ return; }
       const editor = $("textEditor");
       if(!editor || !state.activeTextFilePath){ return; }
       state.textEditorDrafts[state.activeTextFilePath] = editor.value;
+    }
+
+    function tryLeaveTextEditorEdit(){
+      if(!state.textEditorEditing){ return true; }
+      if(state.textEditorDirty){
+        if(!confirm("当前文案有未保存修改，确定放弃并切换？")){ return false; }
+      }
+      const activeFile = getActiveTextFile();
+      if(activeFile){
+        delete state.textEditorDrafts[activeFile.path];
+      }
+      state.textEditorEditing = false;
+      state.textEditorDirty = false;
+      return true;
+    }
+
+    function enterTextEditorEdit(){
+      state.textEditorEditing = true;
+      renderTextAssets();
+      const editor = $("textEditor");
+      if(editor){
+        editor.focus();
+        editor.setSelectionRange(editor.value.length, editor.value.length);
+      }
+    }
+
+    function cancelTextEditorEdit(){
+      const activeFile = getActiveTextFile();
+      if(activeFile){
+        delete state.textEditorDrafts[activeFile.path];
+      }
+      state.textEditorEditing = false;
+      state.textEditorDirty = false;
+      state.textSaveStatus = "";
+      renderTextAssets();
     }
 
     function getActiveTextFile(){
@@ -1587,6 +1625,7 @@ HTML_PAGE = """<!doctype html>
         btn.className = "text-tab" + (group.key === state.activeTextCategory ? " active" : "");
         btn.textContent = `${group.label}（${group.files.length}）`;
         btn.onclick = () => {
+          if(!tryLeaveTextEditorEdit()){ return; }
           state.activeTextCategory = group.key;
           state.activeTextFilePath = "";
           renderTextAssets();
@@ -1604,6 +1643,7 @@ HTML_PAGE = """<!doctype html>
         btn.textContent = file.name;
         btn.title = file.relative_path;
         btn.onclick = () => {
+          if(!tryLeaveTextEditorEdit()){ return; }
           state.activeTextFilePath = file.path;
           renderTextAssets();
         };
@@ -1621,31 +1661,53 @@ HTML_PAGE = """<!doctype html>
       const hint = document.createElement("div");
       hint.id = "textEditorHint";
       hint.className = "text-editor-hint" + (state.textEditorDirty ? " dirty" : "");
-      hint.textContent = state.textEditorDirty
-        ? "有未保存修改，编辑后点击保存。"
-        : "可直接编辑文案，Ctrl+S 或点击保存写入磁盘。";
+      if(state.textEditorEditing){
+        hint.textContent = state.textEditorDirty
+          ? "编辑中，有未保存修改。"
+          : "编辑中，Ctrl+S 或点击保存写入磁盘。";
+      }else{
+        hint.textContent = "只读预览，点击「编辑」后可修改并保存。";
+      }
       const actions = document.createElement("div");
       actions.className = "text-editor-actions";
-      const saveBtn = document.createElement("button");
-      saveBtn.id = "textSaveBtn";
-      saveBtn.type = "button";
-      saveBtn.className = "primary";
-      saveBtn.textContent = "保存";
-      saveBtn.disabled = !activeFile;
-      saveBtn.onclick = () => { saveTextAsset(); };
-      actions.appendChild(saveBtn);
+      if(state.textEditorEditing){
+        const saveBtn = document.createElement("button");
+        saveBtn.id = "textSaveBtn";
+        saveBtn.type = "button";
+        saveBtn.className = "primary";
+        saveBtn.textContent = state.textEditorDirty ? "保存*" : "保存";
+        saveBtn.disabled = !activeFile;
+        saveBtn.onclick = () => { saveTextAsset(); };
+        const cancelBtn = document.createElement("button");
+        cancelBtn.id = "textCancelBtn";
+        cancelBtn.type = "button";
+        cancelBtn.textContent = "取消";
+        cancelBtn.onclick = () => { cancelTextEditorEdit(); };
+        actions.appendChild(saveBtn);
+        actions.appendChild(cancelBtn);
+      }else{
+        const editBtn = document.createElement("button");
+        editBtn.id = "textEditBtn";
+        editBtn.type = "button";
+        editBtn.className = "primary";
+        editBtn.textContent = "编辑";
+        editBtn.disabled = !activeFile;
+        editBtn.onclick = () => { enterTextEditorEdit(); };
+        actions.appendChild(editBtn);
+      }
       bar.appendChild(hint);
       bar.appendChild(actions);
       panel.appendChild(bar);
 
       const editor = document.createElement("textarea");
       editor.id = "textEditor";
-      editor.className = "text-editor";
+      editor.className = "text-editor" + (state.textEditorEditing ? "" : " readonly");
       editor.spellcheck = false;
+      editor.readOnly = !state.textEditorEditing;
       editor.value = editorValue;
       editor.disabled = !activeFile;
       editor.addEventListener("input", () => {
-        if(!activeFile){ return; }
+        if(!activeFile || !state.textEditorEditing){ return; }
         state.textEditorDrafts[activeFile.path] = editor.value;
         updateTextEditorDirty(activeFile, editor.value);
         const hintEl = $("textEditorHint");
@@ -1653,8 +1715,8 @@ HTML_PAGE = """<!doctype html>
         if(hintEl){
           hintEl.classList.toggle("dirty", state.textEditorDirty);
           hintEl.textContent = state.textEditorDirty
-            ? "有未保存修改，编辑后点击保存。"
-            : "可直接编辑文案，Ctrl+S 或点击保存写入磁盘。";
+            ? "编辑中，有未保存修改。"
+            : "编辑中，Ctrl+S 或点击保存写入磁盘。";
         }
         if(saveEl){
           saveEl.textContent = state.textEditorDirty ? "保存*" : "保存";
@@ -1671,6 +1733,7 @@ HTML_PAGE = """<!doctype html>
     }
 
     async function saveTextAsset(){
+      if(!state.textEditorEditing){ return; }
       const activeFile = getActiveTextFile();
       const editor = $("textEditor");
       if(!activeFile || !editor){ return; }
@@ -1688,6 +1751,7 @@ HTML_PAGE = """<!doctype html>
         activeFile.content = content;
         delete state.textEditorDrafts[activeFile.path];
         state.textEditorDirty = false;
+        state.textEditorEditing = false;
         state.textSaveStatus = "已保存：" + activeFile.name;
         renderTextAssets();
       }catch(err){
@@ -1703,6 +1767,7 @@ HTML_PAGE = """<!doctype html>
       state.activeTextFilePath = "";
       state.textEditorDrafts = {};
       state.textEditorDirty = false;
+      state.textEditorEditing = false;
       state.textSaveStatus = "";
       $("textPanel").innerHTML = `<div class="text-empty">正在读取文案...</div>`;
       if(!path){
@@ -2452,7 +2517,7 @@ HTML_PAGE = """<!doctype html>
       $("textTabBtn").onclick = () => setRightTab("text");
       document.addEventListener("keydown", (event) => {
         if((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s"){
-          if(state.activeRightTab !== "text" || !state.activeTextFilePath){ return; }
+          if(state.activeRightTab !== "text" || !state.activeTextFilePath || !state.textEditorEditing){ return; }
           event.preventDefault();
           saveTextAsset();
         }
