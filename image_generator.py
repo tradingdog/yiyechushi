@@ -42,6 +42,7 @@ DEFAULT_TEXT_REQUEST_RETRY_COUNT = 3
 DEFAULT_TEXT_PROVIDER = "doubao"
 DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-pro-260215"
 DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_TEXT_CONNECT_TIMEOUT_SECONDS = 20.0
 DEFAULT_OPENAI_IMAGE_MODEL = "gpt-image-2-2026-04-21"
 DEFAULT_AUTO_DISH_GENERATION_ENABLED = True
@@ -791,6 +792,11 @@ def get_auto_dish_memory_file() -> Path:
     return resolve_runtime_path("AUTO_DISH_MEMORY_FILE", DEFAULT_AUTO_DISH_MEMORY_FILE)
 
 
+def resolve_openai_base_url() -> str:
+    ensure_runtime_config_loaded()
+    return os.getenv("OPENAI_BASE_URL", "").strip() or DEFAULT_OPENAI_BASE_URL
+
+
 def build_image_client() -> OpenAI:
     ensure_runtime_config_loaded()
 
@@ -800,7 +806,7 @@ def build_image_client() -> OpenAI:
 
     request_timeout = get_request_timeout_seconds()
 
-    return OpenAI(api_key=api_key, timeout=request_timeout)
+    return OpenAI(api_key=api_key, base_url=resolve_openai_base_url(), timeout=request_timeout)
 
 
 def build_text_http_timeout(read_timeout: float) -> httpx.Timeout:
@@ -832,7 +838,7 @@ def build_text_client() -> OpenAI:
     openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not openai_api_key:
         raise RuntimeError("未找到 OPENAI_API_KEY，请先在 .env 文件中配置。")
-    return OpenAI(api_key=openai_api_key, timeout=http_timeout)
+    return OpenAI(api_key=openai_api_key, base_url=resolve_openai_base_url(), timeout=http_timeout)
 
 
 def get_request_timeout_seconds() -> float:
