@@ -55,7 +55,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v0.99"
+PANEL_VERSION = "v1.00"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 VALID_HISTORY_SORTS = {"favorite", "created_desc", "created_asc", "name", "image_first"}
@@ -401,7 +401,8 @@ HTML_PAGE = """<!doctype html>
       --bg:#0d1117; --panel:#121a27; --panel-soft:#1a2435; --line:#2d3a52; --text:#e6edf7; --sub:#9aa7bd;
       --pri:#020617; --ok:#22c55e; --warn:#f59e0b; --danger:#ef4444;
       --shadow:0 10px 28px rgba(0,0,0,.35);
-      --col-left:540px;
+      --col-left:720px;
+      --col-gallery:720px;
       --col-mid:400px;
       --col-publish:118px;
       --col-custom:228px;
@@ -432,9 +433,12 @@ HTML_PAGE = """<!doctype html>
       width:auto;padding:7px 10px;border:1px solid #334155;border-radius:8px;background:#0b1220;color:#dbe7ff;cursor:pointer;font-size:12px;
     }
     .top-actions .danger-btn{border-color:#7f1d1d;color:#fecaca;background:#2b1313}
+    .layout-scroll{width:100%;overflow-x:auto;overflow-y:hidden;padding-bottom:6px}
     .four-col{
       display:grid;
-      grid-template-columns:var(--col-left) var(--splitter) minmax(280px,1fr) var(--splitter) var(--col-mid) var(--col-publish) var(--col-custom);
+      width:max-content;
+      min-width:100%;
+      grid-template-columns:var(--col-left) var(--splitter) var(--col-gallery) var(--splitter) var(--col-mid) var(--splitter) var(--col-publish) var(--splitter) var(--col-custom);
       gap:0;
       align-items:start;
       min-height:calc(100vh - 120px);
@@ -498,8 +502,8 @@ HTML_PAGE = """<!doctype html>
     .modal-box p{margin:0 0 14px;font-size:13px;line-height:1.6;color:#cbd5e1;white-space:pre-wrap}
     .modal-box button{width:100%;padding:11px;border:1px solid #22c55e;border-radius:9px;background:#14532d;color:#dcfce7;font-weight:700;cursor:pointer}
     .splitter{
-      margin:0 2px;border-radius:8px;background:linear-gradient(180deg,#334155,#1f2937);cursor:col-resize;height:calc(100vh - 112px);
-      user-select:none;position:relative;
+      margin:0 2px;border-radius:8px;background:linear-gradient(180deg,#334155,#1f2937);cursor:col-resize;height:calc(100vh - 88px);
+      user-select:none;position:relative;flex:0 0 var(--splitter);touch-action:none;
     }
     .splitter::after{
       content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:3px;height:60px;border-radius:3px;background:#94a3b8;opacity:.55;
@@ -724,7 +728,6 @@ HTML_PAGE = """<!doctype html>
       height:calc(100% - 44px);margin:0;padding:10px;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.45;
       white-space:pre-wrap;word-break:break-word;color:#d1d9e9;
     }
-    @media(max-width:1700px){.four-col{grid-template-columns:300px var(--splitter) minmax(240px,1fr) var(--splitter) 360px 110px 220px}}
     @media(max-width:1200px){
       .four-col{grid-template-columns:1fr}
       .splitter{display:none}
@@ -766,6 +769,7 @@ HTML_PAGE = """<!doctype html>
       <div id="taskBarPublish" class="task-bar-publish hidden"></div>
     </div>
 
+    <div class="layout-scroll">
     <div id="fourColLayout" class="four-col">
       <section class="panel panel-left">
         <div class="history-head">
@@ -856,7 +860,7 @@ HTML_PAGE = """<!doctype html>
         </div>
       </section>
 
-      <div id="splitterRight" class="splitter" title="拖拽调整宽度"></div>
+      <div id="splitterGallery" class="splitter" title="拖拽调整看图栏宽度"></div>
 
       <aside class="panel panel-mid">
         <div class="section-card">
@@ -961,6 +965,8 @@ HTML_PAGE = """<!doctype html>
         </div>
       </aside>
 
+      <div id="splitterMid" class="splitter" title="拖拽调整造菜栏宽度"></div>
+
       <aside class="panel panel-publish">
         <h3 class="panel-title">发布平台</h3>
         <div id="publishPlatforms" class="publish-platform-list">
@@ -973,6 +979,8 @@ HTML_PAGE = """<!doctype html>
         <div id="publishStatus" class="publish-status">选中左侧菜品后，勾选平台并点击发布。</div>
         <button id="publishBtn" class="btn-publish" type="button">发布</button>
       </aside>
+
+      <div id="splitterPublish" class="splitter" title="拖拽调整发布栏宽度"></div>
 
       <aside class="panel panel-custom">
         <h3 class="panel-title">自定义生图</h3>
@@ -995,6 +1003,7 @@ HTML_PAGE = """<!doctype html>
         <h4 class="sec-title" style="margin:6px 0 8px">历史记录</h4>
         <div id="customHistory" class="custom-history"></div>
       </aside>
+    </div>
     </div>
   </div>
 
@@ -1063,8 +1072,11 @@ HTML_PAGE = """<!doctype html>
       taskQueueSnapshot: {running: null, queued: []},
       taskQueueExpanded: false,
       publishSnapshot: {running: false, platform: "", output_dir: ""},
-      colLeft: 540,
+      colLeft: 720,
+      colGallery: 720,
       colMid: 400,
+      colPublish: 118,
+      colCustom: 228,
       historyPoolCols: "3",
       historySearchQuery: "",
       galleryLightboxOpen: false,
@@ -1093,7 +1105,8 @@ HTML_PAGE = """<!doctype html>
     const $ = (id) => document.getElementById(id);
     const QUALITY_INDEX = { low: 0, medium: 1, high: 2, auto: 3 };
     const INDEX_QUALITY = ["low", "medium", "high", "auto"];
-    const LAYOUT_STORAGE_KEY = "v2_panel_layout_v1";
+    const LAYOUT_STORAGE_KEY = "v2_panel_layout_v2";
+    const LAYOUT_STORAGE_KEY_V1 = "v2_panel_layout_v1";
     const HISTORY_SORT_STORAGE_KEY = "v2_history_sort_v1";
     const HISTORY_COLS_STORAGE_KEY = "v2_history_pool_cols_v1";
 
@@ -1111,8 +1124,8 @@ HTML_PAGE = """<!doctype html>
       const minLeftByCols = { "1": 300, "2": 380, "3": 540, "auto": 360 };
       const needLeft = minLeftByCols[cols] || 380;
       if(state.colLeft < needLeft){
-        应用三栏宽度(needLeft, state.colMid);
-        保存三栏宽度();
+        应用面板栏宽({left: needLeft});
+        保存面板栏宽();
       }
       try{
         localStorage.setItem(HISTORY_COLS_STORAGE_KEY, cols);
@@ -1410,40 +1423,65 @@ HTML_PAGE = """<!doctype html>
       setStatus(`已切到运行中菜品：${item.dish_name}`, "ok");
     }
 
-    function 应用三栏宽度(leftWidth, midWidth){
-      const layout = $("fourColLayout");
-      if(!layout){ return; }
-      const total = layout.clientWidth || 1400;
-      const splitterSpace = 2 * 8;
-      const minLeft = 240;
-      const minMid = 320;
-      const minRight = 500;
-      const maxLeft = Math.max(minLeft, total - splitterSpace - minMid - minRight);
-      const safeLeft = Math.max(minLeft, Math.min(maxLeft, Math.round(leftWidth)));
-      const maxMid = Math.max(minMid, total - splitterSpace - safeLeft - minRight);
-      const safeMid = Math.max(minMid, Math.min(maxMid, Math.round(midWidth)));
-      state.colLeft = safeLeft;
-      state.colMid = safeMid;
-      document.documentElement.style.setProperty("--col-left", `${safeLeft}px`);
-      document.documentElement.style.setProperty("--col-mid", `${safeMid}px`);
+    const PANEL_COL_MIN = {left: 240, gallery: 280, mid: 320, publish: 96, custom: 180};
+    const PANEL_COL_DEFAULT = {left: 720, gallery: 720, mid: 400, publish: 118, custom: 228};
+
+    function clampPanelCol(key, value){
+      const min = PANEL_COL_MIN[key] || 120;
+      return Math.max(min, Math.round(Number(value) || min));
     }
 
-    function 保存三栏宽度(){
+    function 应用面板栏宽(next={}){
+      state.colLeft = clampPanelCol("left", next.left ?? state.colLeft);
+      state.colGallery = clampPanelCol("gallery", next.gallery ?? state.colGallery);
+      state.colMid = clampPanelCol("mid", next.mid ?? state.colMid);
+      state.colPublish = clampPanelCol("publish", next.publish ?? state.colPublish);
+      state.colCustom = clampPanelCol("custom", next.custom ?? state.colCustom);
+      document.documentElement.style.setProperty("--col-left", `${state.colLeft}px`);
+      document.documentElement.style.setProperty("--col-gallery", `${state.colGallery}px`);
+      document.documentElement.style.setProperty("--col-mid", `${state.colMid}px`);
+      document.documentElement.style.setProperty("--col-publish", `${state.colPublish}px`);
+      document.documentElement.style.setProperty("--col-custom", `${state.colCustom}px`);
+    }
+
+    function 保存面板栏宽(){
       try{
-        localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify({left: state.colLeft, mid: state.colMid}));
+        localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify({
+          left: state.colLeft,
+          gallery: state.colGallery,
+          mid: state.colMid,
+          publish: state.colPublish,
+          custom: state.colCustom,
+        }));
       }catch{}
     }
 
-    function 加载三栏宽度(){
+    function 加载面板栏宽(){
       try{
         const raw = localStorage.getItem(LAYOUT_STORAGE_KEY);
         if(raw){
           const data = JSON.parse(raw);
-          应用三栏宽度(Number(data.left || 320), Number(data.mid || 430));
+          应用面板栏宽({
+            left: data.left,
+            gallery: data.gallery,
+            mid: data.mid,
+            publish: data.publish,
+            custom: data.custom,
+          });
+          return;
+        }
+        const legacy = localStorage.getItem(LAYOUT_STORAGE_KEY_V1);
+        if(legacy){
+          const data = JSON.parse(legacy);
+          应用面板栏宽({
+            left: data.left,
+            gallery: data.left,
+            mid: data.mid,
+          });
           return;
         }
       }catch{}
-      应用三栏宽度(540, 400);
+      应用面板栏宽(PANEL_COL_DEFAULT);
     }
 
     function 加载菜品池列数(){
@@ -1583,41 +1621,34 @@ HTML_PAGE = """<!doctype html>
     }
 
     function 初始化拖拽分栏(){
-      const layout = $("fourColLayout");
-      const splitL = $("splitterLeft");
-      const splitR = $("splitterRight");
-      if(!layout || !splitL || !splitR){ return; }
+      const splitters = [
+        {el: $("splitterLeft"), key: "left"},
+        {el: $("splitterGallery"), key: "gallery"},
+        {el: $("splitterMid"), key: "mid"},
+        {el: $("splitterPublish"), key: "publish"},
+      ].filter((item) => item.el);
 
-      const onDrag = (type, startX, startLeft, startMid) => (event) => {
-        const dx = event.clientX - startX;
-        if(type === "left"){
-          应用三栏宽度(startLeft + dx, startMid);
-        }else{
-          应用三栏宽度(startLeft, startMid + dx);
-        }
-      };
-
-      const bindDrag = (el, type) => {
+      const colStateKey = {left: "colLeft", gallery: "colGallery", mid: "colMid", publish: "colPublish"};
+      const bindDrag = (el, key) => {
         el.onmousedown = (e) => {
           e.preventDefault();
           const startX = e.clientX;
-          const startLeft = state.colLeft;
-          const startMid = state.colMid;
-          const moveHandler = onDrag(type, startX, startLeft, startMid);
+          const startWidth = state[colStateKey[key]];
+          const moveHandler = (event) => {
+            const dx = event.clientX - startX;
+            应用面板栏宽({[key]: startWidth + dx});
+          };
           const upHandler = () => {
             window.removeEventListener("mousemove", moveHandler);
             window.removeEventListener("mouseup", upHandler);
-            保存三栏宽度();
+            保存面板栏宽();
           };
           window.addEventListener("mousemove", moveHandler);
           window.addEventListener("mouseup", upHandler);
         };
       };
 
-      bindDrag(splitL, "left");
-      bindDrag(splitR, "right");
-
-      window.addEventListener("resize", () => 应用三栏宽度(state.colLeft, state.colMid));
+      splitters.forEach(({el, key}) => bindDrag(el, key));
     }
 
     function 同步参数滑块(){
@@ -2946,7 +2977,7 @@ HTML_PAGE = """<!doctype html>
     syncIdeaCountUi();
     state.historySort = localStorage.getItem(HISTORY_SORT_STORAGE_KEY) || "favorite";
     if($("historySortSelect")){ $("historySortSelect").value = state.historySort; }
-    加载三栏宽度();
+    加载面板栏宽();
     加载菜品池列数();
     初始化拖拽分栏();
     loadState();
