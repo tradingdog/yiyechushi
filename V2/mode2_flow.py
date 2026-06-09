@@ -307,8 +307,13 @@ def run_v2_mode2(mode: str | None = None, *, target_output_dir: str | Path | Non
 
         # 2A) 气泡文案
         try:
-            bubble_result = generate_poster_bubble_copy(doubao_client, poster_path, dish_name=dish_name)
             bubble_path = run_output_dir / f"{dish_name}_气泡文案.txt"
+            bubble_result = generate_poster_bubble_copy(
+                doubao_client,
+                poster_path,
+                dish_name=dish_name,
+                current_bubble_file=bubble_path,
+            )
             save_text_output(bubble_result["content"], bubble_path)
             bubble_text_file = str(bubble_path)
             print(f"气泡文案已生成：{bubble_text_file}")
@@ -826,7 +831,12 @@ def run_supplement_for_output_dir(
     bubble_path = run_output_dir / f"{dish_name}_气泡文案.txt"
     if "detail" in normalized_targets:
         try:
-            bubble_result = generate_poster_bubble_copy(doubao_client, poster_path, dish_name=dish_name)
+            bubble_result = generate_poster_bubble_copy(
+                doubao_client,
+                poster_path,
+                dish_name=dish_name,
+                current_bubble_file=bubble_path,
+            )
             save_text_output(bubble_result["content"], bubble_path)
             bubble_text = bubble_result["content"]
             print(f"气泡文案已生成：{bubble_path}")

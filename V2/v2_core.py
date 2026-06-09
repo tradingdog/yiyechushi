@@ -39,6 +39,9 @@ OUTPUT_DIR = ROOT_DIR / "output"
 DISH_POOL_DIR = ROOT_DIR / "dish_pool"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
+BUBBLE_COPY_HISTORY_FILE = ROOT_DIR / "bubble_copy_history.txt"
+BUBBLE_COPY_FILE_SUFFIX = "_气泡文案.txt"
+BUBBLE_COPY_HISTORY_PROMPT_LIMIT = 80
 
 DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-pro-260215"
@@ -1030,6 +1033,68 @@ BUBBLE_COPY_MIN_CHARS = 5
 BUBBLE_COPY_MAX_CHARS = 12
 
 
+def iter_bubble_copy_source_files() -> list[Path]:
+    files: list[Path] = []
+    for root in (DISH_POOL_DIR, DISH_ARCHIVE_DIR, OUTPUT_DIR):
+        if not root.exists():
+            continue
+        for path in root.rglob(f"*{BUBBLE_COPY_FILE_SUFFIX}"):
+            if path.is_file():
+                files.append(path)
+    return sorted(files, key=lambda path: path.stat().st_mtime)
+
+
+def sync_bubble_copy_history_file(*, exclude_normalized: set[str] | None = None) -> list[str]:
+    """扫描菜品池/归档/output 下所有气泡文案 txt，去重后写入持久化历史文件。"""
+    exclude_normalized = exclude_normalized or set()
+    ordered: list[str] = []
+    seen_norm: set[str] = set()
+    source_count = 0
+
+    def add_text(raw_text: str) -> None:
+        normalized = normalize_bubble_copy_text(raw_text)
+        if not normalized or normalized in exclude_normalized or normalized in seen_norm:
+            return
+        seen_norm.add(normalized)
+        ordered.append(normalized)
+
+    for path in iter_bubble_copy_source_files():
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if not content:
+            continue
+        source_count += 1
+        add_text(content)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    header_lines = [
+        "# 历史气泡文案（自动汇总，细节图生成前刷新）",
+        f"# 来源文件数：{source_count}",
+        f"# 去重条目数：{len(ordered)}",
+        f"# 更新：{timestamp}",
+        "",
+    ]
+    BUBBLE_COPY_HISTORY_FILE.write_text(
+        "\n".join(header_lines + ordered) + ("\n" if ordered else ""),
+        encoding="utf-8",
+    )
+    print(
+        f"气泡文案历史已同步：扫描 {source_count} 个源文件，"
+        f"去重后 {len(ordered)} 条 -> {BUBBLE_COPY_HISTORY_FILE}"
+    )
+    return ordered
+
+
+def is_bubble_copy_in_history(text: str, history_texts: list[str]) -> bool:
+    normalized = normalize_bubble_copy_text(text)
+    if not normalized:
+        return False
+    history_norm = {normalize_bubble_copy_text(item) for item in history_texts if item.strip()}
+    return normalized in history_norm
+
+
 def normalize_bubble_copy_text(raw_text: str) -> str:
     text = raw_text.strip()
     text = re.sub(r"^[「『\"'“”]+", "", text)
@@ -1054,13 +1119,32 @@ def validate_bubble_copy_text(text: str) -> str:
     return normalized
 
 
-def build_bubble_copy_prompt(*, dish_name: str, retry_feedback: str = "") -> str:
+def build_bubble_copy_prompt(
+    *,
+    dish_name: str,
+    retry_feedback: str = "",
+    history_texts: list[str] | None = None,
+) -> str:
     dish_line = f"菜名：{dish_name.strip()}。" if dish_name.strip() else ""
     feedback_block = f"（{retry_feedback}）" if retry_feedback.strip() else ""
+    history_block = ""
+    if history_texts:
+        total = len(history_texts)
+        shown = history_texts[-BUBBLE_COPY_HISTORY_PROMPT_LIMIT:]
+        if total > len(shown):
+            scope_note = f"（共 {total} 条，以下列最近 {len(shown)} 条）"
+        else:
+            scope_note = f"（共 {total} 条）"
+        lines = "\n".join(f"- {text}" for text in shown)
+        history_block = (
+            f"\n\n以下历史气泡文案均已使用过{scope_note}，"
+            f"禁止重复、仅改几个字或同义改写，必须写出全新句式：\n{lines}"
+        )
     return (
         f"{dish_line}上图是这道菜的海报，另有阿叶厨师角色参考。"
         f"写他在品尝这道菜时，气泡里最能勾起食欲的一句话——他是说话的人，不是菜。"
-        f"{BUBBLE_COPY_MIN_CHARS}–{BUBBLE_COPY_MAX_CHARS} 个汉字，只输出这一句{feedback_block}"
+        f"{BUBBLE_COPY_MIN_CHARS}–{BUBBLE_COPY_MAX_CHARS} 个汉字，只输出这一句。"
+        f"{history_block}{feedback_block}"
     )
 
 
@@ -1069,11 +1153,25 @@ def generate_poster_bubble_copy(
     poster_image_path: Path,
     *,
     dish_name: str = "",
+    current_bubble_file: Path | str | None = None,
 ) -> dict[str, str]:
     model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
     temperature = get_text_temperature()
     if not poster_image_path.exists():
         raise FileNotFoundError(f"海报图不存在：{poster_image_path}")
+
+    exclude_normalized: set[str] = set()
+    if current_bubble_file:
+        bubble_path = Path(current_bubble_file)
+        if bubble_path.exists():
+            try:
+                existing = normalize_bubble_copy_text(bubble_path.read_text(encoding="utf-8"))
+                if existing:
+                    exclude_normalized.add(existing)
+            except OSError:
+                pass
+
+    history_texts = sync_bubble_copy_history_file(exclude_normalized=exclude_normalized)
 
     max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
     last_error = ""
@@ -1081,7 +1179,14 @@ def generate_poster_bubble_copy(
     for attempt in range(1, max_retry + 1):
         retry_feedback = last_error if attempt > 1 else ""
         user_content: list[dict[str, Any]] = [
-            {"type": "text", "text": build_bubble_copy_prompt(dish_name=dish_name, retry_feedback=retry_feedback)},
+            {
+                "type": "text",
+                "text": build_bubble_copy_prompt(
+                    dish_name=dish_name,
+                    retry_feedback=retry_feedback,
+                    history_texts=history_texts,
+                ),
+            },
             {"type": "image_url", "image_url": {"url": encode_image_as_data_url(poster_image_path)}},
         ]
         if CHARACTER_REFERENCE_FILE.exists():
@@ -1106,6 +1211,9 @@ def generate_poster_bubble_copy(
             continue
         try:
             content = validate_bubble_copy_text(raw_content)
+            if is_bubble_copy_in_history(content, history_texts):
+                last_error = f"与历史气泡文案重复：{content}"
+                continue
             return {"model": last_model, "content": content}
         except ValueError as exc:
             last_error = str(exc)
