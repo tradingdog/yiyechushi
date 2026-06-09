@@ -20,6 +20,12 @@ ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from custom_image_service import (
+    custom_image_status_snapshot,
+    handle_custom_image_generate,
+    init_custom_image_service,
+    is_custom_image_path,
+)
 from mode2_flow import run_supplement_for_output_dir, run_v2_mode2
 from idea_batch import run_idea_batch, DISH_POOL_DIR
 from v2_core import (
@@ -49,7 +55,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v0.96"
+PANEL_VERSION = "v0.97"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 VALID_HISTORY_SORTS = {"favorite", "created_desc", "created_asc", "name", "image_first"}
@@ -57,6 +63,7 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 SILENT_HTTP_LOG_PATHS = {
     "/api/run_status",
     "/api/publish_status",
+    "/api/custom_image/status",
     "/api/file",
 }
 REPO_ROOT = ROOT_DIR.parent
@@ -396,13 +403,14 @@ HTML_PAGE = """<!doctype html>
       --shadow:0 10px 28px rgba(0,0,0,.35);
       --col-left:320px;
       --col-mid:430px;
-      --col-publish:220px;
+      --col-publish:200px;
+      --col-custom:300px;
       --splitter:8px;
     }
     *{box-sizing:border-box}
     .hidden{display:none!important}
     body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:radial-gradient(1200px 600px at 10% -10%, #1b2438 0%, transparent 60%),var(--bg);color:var(--text)}
-    .wrap{max-width:1600px;margin:0 auto;padding:14px 16px 84px}
+    .wrap{max-width:100%;margin:0 auto;padding:14px 16px 84px}
     .top{
       position:sticky;top:10px;z-index:30;display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;
       background:rgba(16,24,39,.92);border:1px solid var(--line);border-radius:12px;padding:10px 12px;box-shadow:var(--shadow);backdrop-filter:blur(4px);
@@ -426,7 +434,7 @@ HTML_PAGE = """<!doctype html>
     .top-actions .danger-btn{border-color:#7f1d1d;color:#fecaca;background:#2b1313}
     .four-col{
       display:grid;
-      grid-template-columns:var(--col-left) var(--splitter) var(--col-mid) var(--splitter) minmax(420px, 1fr) var(--col-publish);
+      grid-template-columns:var(--col-left) var(--splitter) var(--col-mid) var(--splitter) minmax(300px,1fr) var(--col-publish) var(--col-custom);
       gap:0;
       align-items:start;
       min-height:calc(100vh - 120px);
@@ -439,7 +447,29 @@ HTML_PAGE = """<!doctype html>
     .panel-left{margin-right:6px}
     .panel-mid{margin:0 6px}
     .panel-right{margin:0 6px}
-    .panel-publish{margin-left:6px;display:flex;flex-direction:column;gap:10px}
+    .panel-publish{margin-left:6px;display:flex;flex-direction:column;gap:10px;min-width:0}
+    .panel-custom{margin-left:6px;display:flex;flex-direction:column;gap:10px;min-width:0}
+    .custom-compose{display:flex;flex-direction:column;gap:8px}
+    .custom-prompt{width:100%;min-height:96px;max-height:180px;resize:vertical;padding:10px;border:1px solid #334155;border-radius:10px;background:#0b1220;color:#e2e8f0;font-size:13px;line-height:1.5}
+    .custom-refs{display:flex;flex-wrap:wrap;gap:6px;min-height:24px}
+    .custom-ref-chip{position:relative;width:52px;height:52px;border-radius:8px;overflow:hidden;border:1px solid #334155;background:#0b1220;flex:0 0 auto}
+    .custom-ref-chip img{width:100%;height:100%;object-fit:cover;display:block}
+    .custom-ref-chip button{position:absolute;top:2px;right:2px;width:16px;height:16px;border:none;border-radius:999px;background:rgba(0,0,0,.7);color:#fff;font-size:11px;line-height:16px;padding:0;cursor:pointer}
+    .custom-toolbar{display:flex;align-items:center;gap:8px}
+    .custom-add-btn{width:36px;height:36px;border-radius:10px;border:1px solid #475569;background:#111827;color:#e2e8f0;font-size:22px;line-height:1;cursor:pointer;flex:0 0 auto}
+    .custom-count{width:72px;padding:8px;border:1px solid #334155;border-radius:8px;background:#0b1220;color:#e2e8f0}
+    .custom-generate-btn{padding:10px 14px;border:1px solid #4b5563;border-radius:10px;background:linear-gradient(180deg,#1d4ed8,#1e3a8a);color:#eff6ff;font-weight:700;cursor:pointer;white-space:nowrap}
+    .custom-generate-btn[disabled]{opacity:.6;cursor:not-allowed}
+    .custom-status{min-height:36px;font-size:12px;color:var(--sub);white-space:pre-wrap;line-height:1.45}
+    .custom-history{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;max-height:calc(100vh - 360px);overflow:auto;padding-right:2px}
+    .custom-tile{position:relative;aspect-ratio:1/1;border-radius:10px;border:1px solid #334155;background:#0b1220;overflow:hidden;cursor:pointer}
+    .custom-tile img{width:100%;height:100%;object-fit:cover;display:block}
+    .custom-tile.pending{display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:12px;text-align:center;padding:8px;background:linear-gradient(135deg,#0f172a,#1e293b)}
+    .custom-preview-modal{position:fixed;inset:0;background:rgba(2,6,23,.78);display:flex;align-items:center;justify-content:center;z-index:90;padding:24px}
+    .custom-preview-modal.hidden{display:none!important}
+    .custom-preview-box{position:relative;max-width:min(92vw,980px);max-height:92vh}
+    .custom-preview-box img{max-width:100%;max-height:92vh;border-radius:12px;box-shadow:var(--shadow);display:block;cursor:zoom-out}
+    .custom-preview-close{position:absolute;top:-10px;right:-10px;width:34px;height:34px;border-radius:999px;border:1px solid #475569;background:#111827;color:#f8fafc;font-size:18px;cursor:pointer}
     .publish-platform-list{display:flex;flex-direction:column;gap:8px;flex:1}
     .publish-platform-item{display:flex;align-items:center;gap:8px;font-size:13px;color:#dbe7ff;border:1px solid #2f3b55;border-radius:8px;padding:8px 10px;background:#0f172a;cursor:pointer}
     .publish-platform-item input{width:auto;margin:0;accent-color:#22c55e}
@@ -665,12 +695,12 @@ HTML_PAGE = """<!doctype html>
       height:calc(100% - 44px);margin:0;padding:10px;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.45;
       white-space:pre-wrap;word-break:break-word;color:#d1d9e9;
     }
-    @media(max-width:1500px){.four-col{grid-template-columns:300px var(--splitter) 400px var(--splitter) minmax(380px,1fr) 200px}}
+    @media(max-width:1700px){.four-col{grid-template-columns:280px var(--splitter) 380px var(--splitter) minmax(280px,1fr) 180px 260px}}
     @media(max-width:1200px){
       .four-col{grid-template-columns:1fr}
       .splitter{display:none}
       .panel{height:auto}
-      .panel-left,.panel-mid,.panel-right,.panel-publish{margin:0 0 10px}
+      .panel-left,.panel-mid,.panel-right,.panel-publish,.panel-custom{margin:0 0 10px}
       .history-grid{max-height:none}
     }
     @media(max-width:860px){
@@ -686,7 +716,7 @@ HTML_PAGE = """<!doctype html>
     <div class="top">
       <div>
         <div class="title">V2 自动造菜控制台</div>
-        <div class="sub">四栏布局：菜品池、造菜控制、看图/文字、发布平台；左侧宽度可拖拽并自动记忆。</div>
+        <div class="sub">五栏布局：菜品池、造菜控制、看图/文字、发布平台、自定义生图；左侧宽度可拖拽并自动记忆。</div>
       </div>
       <div class="chips">
         <span class="version-tag">版本：__PANEL_VERSION__</span>
@@ -914,6 +944,35 @@ HTML_PAGE = """<!doctype html>
         <div id="publishStatus" class="publish-status">选中左侧菜品后，勾选平台并点击发布。</div>
         <button id="publishBtn" class="btn-publish" type="button">发布</button>
       </aside>
+
+      <aside class="panel panel-custom">
+        <h3 class="panel-title">自定义生图</h3>
+        <div class="custom-compose">
+          <textarea id="customPrompt" class="custom-prompt" placeholder="输入生图提示词…"></textarea>
+          <div id="customRefs" class="custom-refs"></div>
+          <div class="custom-toolbar">
+            <button id="customAddBtn" class="custom-add-btn" type="button" title="上传参考图">+</button>
+            <input id="customFileInput" type="file" accept="image/*" multiple class="hidden" />
+            <select id="customCount" class="custom-count" title="生成数量">
+              <option value="1">1 张</option>
+              <option value="2" selected>2 张</option>
+              <option value="3">3 张</option>
+              <option value="4">4 张</option>
+            </select>
+            <button id="customGenerateBtn" class="custom-generate-btn" type="button">生成</button>
+          </div>
+          <div id="customStatus" class="custom-status">丝路 API 生图，图片保存在 V2/custom_image_gen/images/</div>
+        </div>
+        <h4 class="sec-title" style="margin:6px 0 8px">历史记录</h4>
+        <div id="customHistory" class="custom-history"></div>
+      </aside>
+    </div>
+  </div>
+
+  <div id="customPreviewModal" class="custom-preview-modal hidden">
+    <div class="custom-preview-box">
+      <button id="customPreviewClose" class="custom-preview-close" type="button" aria-label="关闭">×</button>
+      <img id="customPreviewImg" alt="预览图" />
     </div>
   </div>
 
@@ -983,7 +1042,10 @@ HTML_PAGE = """<!doctype html>
       publishPolling: false,
       batchDeleteMode: false,
       batchDeleteSelected: new Set(),
-      selectedHistoryItem: null
+      selectedHistoryItem: null,
+      customRefs: [],
+      customPolling: false,
+      customTilesSnapshot: ""
     };
     const $ = (id) => document.getElementById(id);
     const QUALITY_INDEX = { low: 0, medium: 1, high: 2, auto: 3 };
@@ -2235,12 +2297,157 @@ HTML_PAGE = """<!doctype html>
       state.pollTimer = null;
     }
 
+    function setCustomStatus(text, level=""){
+      const box = $("customStatus");
+      if(!box){ return; }
+      box.textContent = text;
+      box.style.color = level === "warn" ? "#fbbf24" : (level === "ok" ? "#86efac" : "");
+    }
+
+    function renderCustomRefs(){
+      const box = $("customRefs");
+      if(!box){ return; }
+      box.innerHTML = "";
+      state.customRefs.forEach((item) => {
+        const chip = document.createElement("div");
+        chip.className = "custom-ref-chip";
+        chip.title = item.name || "参考图";
+        const img = document.createElement("img");
+        img.src = item.previewUrl;
+        img.alt = item.name || "参考图";
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = "×";
+        btn.onclick = (event) => {
+          event.stopPropagation();
+          URL.revokeObjectURL(item.previewUrl);
+          state.customRefs = state.customRefs.filter((ref) => ref.id !== item.id);
+          renderCustomRefs();
+        };
+        chip.appendChild(img);
+        chip.appendChild(btn);
+        box.appendChild(chip);
+      });
+    }
+
+    function addCustomRefFiles(fileList){
+      const files = Array.from(fileList || []).filter((file) => file && file.type.startsWith("image/"));
+      if(!files.length){ return; }
+      files.forEach((file) => {
+        state.customRefs.push({
+          id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
+          file,
+          name: file.name,
+          previewUrl: URL.createObjectURL(file),
+        });
+      });
+      renderCustomRefs();
+    }
+
+    function renderCustomHistory(tiles){
+      const box = $("customHistory");
+      if(!box){ return; }
+      box.innerHTML = "";
+      if(!tiles.length){
+        const empty = document.createElement("div");
+        empty.className = "custom-status";
+        empty.textContent = "暂无历史图片，输入提示词后点击生成。";
+        box.appendChild(empty);
+        return;
+      }
+      tiles.forEach((tile) => {
+        const item = document.createElement("div");
+        item.className = "custom-tile" + (tile.status === "done" ? "" : " pending");
+        if(tile.status === "done" && tile.path){
+          const img = document.createElement("img");
+          img.src = fileUrl(tile.path);
+          img.alt = tile.prompt || "自定义生图";
+          img.loading = "lazy";
+          item.appendChild(img);
+          item.ondblclick = () => openCustomPreview(tile.path);
+        }else{
+          item.textContent = "正在生成";
+        }
+        box.appendChild(item);
+      });
+    }
+
+    function openCustomPreview(path){
+      if(!path){ return; }
+      $("customPreviewImg").src = fileUrl(path);
+      $("customPreviewModal").classList.remove("hidden");
+    }
+
+    function closeCustomPreview(){
+      $("customPreviewModal").classList.add("hidden");
+      $("customPreviewImg").src = "";
+    }
+
+    async function fetchCustomImageStatus(options = {}){
+      const silent = Boolean(options?.silent);
+      try{
+        const res = await fetch("/api/custom_image/status");
+        const data = await res.json();
+        if(!res.ok){ throw new Error(data.error || "读取自定义生图状态失败"); }
+        const snapshot = JSON.stringify(data.tiles || []);
+        if(snapshot !== state.customTilesSnapshot){
+          state.customTilesSnapshot = snapshot;
+          renderCustomHistory(data.tiles || []);
+        }
+        const btn = $("customGenerateBtn");
+        if(btn){
+          btn.disabled = Boolean(data.running);
+          btn.textContent = data.running ? "生成中…" : "生成";
+        }
+        if(data.running){
+          state.customPolling = true;
+          if(!silent){ setCustomStatus("自定义生图进行中…"); }
+        }else if(state.customPolling){
+          state.customPolling = false;
+          if(data.error){
+            setCustomStatus("生图失败：" + data.error, "warn");
+          }else{
+            setCustomStatus("生图完成。图片保存在 V2/custom_image_gen/images/", "ok");
+          }
+        }
+      }catch(err){
+        if(!silent){ setCustomStatus("读取状态失败：" + err.message, "warn"); }
+      }
+    }
+
+    async function startCustomGenerate(){
+      const prompt = ($("customPrompt")?.value || "").trim();
+      if(!prompt){
+        setCustomStatus("请先输入生图提示词。", "warn");
+        return;
+      }
+      const count = Number($("customCount")?.value || "1");
+      const fd = new FormData();
+      fd.append("prompt", prompt);
+      fd.append("count", String(count));
+      state.customRefs.forEach((ref, index) => {
+        fd.append(`ref_${index}`, ref.file, ref.name || `ref_${index}.png`);
+      });
+      setCustomStatus("正在提交自定义生图任务…");
+      try{
+        const res = await fetch("/api/custom_image/generate", {method:"POST", body: fd});
+        const data = await res.json();
+        if(!res.ok){ throw new Error(data.error || "启动失败"); }
+        state.customPolling = true;
+        appendLogs([`[${new Date().toLocaleTimeString()}] 自定义生图已启动：${count} 张`]);
+        await fetchCustomImageStatus();
+      }catch(err){
+        setCustomStatus("启动失败：" + err.message, "warn");
+      }
+    }
+
     function startAutoRefresh(){
       if(state.autoRefreshTimer){ return; }
       state.autoRefreshTimer = setInterval(() => {
         if(document.hidden){ return; }
         fetchRunStatus({silent: true});
         fetchPublishStatus({silent: true});
+        fetchCustomImageStatus({silent: true});
       }, 2000);
     }
 
@@ -2576,6 +2783,19 @@ HTML_PAGE = """<!doctype html>
         state.logOnlyErrors = !state.logOnlyErrors;
         $("logFilterBtn").textContent = `只看错误：${state.logOnlyErrors ? "开" : "关"}`;
       };
+      $("customAddBtn")?.addEventListener("click", () => $("customFileInput")?.click());
+      $("customFileInput")?.addEventListener("change", (event) => {
+        const input = event.target;
+        if(input?.files?.length){ addCustomRefFiles(input.files); }
+        input.value = "";
+      });
+      $("customGenerateBtn")?.addEventListener("click", () => startCustomGenerate());
+      $("customPreviewClose")?.addEventListener("click", () => closeCustomPreview());
+      $("customPreviewModal")?.addEventListener("click", (event) => {
+        if(event.target === $("customPreviewModal") || event.target === $("customPreviewImg")){
+          closeCustomPreview();
+        }
+      });
     }
 
     bindEvents();
@@ -2586,6 +2806,7 @@ HTML_PAGE = """<!doctype html>
     加载三栏宽度();
     初始化拖拽分栏();
     loadState();
+    fetchCustomImageStatus({silent: true});
     startAutoRefresh();
     document.addEventListener("visibilitychange", () => {
       if(!document.hidden){
@@ -3303,7 +3524,9 @@ def apply_runtime_overrides(payload: dict[str, Any]) -> None:
 
 
 def _allowed_output_roots() -> list[Path]:
-    return [OUTPUT_DIR.resolve(), DISH_POOL_DIR.resolve()]
+    from custom_image_service import CUSTOM_IMAGE_DIR
+
+    return [OUTPUT_DIR.resolve(), DISH_POOL_DIR.resolve(), CUSTOM_IMAGE_DIR.resolve()]
 
 
 def _is_under_allowed_roots(target: Path) -> bool:
@@ -3327,8 +3550,8 @@ def resolve_output_file(raw_path: str) -> Path:
     if not raw_path.strip():
         raise ValueError("文件路径不能为空。")
     target = Path(raw_path).resolve()
-    if not _is_under_allowed_roots(target):
-        raise ValueError("只允许访问 V2/output 或 V2/dish_pool 下的文件。")
+    if not _is_under_allowed_roots(target) and not is_custom_image_path(target):
+        raise ValueError("只允许访问 V2/output、V2/dish_pool 或 V2/custom_image_gen 下的文件。")
     if not target.is_file():
         raise FileNotFoundError(f"文件不存在：{target}")
     return target
@@ -3592,6 +3815,9 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 log_from = 0
             self._send_json(publish_status_snapshot(log_from=log_from))
             return
+        if parsed.path == "/api/custom_image/status":
+            self._send_json(custom_image_status_snapshot())
+            return
         if parsed.path == "/api/dish_detail":
             query = parse_qs(parsed.query)
             raw_path = (query.get("path", [""])[0] or "").strip()
@@ -3631,6 +3857,16 @@ class V2PanelHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         global RUNNING, LAST_RESULT, LAST_ERROR, LAST_STARTED_AT, LAST_FINISHED_AT, TASK_SEQ
         parsed = urlparse(self.path)
+        if parsed.path == "/api/custom_image/generate":
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            content_type = self.headers.get("Content-Type", "")
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                self._send_json(handle_custom_image_generate(body, content_type))
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
+            return
+
         if parsed.path not in {
             "/api/run_start",
             "/api/open_output",
@@ -3802,6 +4038,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     ensure_runtime_config_loaded()
+    init_custom_image_service()
     server = ThreadingHTTPServer((HOST, PORT), V2PanelHandler)
     print(f"V2 前端面板已启动：http://{HOST}:{PORT}")
     print("按 Ctrl+C 停止服务。")
