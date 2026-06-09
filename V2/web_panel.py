@@ -55,7 +55,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v0.97"
+PANEL_VERSION = "v0.98"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 VALID_HISTORY_SORTS = {"favorite", "created_desc", "created_asc", "name", "image_first"}
@@ -401,7 +401,7 @@ HTML_PAGE = """<!doctype html>
       --bg:#0d1117; --panel:#121a27; --panel-soft:#1a2435; --line:#2d3a52; --text:#e6edf7; --sub:#9aa7bd;
       --pri:#020617; --ok:#22c55e; --warn:#f59e0b; --danger:#ef4444;
       --shadow:0 10px 28px rgba(0,0,0,.35);
-      --col-left:320px;
+      --col-left:400px;
       --col-mid:430px;
       --col-publish:200px;
       --col-custom:300px;
@@ -590,7 +590,22 @@ HTML_PAGE = """<!doctype html>
     }
     .history-head-actions .danger-btn{border-color:#7f1d1d;color:#fecaca;background:#2b1313}
     .history-head-actions .hidden{display:none}
-    .history-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:8px;align-content:start}
+    .history-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;align-content:start}
+    .history-grid.cols-1{grid-template-columns:1fr}
+    .history-grid.cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .history-grid.cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .history-grid.cols-auto{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
+    .history-grid.pool-compact .history-item{
+      grid-template-columns:1fr;grid-template-areas:"cover" "meta" "ops";padding:6px;gap:4px;
+    }
+    .history-grid.pool-compact .history-cover{width:100%;height:68px;border-radius:8px}
+    .history-grid.pool-compact .history-meta{text-align:left}
+    .history-grid.pool-compact .history-name{font-size:11px;-webkit-line-clamp:2}
+    .history-grid.pool-compact .history-time{font-size:11px;margin-top:2px}
+    .history-grid.pool-compact .history-ops{justify-content:stretch;gap:4px;padding-top:4px}
+    .history-grid.pool-compact .history-ops button{flex:1;padding:4px 2px;font-size:10px}
+    .history-grid.pool-compact .history-check{position:absolute;top:4px;left:4px;z-index:3;background:rgba(15,23,42,.82);border-radius:4px;padding:2px}
+    .history-grid.pool-compact.batch-mode .history-check{display:flex}
     .history-empty{color:var(--sub);font-size:12px;grid-column:1/-1}
     .history-item{
       position:relative;border:1px solid #2f3b55;border-radius:10px;background:#0f172a;overflow:hidden;cursor:pointer;
@@ -745,6 +760,12 @@ HTML_PAGE = """<!doctype html>
         <div class="history-head">
           <h3 class="panel-title">菜品池</h3>
           <div class="history-head-actions">
+            <select id="historyColsSelect" class="history-sort" title="菜品池列数">
+              <option value="2">双列</option>
+              <option value="3">三列</option>
+              <option value="auto">自动</option>
+              <option value="1">单列</option>
+            </select>
             <select id="historySortSelect" class="history-sort" title="菜品池排序">
               <option value="favorite">收藏优先</option>
               <option value="image_first">已生图优先</option>
@@ -1024,8 +1045,9 @@ HTML_PAGE = """<!doctype html>
       taskQueueSnapshot: {running: null, queued: []},
       taskQueueExpanded: false,
       publishSnapshot: {running: false, platform: "", output_dir: ""},
-      colLeft: 320,
+      colLeft: 400,
       colMid: 430,
+      historyPoolCols: "2",
       activeRightTab: "image",
       selectedHistoryPath: "",
       galleryFilter: "all",
@@ -1052,6 +1074,29 @@ HTML_PAGE = """<!doctype html>
     const INDEX_QUALITY = ["low", "medium", "high", "auto"];
     const LAYOUT_STORAGE_KEY = "v2_panel_layout_v1";
     const HISTORY_SORT_STORAGE_KEY = "v2_history_sort_v1";
+    const HISTORY_COLS_STORAGE_KEY = "v2_history_pool_cols_v1";
+
+    function 应用菜品池列数(mode){
+      const grid = $("history");
+      if(!grid){ return; }
+      const cols = String(mode || "2");
+      state.historyPoolCols = cols;
+      grid.classList.remove("cols-1", "cols-2", "cols-3", "cols-auto", "pool-compact");
+      if(cols === "1"){
+        grid.classList.add("cols-1");
+      }else{
+        grid.classList.add("pool-compact", `cols-${cols}`);
+      }
+      const minLeftByCols = { "1": 300, "2": 380, "3": 540, "auto": 360 };
+      const needLeft = minLeftByCols[cols] || 380;
+      if(state.colLeft < needLeft){
+        应用三栏宽度(needLeft, state.colMid);
+        保存三栏宽度();
+      }
+      try{
+        localStorage.setItem(HISTORY_COLS_STORAGE_KEY, cols);
+      }catch{}
+    }
 
     function 画质文案(value){
       if(value === "low"){ return "标准清晰"; }
@@ -1377,7 +1422,18 @@ HTML_PAGE = """<!doctype html>
           return;
         }
       }catch{}
-      应用三栏宽度(320, 430);
+      应用三栏宽度(400, 430);
+    }
+
+    function 加载菜品池列数(){
+      try{
+        const saved = localStorage.getItem(HISTORY_COLS_STORAGE_KEY);
+        if(saved && ["1","2","3","auto"].includes(saved)){
+          state.historyPoolCols = saved;
+        }
+      }catch{}
+      if($("historyColsSelect")){ $("historyColsSelect").value = state.historyPoolCols || "2"; }
+      应用菜品池列数(state.historyPoolCols || "2");
     }
 
     function getSelectedPublishPlatforms(){
@@ -2715,6 +2771,9 @@ HTML_PAGE = """<!doctype html>
       $("modeIdeaBtn").onclick = () => setMode("idea");
       $("ideaDishName").oninput = syncIdeaCountUi;
       $("batchDeleteBtn").onclick = () => setBatchDeleteMode(!state.batchDeleteMode);
+      $("historyColsSelect")?.addEventListener("change", () => {
+        应用菜品池列数($("historyColsSelect").value || "2");
+      });
       $("historySortSelect").value = state.historySort || "favorite";
       $("historySortSelect").onchange = async () => {
         state.historySort = $("historySortSelect").value || "favorite";
@@ -2804,6 +2863,7 @@ HTML_PAGE = """<!doctype html>
     state.historySort = localStorage.getItem(HISTORY_SORT_STORAGE_KEY) || "favorite";
     if($("historySortSelect")){ $("historySortSelect").value = state.historySort; }
     加载三栏宽度();
+    加载菜品池列数();
     初始化拖拽分栏();
     loadState();
     fetchCustomImageStatus({silent: true});
