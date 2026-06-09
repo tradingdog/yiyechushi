@@ -55,7 +55,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v0.98"
+PANEL_VERSION = "v0.99"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 VALID_HISTORY_SORTS = {"favorite", "created_desc", "created_asc", "name", "image_first"}
@@ -393,7 +393,7 @@ HTML_PAGE = """<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>V2 自动造菜控制台</title>
+  <title>造菜控制台</title>
   <link rel="icon" type="image/png" href="/favicon.png" />
   <link rel="shortcut icon" type="image/png" href="/favicon.ico" />
   <style>
@@ -401,22 +401,22 @@ HTML_PAGE = """<!doctype html>
       --bg:#0d1117; --panel:#121a27; --panel-soft:#1a2435; --line:#2d3a52; --text:#e6edf7; --sub:#9aa7bd;
       --pri:#020617; --ok:#22c55e; --warn:#f59e0b; --danger:#ef4444;
       --shadow:0 10px 28px rgba(0,0,0,.35);
-      --col-left:400px;
-      --col-mid:430px;
-      --col-publish:200px;
-      --col-custom:300px;
+      --col-left:540px;
+      --col-mid:400px;
+      --col-publish:118px;
+      --col-custom:228px;
       --splitter:8px;
     }
     *{box-sizing:border-box}
     .hidden{display:none!important}
     body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:radial-gradient(1200px 600px at 10% -10%, #1b2438 0%, transparent 60%),var(--bg);color:var(--text)}
-    .wrap{max-width:100%;margin:0 auto;padding:14px 16px 84px}
+    .wrap{max-width:100%;margin:0 auto;padding:8px 12px 84px}
     .top{
-      position:sticky;top:10px;z-index:30;display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;
-      background:rgba(16,24,39,.92);border:1px solid var(--line);border-radius:12px;padding:10px 12px;box-shadow:var(--shadow);backdrop-filter:blur(4px);
+      position:sticky;top:8px;z-index:30;display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;
+      background:rgba(16,24,39,.92);border:1px solid var(--line);border-radius:12px;padding:8px 12px;box-shadow:var(--shadow);backdrop-filter:blur(4px);
     }
-    .title{font-size:22px;font-weight:700}
-    .sub{font-size:12px;color:var(--sub)}
+    .top-brand{display:flex;align-items:center;gap:10px;min-width:0}
+    .title{font-size:20px;font-weight:700;line-height:1.2}
     .chips{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     .chip{font-size:12px;background:#0b1220;border:1px solid #334155;padding:6px 10px;border-radius:999px;color:#dbe7ff}
     .version-tag{font-size:12px;color:#e2e8f0;background:#1e293b;border:1px solid #475569;border-radius:999px;padding:4px 10px}
@@ -434,7 +434,7 @@ HTML_PAGE = """<!doctype html>
     .top-actions .danger-btn{border-color:#7f1d1d;color:#fecaca;background:#2b1313}
     .four-col{
       display:grid;
-      grid-template-columns:var(--col-left) var(--splitter) var(--col-mid) var(--splitter) minmax(300px,1fr) var(--col-publish) var(--col-custom);
+      grid-template-columns:var(--col-left) var(--splitter) minmax(280px,1fr) var(--splitter) var(--col-mid) var(--col-publish) var(--col-custom);
       gap:0;
       align-items:start;
       min-height:calc(100vh - 120px);
@@ -442,26 +442,27 @@ HTML_PAGE = """<!doctype html>
     .panel{
       min-width:0;
       background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;box-shadow:var(--shadow);
-      height:calc(100vh - 112px);overflow:auto;
+      height:calc(100vh - 88px);overflow:auto;
     }
     .panel-left{margin-right:6px}
     .panel-mid{margin:0 6px}
     .panel-right{margin:0 6px}
-    .panel-publish{margin-left:6px;display:flex;flex-direction:column;gap:10px;min-width:0}
-    .panel-custom{margin-left:6px;display:flex;flex-direction:column;gap:10px;min-width:0}
+    .panel-publish{margin-left:4px;display:flex;flex-direction:column;gap:6px;min-width:0;padding:8px}
+    .panel-custom{margin-left:4px;display:flex;flex-direction:column;gap:6px;min-width:0;padding:8px}
+    .panel-publish .panel-title,.panel-custom .panel-title{font-size:14px;margin-bottom:4px}
     .custom-compose{display:flex;flex-direction:column;gap:8px}
-    .custom-prompt{width:100%;min-height:96px;max-height:180px;resize:vertical;padding:10px;border:1px solid #334155;border-radius:10px;background:#0b1220;color:#e2e8f0;font-size:13px;line-height:1.5}
+    .custom-prompt{width:100%;min-height:72px;max-height:140px;resize:vertical;padding:8px;border:1px solid #334155;border-radius:10px;background:#0b1220;color:#e2e8f0;font-size:12px;line-height:1.45}
     .custom-refs{display:flex;flex-wrap:wrap;gap:6px;min-height:24px}
     .custom-ref-chip{position:relative;width:52px;height:52px;border-radius:8px;overflow:hidden;border:1px solid #334155;background:#0b1220;flex:0 0 auto}
     .custom-ref-chip img{width:100%;height:100%;object-fit:cover;display:block}
     .custom-ref-chip button{position:absolute;top:2px;right:2px;width:16px;height:16px;border:none;border-radius:999px;background:rgba(0,0,0,.7);color:#fff;font-size:11px;line-height:16px;padding:0;cursor:pointer}
     .custom-toolbar{display:flex;align-items:center;gap:8px}
     .custom-add-btn{width:36px;height:36px;border-radius:10px;border:1px solid #475569;background:#111827;color:#e2e8f0;font-size:22px;line-height:1;cursor:pointer;flex:0 0 auto}
-    .custom-count{width:72px;padding:8px;border:1px solid #334155;border-radius:8px;background:#0b1220;color:#e2e8f0}
-    .custom-generate-btn{padding:10px 14px;border:1px solid #4b5563;border-radius:10px;background:linear-gradient(180deg,#1d4ed8,#1e3a8a);color:#eff6ff;font-weight:700;cursor:pointer;white-space:nowrap}
+    .custom-count{width:58px;padding:6px;border:1px solid #334155;border-radius:8px;background:#0b1220;color:#e2e8f0;font-size:12px}
+    .custom-generate-btn{padding:8px 10px;border:1px solid #4b5563;border-radius:10px;background:linear-gradient(180deg,#1d4ed8,#1e3a8a);color:#eff6ff;font-weight:700;cursor:pointer;white-space:nowrap;font-size:12px}
     .custom-generate-btn[disabled]{opacity:.6;cursor:not-allowed}
-    .custom-status{min-height:36px;font-size:12px;color:var(--sub);white-space:pre-wrap;line-height:1.45}
-    .custom-history{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;max-height:calc(100vh - 360px);overflow:auto;padding-right:2px}
+    .custom-status{min-height:20px;font-size:11px;color:var(--sub);line-height:1.4}
+    .custom-history{display:grid;grid-template-columns:1fr;gap:6px;max-height:calc(100vh - 300px);overflow:auto;padding-right:2px}
     .custom-tile{position:relative;aspect-ratio:1/1;border-radius:10px;border:1px solid #334155;background:#0b1220;overflow:hidden;cursor:pointer}
     .custom-tile img{width:100%;height:100%;object-fit:cover;display:block}
     .custom-tile.pending{display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:12px;text-align:center;padding:8px;background:linear-gradient(135deg,#0f172a,#1e293b)}
@@ -470,11 +471,24 @@ HTML_PAGE = """<!doctype html>
     .custom-preview-box{position:relative;max-width:min(92vw,980px);max-height:92vh}
     .custom-preview-box img{max-width:100%;max-height:92vh;border-radius:12px;box-shadow:var(--shadow);display:block;cursor:zoom-out}
     .custom-preview-close{position:absolute;top:-10px;right:-10px;width:34px;height:34px;border-radius:999px;border:1px solid #475569;background:#111827;color:#f8fafc;font-size:18px;cursor:pointer}
-    .publish-platform-list{display:flex;flex-direction:column;gap:8px;flex:1}
-    .publish-platform-item{display:flex;align-items:center;gap:8px;font-size:13px;color:#dbe7ff;border:1px solid #2f3b55;border-radius:8px;padding:8px 10px;background:#0f172a;cursor:pointer}
-    .publish-platform-item input{width:auto;margin:0;accent-color:#22c55e}
-    .publish-status{min-height:72px;max-height:180px;overflow:auto;font-size:12px;color:var(--sub);white-space:pre-wrap;line-height:1.45;border:1px solid #2a364f;border-radius:8px;padding:8px;background:#0b1220}
-    .btn-publish{width:100%;padding:12px;border:1px solid #4b5563;border-radius:10px;background:linear-gradient(180deg,#14532d,#052e16);color:#dcfce7;font-size:15px;font-weight:700;cursor:pointer}
+    .publish-platform-list{display:flex;flex-direction:column;gap:5px;flex:1}
+    .publish-platform-item{display:flex;align-items:center;gap:6px;font-size:12px;color:#dbe7ff;border:1px solid #2f3b55;border-radius:8px;padding:6px 8px;background:#0f172a;cursor:pointer;white-space:nowrap}
+    .publish-platform-item input{width:auto;margin:0;accent-color:#22c55e;flex:0 0 auto}
+    .publish-status{min-height:48px;max-height:120px;overflow:auto;font-size:11px;color:var(--sub);white-space:pre-wrap;line-height:1.4;border:1px solid #2a364f;border-radius:8px;padding:6px;background:#0b1220}
+    .btn-publish{width:100%;padding:10px 6px;border:1px solid #4b5563;border-radius:10px;background:linear-gradient(180deg,#14532d,#052e16);color:#dcfce7;font-size:13px;font-weight:700;cursor:pointer}
+    .history-search{width:100%;margin:0 0 8px;padding:7px 10px;border:1px solid #334155;border-radius:8px;background:#0b1220;color:#e2e8f0;font-size:12px}
+    .gallery-lightbox{position:fixed;inset:0;z-index:88;background:rgba(2,6,23,.84);display:flex;align-items:center;justify-content:center;padding:24px}
+    .gallery-lightbox.hidden{display:none!important}
+    .gallery-lightbox-box{position:relative;max-width:min(94vw,1200px);max-height:92vh;display:flex;align-items:center;justify-content:center}
+    .gallery-lightbox-box img{max-width:100%;max-height:92vh;object-fit:contain;border-radius:12px;box-shadow:var(--shadow);cursor:zoom-out}
+    .gallery-lightbox-close{position:absolute;top:-12px;right:-12px;width:34px;height:34px;border-radius:999px;border:1px solid #475569;background:#111827;color:#f8fafc;font-size:18px;cursor:pointer;z-index:2}
+    .gallery-lightbox-nav{
+      position:fixed;top:50%;transform:translateY(-50%);width:42px;height:42px;border-radius:999px;border:1px solid #475569;
+      background:rgba(17,24,39,.92);color:#f8fafc;font-size:22px;cursor:pointer;z-index:89;
+    }
+    .gallery-lightbox-nav.prev{left:24px}
+    .gallery-lightbox-nav.next{right:24px}
+    .gallery-lightbox-counter{position:absolute;bottom:-28px;left:50%;transform:translateX(-50%);font-size:12px;color:#cbd5e1;white-space:nowrap}
     .btn-publish[disabled]{opacity:.6;cursor:not-allowed}
     .gallery-filter{width:auto;padding:7px 10px;border:1px solid #3a475f;border-radius:8px;background:#101a2a;color:#dbe7ff;cursor:pointer;font-size:12px}
     .modal{position:fixed;inset:0;background:rgba(2,6,23,.72);display:flex;align-items:center;justify-content:center;z-index:80;padding:16px}
@@ -710,7 +724,7 @@ HTML_PAGE = """<!doctype html>
       height:calc(100% - 44px);margin:0;padding:10px;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.45;
       white-space:pre-wrap;word-break:break-word;color:#d1d9e9;
     }
-    @media(max-width:1700px){.four-col{grid-template-columns:280px var(--splitter) 380px var(--splitter) minmax(280px,1fr) 180px 260px}}
+    @media(max-width:1700px){.four-col{grid-template-columns:300px var(--splitter) minmax(240px,1fr) var(--splitter) 360px 110px 220px}}
     @media(max-width:1200px){
       .four-col{grid-template-columns:1fr}
       .splitter{display:none}
@@ -729,12 +743,9 @@ HTML_PAGE = """<!doctype html>
 <body>
   <div class="wrap">
     <div class="top">
-      <div>
-        <div class="title">V2 自动造菜控制台</div>
-        <div class="sub">五栏布局：菜品池、造菜控制、看图/文字、发布平台、自定义生图；左侧宽度可拖拽并自动记忆。</div>
-      </div>
-      <div class="chips">
-        <span class="version-tag">版本：__PANEL_VERSION__</span>
+      <div class="top-brand">
+        <div class="title">造菜控制台</div>
+        <span class="version-tag">__PANEL_VERSION__</span>
       </div>
       <div class="top-actions">
         <button id="openOutputTopBtn" type="button">打开目录</button>
@@ -761,10 +772,10 @@ HTML_PAGE = """<!doctype html>
           <h3 class="panel-title">菜品池</h3>
           <div class="history-head-actions">
             <select id="historyColsSelect" class="history-sort" title="菜品池列数">
-              <option value="2">双列</option>
-              <option value="3">三列</option>
-              <option value="auto">自动</option>
               <option value="1">单列</option>
+              <option value="2">双列</option>
+              <option value="3" selected>三列</option>
+              <option value="auto">自动</option>
             </select>
             <select id="historySortSelect" class="history-sort" title="菜品池排序">
               <option value="favorite">收藏优先</option>
@@ -777,6 +788,7 @@ HTML_PAGE = """<!doctype html>
             <button id="batchDeleteAllBtn" type="button" class="danger-btn hidden">全部移出</button>
           </div>
         </div>
+        <input id="historySearch" class="history-search" type="search" placeholder="搜索菜名…" autocomplete="off" />
         <div id="history" class="history-grid"></div>
         <div id="historyLoadMore" class="load-more">
           <button id="loadMoreBtn" type="button">载入更多</button>
@@ -784,6 +796,67 @@ HTML_PAGE = """<!doctype html>
       </section>
 
       <div id="splitterLeft" class="splitter" title="拖拽调整宽度"></div>
+
+      <section class="panel panel-right">
+        <div class="result-card">
+          <div class="right-tabs">
+            <button id="imageTabBtn" class="view-tab active" type="button">看图栏</button>
+            <button id="textTabBtn" class="view-tab" type="button">文字栏</button>
+          </div>
+          <div id="imagePane" class="content-pane">
+            <div class="view-context-bar">
+              <span>正在查看：<strong id="viewingDishLabel">未选择</strong></span>
+              <span id="runningContextLabel" class="running-context">后台：空闲</span>
+            </div>
+            <div class="gallery-strip">
+              <div class="gallery-tools">
+                <div class="gallery-actions">
+                  <button id="prevImgBtn" type="button">上一张</button>
+                  <button id="nextImgBtn" type="button">下一张</button>
+                  <button id="filterPublishBtn" class="gallery-filter" type="button">发布图</button>
+                  <button id="filterAllBtn" class="gallery-filter active" type="button">非发布图</button>
+                </div>
+                <div id="galleryIndex" class="gallery-index">0 / 0</div>
+              </div>
+              <div id="thumbs" class="thumbs"></div>
+            </div>
+            <div class="result-stage">
+              <div id="runSkeleton" class="skeleton" style="display:none"></div>
+              <div id="runBadge" class="run-badge">处理中 0%</div>
+              <img id="resultImg" class="gallery-main" alt="暂无图片" />
+              <div id="emptyImageState" class="empty-image-state">
+                <div class="empty-image-icon">图</div>
+                <div class="empty-image-title">暂未生成图片</div>
+                <div class="empty-image-sub">运行任务后在这里查看结果，双击可放大查看。</div>
+              </div>
+            </div>
+          </div>
+          <div id="textPane" class="content-pane hidden">
+            <div id="textPanel" class="text-panel">
+              <div class="text-empty">点击左侧某个菜品后，这里会显示它的造菜信息、平台文案、提示词和其他 txt 文案。</div>
+            </div>
+          </div>
+          <div class="result-overlay">
+            <div class="overlay-line"><div class="overlay-k">菜名</div><div id="rDish" class="overlay-v">暂无</div></div>
+            <div class="overlay-line"><div class="overlay-k">参考菜</div><div id="rRef" class="overlay-v">暂无</div></div>
+            <div class="overlay-line"><div class="overlay-k">菜系</div><div id="rRegion" class="overlay-v">暂无</div></div>
+            <div class="overlay-line"><div class="overlay-k">目录</div><div id="rOut" class="overlay-v mono">-</div></div>
+            <div class="overlay-line"><div class="overlay-k">流程</div><div id="rWorkflow" class="overlay-v">暂无</div></div>
+            <div class="overlay-line"><div class="overlay-k">主图首选</div><div id="rBestMain" class="overlay-v mono">暂无</div></div>
+            <div class="overlay-line"><div class="overlay-k">封面首选</div><div id="rBestCover" class="overlay-v mono">暂无</div></div>
+            <div class="overlay-line"><div class="overlay-k">选图方式</div><div id="rPickMode" class="overlay-v">暂无</div></div>
+            <div class="overlay-line"><div class="overlay-k">PS合成</div><div id="rPsStatus" class="overlay-v">暂无</div></div>
+          </div>
+          <div class="result-actions">
+            <button id="openOutputBtn" type="button">打开输出目录</button>
+            <button id="openPublishBtn" type="button">打开 publish</button>
+            <button id="copyOutputBtn" type="button">复制路径</button>
+          </div>
+          <div id="resultMsg" class="status"></div>
+        </div>
+      </section>
+
+      <div id="splitterRight" class="splitter" title="拖拽调整宽度"></div>
 
       <aside class="panel panel-mid">
         <div class="section-card">
@@ -851,33 +924,29 @@ HTML_PAGE = """<!doctype html>
             <div class="mode2-grid">
               <div class="mode2-item">
                 <h4>海报图</h4>
-                <label>数量</label><input id="posterCount" type="number" min="1" max="4" step="1" />
+                <label>数量</label><input id="posterCount" type="number" min="1" max="4" step="1" value="2" />
                 <label style="margin-top:6px">画质</label>
-                <select id="posterQuality"><option value="low">标准</option><option value="medium">中等</option><option value="high">高清</option><option value="auto">自动</option></select>
+                <select id="posterQuality"><option value="low">标准</option><option value="medium">中等</option><option value="high" selected>高清</option><option value="auto">自动</option></select>
               </div>
               <div class="mode2-item">
                 <h4>细节图</h4>
-                <label>数量</label><input id="detailCount" type="number" min="1" max="4" step="1" />
+                <label>数量</label><input id="detailCount" type="number" min="1" max="4" step="1" value="2" />
                 <label style="margin-top:6px">画质</label>
-                <select id="detailQuality"><option value="low">标准</option><option value="medium">中等</option><option value="high">高清</option><option value="auto">自动</option></select>
+                <select id="detailQuality"><option value="low">标准</option><option value="medium">中等</option><option value="high" selected>高清</option><option value="auto">自动</option></select>
               </div>
               <div class="mode2-item">
                 <h4>菜谱图</h4>
-                <label>数量</label><input id="recipeCount" type="number" min="1" max="4" step="1" />
+                <label>数量</label><input id="recipeCount" type="number" min="1" max="4" step="1" value="2" />
                 <label style="margin-top:6px">画质</label>
-                <select id="recipeQuality"><option value="low">标准</option><option value="medium">中等</option><option value="high">高清</option><option value="auto">自动</option></select>
+                <select id="recipeQuality"><option value="low">标准</option><option value="medium">中等</option><option value="high" selected>高清</option><option value="auto">自动</option></select>
               </div>
               <div class="mode2-item">
                 <h4>封面图</h4>
-                <label>数量</label><input id="coverMode2Count" type="number" min="1" max="4" step="1" />
+                <label>数量</label><input id="coverMode2Count" type="number" min="1" max="4" step="1" value="2" />
                 <label style="margin-top:6px">画质</label>
-                <select id="coverMode2Quality"><option value="low">标准</option><option value="medium">中等</option><option value="high">高清</option><option value="auto">自动</option></select>
+                <select id="coverMode2Quality"><option value="low">标准</option><option value="medium">中等</option><option value="high" selected>高清</option><option value="auto">自动</option></select>
               </div>
             </div>
-          </div>
-          <div class="preset-row" style="margin-top:8px">
-            <button id="presetBudgetBtn" type="button">省成本模板</button>
-            <button id="presetQualityBtn" type="button">高质量模板</button>
           </div>
         </div>
 
@@ -892,75 +961,14 @@ HTML_PAGE = """<!doctype html>
         </div>
       </aside>
 
-      <div id="splitterRight" class="splitter" title="拖拽调整宽度"></div>
-
-      <section class="panel panel-right">
-        <div class="result-card">
-          <div class="right-tabs">
-            <button id="imageTabBtn" class="view-tab active" type="button">看图栏</button>
-            <button id="textTabBtn" class="view-tab" type="button">文字栏</button>
-          </div>
-          <div id="imagePane" class="content-pane">
-            <div class="view-context-bar">
-              <span>正在查看：<strong id="viewingDishLabel">未选择</strong></span>
-              <span id="runningContextLabel" class="running-context">后台：空闲</span>
-            </div>
-            <div class="gallery-strip">
-              <div class="gallery-tools">
-                <div class="gallery-actions">
-                  <button id="prevImgBtn" type="button">上一张</button>
-                  <button id="nextImgBtn" type="button">下一张</button>
-                  <button id="filterPublishBtn" class="gallery-filter" type="button">发布图</button>
-                  <button id="filterAllBtn" class="gallery-filter active" type="button">非发布图</button>
-                </div>
-                <div id="galleryIndex" class="gallery-index">0 / 0</div>
-              </div>
-              <div id="thumbs" class="thumbs"></div>
-            </div>
-            <div class="result-stage">
-              <div id="runSkeleton" class="skeleton" style="display:none"></div>
-              <div id="runBadge" class="run-badge">处理中 0%</div>
-              <img id="resultImg" class="gallery-main" alt="暂无图片" />
-              <div id="emptyImageState" class="empty-image-state">
-                <div class="empty-image-icon">图</div>
-                <div class="empty-image-title">暂未生成图片</div>
-                <div class="empty-image-sub">运行任务后在这里查看结果，双击可新标签打开原图。</div>
-              </div>
-            </div>
-          </div>
-          <div id="textPane" class="content-pane hidden">
-            <div id="textPanel" class="text-panel">
-              <div class="text-empty">点击左侧某个菜品后，这里会显示它的造菜信息、平台文案、提示词和其他 txt 文案。</div>
-            </div>
-          </div>
-          <div class="result-overlay">
-            <div class="overlay-line"><div class="overlay-k">菜名</div><div id="rDish" class="overlay-v">暂无</div></div>
-            <div class="overlay-line"><div class="overlay-k">参考菜</div><div id="rRef" class="overlay-v">暂无</div></div>
-            <div class="overlay-line"><div class="overlay-k">菜系</div><div id="rRegion" class="overlay-v">暂无</div></div>
-            <div class="overlay-line"><div class="overlay-k">目录</div><div id="rOut" class="overlay-v mono">-</div></div>
-            <div class="overlay-line"><div class="overlay-k">流程</div><div id="rWorkflow" class="overlay-v">暂无</div></div>
-            <div class="overlay-line"><div class="overlay-k">主图首选</div><div id="rBestMain" class="overlay-v mono">暂无</div></div>
-            <div class="overlay-line"><div class="overlay-k">封面首选</div><div id="rBestCover" class="overlay-v mono">暂无</div></div>
-            <div class="overlay-line"><div class="overlay-k">选图方式</div><div id="rPickMode" class="overlay-v">暂无</div></div>
-            <div class="overlay-line"><div class="overlay-k">PS合成</div><div id="rPsStatus" class="overlay-v">暂无</div></div>
-          </div>
-          <div class="result-actions">
-            <button id="openOutputBtn" type="button">打开输出目录</button>
-            <button id="openPublishBtn" type="button">打开 publish</button>
-            <button id="copyOutputBtn" type="button">复制路径</button>
-          </div>
-          <div id="resultMsg" class="status"></div>
-        </div>
-      </section>
-
       <aside class="panel panel-publish">
         <h3 class="panel-title">发布平台</h3>
         <div id="publishPlatforms" class="publish-platform-list">
           <label class="publish-platform-item"><input type="checkbox" value="douyin" checked />抖音</label>
           <label class="publish-platform-item"><input type="checkbox" value="kuaishou" checked />快手</label>
           <label class="publish-platform-item"><input type="checkbox" value="xiaohongshu" checked />小红书</label>
-          <label class="publish-platform-item"><input type="checkbox" value="weixin_mp" checked />微信公众号</label>
-          <label class="publish-platform-item"><input type="checkbox" value="weixin_channels" checked />微信视频号</label>
+          <label class="publish-platform-item"><input type="checkbox" value="weixin_mp" checked />公众号</label>
+          <label class="publish-platform-item"><input type="checkbox" value="weixin_channels" checked />视频号</label>
         </div>
         <div id="publishStatus" class="publish-status">选中左侧菜品后，勾选平台并点击发布。</div>
         <button id="publishBtn" class="btn-publish" type="button">发布</button>
@@ -987,6 +995,16 @@ HTML_PAGE = """<!doctype html>
         <h4 class="sec-title" style="margin:6px 0 8px">历史记录</h4>
         <div id="customHistory" class="custom-history"></div>
       </aside>
+    </div>
+  </div>
+
+  <div id="galleryLightbox" class="gallery-lightbox hidden">
+    <div class="gallery-lightbox-box">
+      <button id="galleryLightboxClose" class="gallery-lightbox-close" type="button" aria-label="关闭">×</button>
+      <button id="galleryLightboxPrev" class="gallery-lightbox-nav prev" type="button" aria-label="上一张">‹</button>
+      <img id="galleryLightboxImg" alt="大图预览" />
+      <button id="galleryLightboxNext" class="gallery-lightbox-nav next" type="button" aria-label="下一张">›</button>
+      <div id="galleryLightboxCounter" class="gallery-lightbox-counter">1 / 1</div>
     </div>
   </div>
 
@@ -1045,9 +1063,12 @@ HTML_PAGE = """<!doctype html>
       taskQueueSnapshot: {running: null, queued: []},
       taskQueueExpanded: false,
       publishSnapshot: {running: false, platform: "", output_dir: ""},
-      colLeft: 400,
-      colMid: 430,
-      historyPoolCols: "2",
+      colLeft: 540,
+      colMid: 400,
+      historyPoolCols: "3",
+      historySearchQuery: "",
+      galleryLightboxOpen: false,
+      galleryLightboxIndex: 0,
       activeRightTab: "image",
       selectedHistoryPath: "",
       galleryFilter: "all",
@@ -1079,7 +1100,7 @@ HTML_PAGE = """<!doctype html>
     function 应用菜品池列数(mode){
       const grid = $("history");
       if(!grid){ return; }
-      const cols = String(mode || "2");
+      const cols = String(mode || "3");
       state.historyPoolCols = cols;
       grid.classList.remove("cols-1", "cols-2", "cols-3", "cols-auto", "pool-compact");
       if(cols === "1"){
@@ -1422,7 +1443,7 @@ HTML_PAGE = """<!doctype html>
           return;
         }
       }catch{}
-      应用三栏宽度(400, 430);
+      应用三栏宽度(540, 400);
     }
 
     function 加载菜品池列数(){
@@ -1432,8 +1453,26 @@ HTML_PAGE = """<!doctype html>
           state.historyPoolCols = saved;
         }
       }catch{}
-      if($("historyColsSelect")){ $("historyColsSelect").value = state.historyPoolCols || "2"; }
-      应用菜品池列数(state.historyPoolCols || "2");
+      if($("historyColsSelect")){ $("historyColsSelect").value = state.historyPoolCols || "3"; }
+      应用菜品池列数(state.historyPoolCols || "3");
+    }
+
+    function applyHistorySearchFilter(){
+      const q = (state.historySearchQuery || "").trim().toLowerCase();
+      let visible = 0;
+      Array.from($("history").querySelectorAll(".history-item")).forEach((el) => {
+        const name = el.querySelector(".history-name")?.textContent?.trim().toLowerCase() || "";
+        const show = !q || name.includes(q);
+        el.style.display = show ? "" : "none";
+        if(show){ visible++; }
+      });
+      const placeholder = $("history").querySelector(":scope > .history-empty");
+      if(placeholder && q && visible === 0){
+        placeholder.textContent = "没有匹配的菜名";
+        placeholder.style.display = "";
+      }else if(placeholder && !q){
+        placeholder.textContent = "暂无菜品";
+      }
     }
 
     function getSelectedPublishPlatforms(){
@@ -1629,6 +1668,41 @@ HTML_PAGE = """<!doctype html>
         return;
       }
       window.open(fileUrl(imagePath), "_blank", "noopener,noreferrer");
+    }
+
+    function openGalleryLightbox(index){
+      if(!state.galleryImages.length){ return; }
+      const total = state.galleryImages.length;
+      const safe = ((Number(index) % total) + total) % total;
+      state.galleryLightboxOpen = true;
+      state.galleryLightboxIndex = safe;
+      updateGalleryLightboxImage();
+      $("galleryLightbox").classList.remove("hidden");
+    }
+
+    function closeGalleryLightbox(){
+      state.galleryLightboxOpen = false;
+      $("galleryLightbox").classList.add("hidden");
+      $("galleryLightboxImg").removeAttribute("src");
+    }
+
+    function updateGalleryLightboxImage(){
+      const total = state.galleryImages.length;
+      if(!total){ return; }
+      const path = state.galleryImages[state.galleryLightboxIndex];
+      $("galleryLightboxImg").src = fileUrl(path);
+      $("galleryLightboxCounter").textContent = `${state.galleryLightboxIndex + 1} / ${total}`;
+      const showNav = total > 1;
+      $("galleryLightboxPrev").style.display = showNav ? "" : "none";
+      $("galleryLightboxNext").style.display = showNav ? "" : "none";
+    }
+
+    function stepGalleryLightbox(delta){
+      if(!state.galleryImages.length){ return; }
+      const total = state.galleryImages.length;
+      state.galleryLightboxIndex = (state.galleryLightboxIndex + delta + total) % total;
+      updateGalleryLightboxImage();
+      showGalleryImage(state.galleryLightboxIndex);
     }
 
     function 显示无图占位(提示="暂未生成图片"){
@@ -2045,7 +2119,7 @@ HTML_PAGE = """<!doctype html>
         btn.className = "thumb" + (idx === 0 ? " active" : "");
         btn.innerHTML = `<img src="${fileUrl(imgPath)}" alt="缩略图${idx+1}" />`;
         btn.onclick = () => showGalleryImage(idx);
-        btn.ondblclick = () => openImageInNewTab(imgPath);
+        btn.ondblclick = () => openGalleryLightbox(idx);
         box.appendChild(btn);
       });
       showGalleryImage(0);
@@ -2337,6 +2411,7 @@ HTML_PAGE = """<!doctype html>
           $("loadMoreBtn").style.display = "none";
         }
         applyHistoryTaskBadges();
+        applyHistorySearchFilter();
       }finally{
         state.historyLoading = false;
       }
@@ -2612,6 +2687,8 @@ HTML_PAGE = """<!doctype html>
       $("dishName").value = data.idea.dish_name || "";
       $("dishNotes").value = data.idea.notes || "";
       setMode(data.config.AUTO_GENERATE_DISH_IDEA === "1" ? "auto" : "file");
+      $("posterCount").value = $("detailCount").value = $("recipeCount").value = $("coverMode2Count").value = "2";
+      $("posterQuality").value = $("detailQuality").value = $("recipeQuality").value = $("coverMode2Quality").value = "high";
       同步参数滑块();
       if(data.last_result && !state.selectedHistoryPath){ renderResult(data.last_result); }
       state.logNextIndex = 0;
@@ -2746,23 +2823,6 @@ HTML_PAGE = """<!doctype html>
       setStatus("已在本机打开输出目录。", "ok");
     }
 
-    function applyPreset(kind){
-      if(kind === "budget"){
-        $("temperature").value = "0.2";
-        $("posterCount").value = $("detailCount").value = $("recipeCount").value = $("coverMode2Count").value = "1";
-        $("posterQuality").value = $("detailQuality").value = $("recipeQuality").value = $("coverMode2Quality").value = "low";
-        同步参数滑块();
-        setStatus("已套用省成本模板。", "ok");
-        return;
-      }
-      $("temperature").value = "0.6";
-      $("posterCount").value = $("detailCount").value = "2";
-      $("recipeCount").value = $("coverMode2Count").value = "2";
-      $("posterQuality").value = $("detailQuality").value = $("recipeQuality").value = $("coverMode2Quality").value = "high";
-      同步参数滑块();
-      setStatus("已套用高质量模板。", "ok");
-    }
-
     function bindEvents(){
       $("modeAutoBtn").onclick = () => setMode("auto");
       $("modeFileBtn").onclick = () => setMode("file");
@@ -2772,7 +2832,11 @@ HTML_PAGE = """<!doctype html>
       $("ideaDishName").oninput = syncIdeaCountUi;
       $("batchDeleteBtn").onclick = () => setBatchDeleteMode(!state.batchDeleteMode);
       $("historyColsSelect")?.addEventListener("change", () => {
-        应用菜品池列数($("historyColsSelect").value || "2");
+        应用菜品池列数($("historyColsSelect").value || "3");
+      });
+      $("historySearch")?.addEventListener("input", () => {
+        state.historySearchQuery = $("historySearch").value || "";
+        applyHistorySearchFilter();
       });
       $("historySortSelect").value = state.historySort || "favorite";
       $("historySortSelect").onchange = async () => {
@@ -2797,15 +2861,35 @@ HTML_PAGE = """<!doctype html>
         }
       });
       $("runBtn").onclick = runNow;
-      $("presetBudgetBtn").onclick = () => applyPreset("budget");
-      $("presetQualityBtn").onclick = () => applyPreset("quality");
       $("prevImgBtn").onclick = () => showGalleryImage(state.galleryIndex - 1);
       $("nextImgBtn").onclick = () => showGalleryImage(state.galleryIndex + 1);
       $("filterPublishBtn").onclick = () => { state.galleryFilter = "publish"; applyGalleryFilter(true); };
       $("filterAllBtn").onclick = () => { state.galleryFilter = "all"; applyGalleryFilter(true); };
       $("publishBtn").onclick = startPublish;
       $("loginModalConfirm").onclick = confirmPublishLogin;
-      $("resultImg").ondblclick = () => openImageInNewTab(state.currentImagePath);
+      $("resultImg").ondblclick = () => openGalleryLightbox(state.galleryIndex);
+      $("galleryLightboxClose")?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        closeGalleryLightbox();
+      });
+      $("galleryLightboxPrev")?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        stepGalleryLightbox(-1);
+      });
+      $("galleryLightboxNext")?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        stepGalleryLightbox(1);
+      });
+      $("galleryLightbox")?.addEventListener("click", (event) => {
+        if(event.target === $("galleryLightbox") || event.target === $("galleryLightboxImg")){
+          closeGalleryLightbox();
+        }
+      });
+      $("galleryLightbox")?.addEventListener("wheel", (event) => {
+        if(!$("galleryLightbox") || $("galleryLightbox").classList.contains("hidden")){ return; }
+        event.preventDefault();
+        stepGalleryLightbox(event.deltaY > 0 ? 1 : -1);
+      }, {passive: false});
       $("resultImg").onerror = () => 显示无图占位("图片加载失败，请切换其它图片或重新运行");
       $("copyOutputBtn").onclick = () => copyText(state.currentOutputPath, "输出目录已复制到剪贴板。");
       $("copyOutputTopBtn").onclick = () => copyText(state.currentOutputPath, "输出目录已复制到剪贴板。");
