@@ -62,9 +62,42 @@ def find_chrome_window_hwnd(*, title_hints: Sequence[str] = ()) -> int | None:
     return candidates[0][1]
 
 
+def is_window_maximized(hwnd: int) -> bool:
+    return bool(user32.IsZoomed(hwnd))
+
+
+def maximize_window(hwnd: int) -> None:
+    sw_maximize = 3
+    if is_window_maximized(hwnd):
+        return
+    user32.ShowWindow(hwnd, sw_maximize)
+    time.sleep(0.4)
+
+
+def maximize_page_window_via_cdp(page: Page) -> bool:
+    try:
+        client = page.context.new_cdp_session(page)
+        target_info = client.send("Target.getTargetInfo")
+        target_id = target_info.get("targetInfo", {}).get("targetId")
+        if not target_id:
+            return False
+        window_info = client.send("Browser.getWindowForTarget", {"targetId": target_id})
+        window_id = window_info.get("windowId")
+        if window_id is None:
+            return False
+        client.send(
+            "Browser.setWindowBounds",
+            {"windowId": window_id, "bounds": {"windowState": "maximized"}},
+        )
+        return True
+    except Exception:
+        return False
+
+
 def force_foreground_window(hwnd: int) -> None:
     sw_restore = 9
-    user32.ShowWindow(hwnd, sw_restore)
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, sw_restore)
     if user32.GetForegroundWindow() == hwnd:
         return
 
@@ -82,8 +115,13 @@ def force_foreground_window(hwnd: int) -> None:
             user32.AttachThreadInput(cur_tid, fg_tid, False)
 
 
-def activate_chrome_window_for_page(page: Page, *, extra_hints: Sequence[str] = ()) -> bool:
-    """Playwright 切 tab + Win32 将 Chrome 宿主窗口置顶，供 pyautogui 屏幕坐标操作使用。"""
+def activate_chrome_window_for_page(
+    page: Page,
+    *,
+    extra_hints: Sequence[str] = (),
+    maximize: bool = True,
+) -> bool:
+    """Playwright 切 tab + Win32 将 Chrome 宿主窗口置顶；maximize 时全屏以匹配 pyautogui 标定坐标。"""
     page.bring_to_front()
     page.wait_for_timeout(200)
 
@@ -121,6 +159,15 @@ def activate_chrome_window_for_page(page: Page, *, extra_hints: Sequence[str] = 
             force_foreground_window(hwnd)
         except Exception:
             pass
+
+    if maximize:
+        if maximize_page_window_via_cdp(page):
+            page.wait_for_timeout(350)
+            print("已最大化 Chrome 窗口（CDP）。")
+        else:
+            maximize_window(hwnd)
+            if is_window_maximized(hwnd):
+                print("已最大化 Chrome 窗口（Win32）。")
 
     time.sleep(0.2)
     print(f"已激活 Chrome 窗口至最前端：{_window_text(hwnd)}")
