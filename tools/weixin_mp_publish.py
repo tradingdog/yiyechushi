@@ -48,6 +48,7 @@ from tools.douyin_publish import (  # noqa: E402
 )
 from tools.publish_login import wait_for_panel_login  # noqa: E402
 from tools.screen_template_match import match_template_on_page  # noqa: E402
+from tools.win_foreground import activate_chrome_window_for_page  # noqa: E402
 
 
 DEFAULT_URL_KEYWORD = "mp.weixin.qq.com"
@@ -403,8 +404,7 @@ def paste_text_to_clipboard(text: str) -> None:
 
 def confirm_windows_open_dialog(image_paths: Sequence[Path], *, wait_ms: int, focus_page: Page | None = None) -> None:
     if focus_page is not None:
-        focus_page.bring_to_front()
-        focus_page.wait_for_timeout(300)
+        activate_chrome_window_for_page(focus_page, extra_hints=(DEFAULT_URL_KEYWORD,))
 
     time.sleep(wait_ms / 1000)
     resolved_paths = [path.resolve() for path in image_paths]
@@ -426,8 +426,7 @@ def confirm_windows_open_dialog(image_paths: Sequence[Path], *, wait_ms: int, fo
         print(f"  - {path.name}")
 
     if focus_page is not None:
-        focus_page.bring_to_front()
-        focus_page.wait_for_timeout(500)
+        activate_chrome_window_for_page(focus_page, extra_hints=(DEFAULT_URL_KEYWORD,))
 
 
 def upload_screen_coords_for_index(settings: WeixinPublishSettings, index: int) -> tuple[int, int, int, int]:
@@ -457,6 +456,7 @@ def upload_screen_coords_for_index(settings: WeixinPublishSettings, index: int) 
 
 
 def open_local_upload_menu_at(
+    page: Page,
     *,
     hover_x: int,
     hover_y: int,
@@ -464,6 +464,7 @@ def open_local_upload_menu_at(
     click_y: int,
     hover_ms: int,
 ) -> None:
+    activate_chrome_window_for_page(page, extra_hints=(DEFAULT_URL_KEYWORD,))
     pyautogui.moveTo(hover_x, hover_y, duration=0.4)
     time.sleep(hover_ms / 1000)
     pyautogui.moveTo(click_x, click_y, duration=0.3)
@@ -471,13 +472,13 @@ def open_local_upload_menu_at(
 
 
 def upload_local_images(page: Page, assets: WeixinPublishAssets, settings: WeixinPublishSettings) -> None:
-    page.bring_to_front()
-    page.wait_for_timeout(500)
+    activate_chrome_window_for_page(page, extra_hints=(DEFAULT_URL_KEYWORD,))
 
     for index, image_path in enumerate(assets.image_paths, start=1):
         hover_x, hover_y, click_x, click_y = upload_screen_coords_for_index(settings, index)
         print(f"开始上传第 {index} 张：{image_path.name}")
         open_local_upload_menu_at(
+            page,
             hover_x=hover_x,
             hover_y=hover_y,
             click_x=click_x,
@@ -488,7 +489,11 @@ def upload_local_images(page: Page, assets: WeixinPublishAssets, settings: Weixi
             f"已在 ({hover_x}, {hover_y}) 悬停 {settings.upload_hover_ms}ms，"
             f"并点击 ({click_x}, {click_y}) 打开本地上传。"
         )
-        confirm_windows_open_dialog([image_path], wait_ms=settings.windows_open_dialog_wait_ms)
+        confirm_windows_open_dialog(
+            [image_path],
+            wait_ms=settings.windows_open_dialog_wait_ms,
+            focus_page=page,
+        )
         page.wait_for_timeout(2_500)
 
     print(f"公众号贴图上传完成，共 {len(assets.image_paths)} 张。")
@@ -534,7 +539,8 @@ def save_as_draft(page: Page) -> None:
     print("已点击保存为草稿。")
 
 
-def drag_cover_crop_up(settings: WeixinPublishSettings) -> None:
+def drag_cover_crop_up(page: Page, settings: WeixinPublishSettings) -> None:
+    activate_chrome_window_for_page(page, extra_hints=(DEFAULT_URL_KEYWORD,))
     start_x = settings.cover_crop_drag_start_x
     start_y = settings.cover_crop_drag_start_y
     end_y = settings.cover_crop_drag_end_y
@@ -550,13 +556,12 @@ def drag_cover_crop_up(settings: WeixinPublishSettings) -> None:
 
 
 def adjust_weixin_cover_crop(page: Page, settings: WeixinPublishSettings) -> None:
-    page.bring_to_front()
-    page.wait_for_timeout(500)
+    activate_chrome_window_for_page(page, extra_hints=(DEFAULT_URL_KEYWORD,))
     click_locator(page, modify_cover_button_locators(page), description="封面裁剪框", timeout_ms=30_000)
     page.wait_for_timeout(settings.after_cover_editor_wait_ms)
     click_locator(page, forward_card_cover_locators(page), description="3:4转发卡片封面", timeout_ms=30_000)
     page.wait_for_timeout(settings.after_cover_editor_wait_ms)
-    drag_cover_crop_up(settings)
+    drag_cover_crop_up(page, settings)
     page.wait_for_timeout(500)
     click_locator_via_dom(page, dialog_confirm_button_locators(page), description="封面裁剪确认", timeout_ms=30_000)
     page.wait_for_timeout(1_000)
