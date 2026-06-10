@@ -290,12 +290,17 @@ def goto_weixin_home(page: Page) -> None:
     print(f"已尝试打开公众号首页：{page.url}")
 
 
+def prepare_weixin_chrome_page(page: Page) -> None:
+    activate_chrome_window_for_page(page, extra_hints=(DEFAULT_URL_KEYWORD,), maximize=True)
+
+
 def ensure_weixin_mp_logged_in(page: Page, settings: WeixinPublishSettings) -> None:
     if not settings.login_marker_path.exists():
         raise RuntimeError(f"登录识别模板不存在：{settings.login_marker_path}")
 
     while True:
         goto_weixin_home(page)
+        prepare_weixin_chrome_page(page)
         matched, score = match_template_on_page(
             page,
             settings.login_marker_path,
@@ -315,6 +320,7 @@ def ensure_weixin_mp_logged_in(page: Page, settings: WeixinPublishSettings) -> N
         )
         page.reload(wait_until="domcontentloaded")
         page.wait_for_timeout(1_500)
+        prepare_weixin_chrome_page(page)
 
 
 def open_home_page(page: Page, settings: WeixinPublishSettings) -> None:
@@ -339,7 +345,7 @@ def open_tietu_editor(browser: Browser, page: Page, settings: WeixinPublishSetti
             break
         page.wait_for_timeout(300)
 
-    editor_page.bring_to_front()
+    prepare_weixin_chrome_page(editor_page)
     editor_page.wait_for_load_state("domcontentloaded")
     editor_page.wait_for_timeout(settings.after_editor_wait_ms)
     assert_tietu_editor_page(editor_page)
@@ -404,7 +410,7 @@ def paste_text_to_clipboard(text: str) -> None:
 
 def confirm_windows_open_dialog(image_paths: Sequence[Path], *, wait_ms: int, focus_page: Page | None = None) -> None:
     if focus_page is not None:
-        activate_chrome_window_for_page(focus_page, extra_hints=(DEFAULT_URL_KEYWORD,))
+        prepare_weixin_chrome_page(focus_page)
 
     time.sleep(wait_ms / 1000)
     resolved_paths = [path.resolve() for path in image_paths]
@@ -426,7 +432,7 @@ def confirm_windows_open_dialog(image_paths: Sequence[Path], *, wait_ms: int, fo
         print(f"  - {path.name}")
 
     if focus_page is not None:
-        activate_chrome_window_for_page(focus_page, extra_hints=(DEFAULT_URL_KEYWORD,))
+        prepare_weixin_chrome_page(focus_page)
 
 
 def upload_screen_coords_for_index(settings: WeixinPublishSettings, index: int) -> tuple[int, int, int, int]:
@@ -464,7 +470,7 @@ def open_local_upload_menu_at(
     click_y: int,
     hover_ms: int,
 ) -> None:
-    activate_chrome_window_for_page(page, extra_hints=(DEFAULT_URL_KEYWORD,))
+    prepare_weixin_chrome_page(page)
     pyautogui.moveTo(hover_x, hover_y, duration=0.4)
     time.sleep(hover_ms / 1000)
     pyautogui.moveTo(click_x, click_y, duration=0.3)
@@ -472,7 +478,7 @@ def open_local_upload_menu_at(
 
 
 def upload_local_images(page: Page, assets: WeixinPublishAssets, settings: WeixinPublishSettings) -> None:
-    activate_chrome_window_for_page(page, extra_hints=(DEFAULT_URL_KEYWORD,))
+    prepare_weixin_chrome_page(page)
 
     for index, image_path in enumerate(assets.image_paths, start=1):
         hover_x, hover_y, click_x, click_y = upload_screen_coords_for_index(settings, index)
@@ -540,7 +546,7 @@ def save_as_draft(page: Page) -> None:
 
 
 def drag_cover_crop_up(page: Page, settings: WeixinPublishSettings) -> None:
-    activate_chrome_window_for_page(page, extra_hints=(DEFAULT_URL_KEYWORD,))
+    prepare_weixin_chrome_page(page)
     start_x = settings.cover_crop_drag_start_x
     start_y = settings.cover_crop_drag_start_y
     end_y = settings.cover_crop_drag_end_y
@@ -556,7 +562,7 @@ def drag_cover_crop_up(page: Page, settings: WeixinPublishSettings) -> None:
 
 
 def adjust_weixin_cover_crop(page: Page, settings: WeixinPublishSettings) -> None:
-    activate_chrome_window_for_page(page, extra_hints=(DEFAULT_URL_KEYWORD,))
+    prepare_weixin_chrome_page(page)
     click_locator(page, modify_cover_button_locators(page), description="封面裁剪框", timeout_ms=30_000)
     page.wait_for_timeout(settings.after_cover_editor_wait_ms)
     click_locator(page, forward_card_cover_locators(page), description="3:4转发卡片封面", timeout_ms=30_000)
@@ -590,12 +596,14 @@ def to_cdp_settings(settings: WeixinPublishSettings) -> PublishSettings:
 
 
 def resolve_weixin_mp_page(browser: Browser, settings: WeixinPublishSettings) -> Page:
-    return resolve_page_by_keyword(
+    page = resolve_page_by_keyword(
         browser,
         url_keyword=settings.url_keyword,
         creator_home_url=settings.weixin_home_url,
         platform_label="微信公众号",
     )
+    prepare_weixin_chrome_page(page)
+    return page
 
 
 def run_weixin_publish(settings: WeixinPublishSettings, assets: WeixinPublishAssets) -> None:

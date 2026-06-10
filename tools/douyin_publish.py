@@ -413,6 +413,7 @@ def ensure_cdp_browser_available(settings: PublishSettings) -> None:
         f"--remote-debugging-port={cdp_port}",
         f"--user-data-dir={settings.automation_profile_dir}",
         "--new-window",
+        "--start-maximized",
         "--no-first-run",
         "--no-default-browser-check",
         settings.creator_home_url,

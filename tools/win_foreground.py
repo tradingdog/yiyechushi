@@ -94,6 +94,29 @@ def maximize_page_window_via_cdp(page: Page) -> bool:
         return False
 
 
+def ensure_chrome_maximized(page: Page, hwnd: int) -> bool:
+    """CDP + Win32 + Win+↑ 多重兜底，确认 Chrome 已最大化。"""
+    maximize_page_window_via_cdp(page)
+    page.wait_for_timeout(350)
+    if not is_window_maximized(hwnd):
+        maximize_window(hwnd)
+    if not is_window_maximized(hwnd):
+        force_foreground_window(hwnd)
+        try:
+            import pyautogui
+
+            pyautogui.hotkey("win", "up")
+            time.sleep(0.45)
+        except Exception:
+            pass
+    maximized = is_window_maximized(hwnd)
+    if maximized:
+        print("Chrome 窗口已最大化。")
+    else:
+        print("警告：Chrome 窗口未能确认最大化，模板/坐标匹配可能失败。")
+    return maximized
+
+
 def force_foreground_window(hwnd: int) -> None:
     sw_restore = 9
     if user32.IsIconic(hwnd):
@@ -161,13 +184,7 @@ def activate_chrome_window_for_page(
             pass
 
     if maximize:
-        if maximize_page_window_via_cdp(page):
-            page.wait_for_timeout(350)
-            print("已最大化 Chrome 窗口（CDP）。")
-        else:
-            maximize_window(hwnd)
-            if is_window_maximized(hwnd):
-                print("已最大化 Chrome 窗口（Win32）。")
+        ensure_chrome_maximized(page, hwnd)
 
     time.sleep(0.2)
     print(f"已激活 Chrome 窗口至最前端：{_window_text(hwnd)}")
