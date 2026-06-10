@@ -131,6 +131,20 @@ def is_silkroad_openai_gateway(base_url: str) -> bool:
     return "silkroadai.io" in base_url.strip().lower()
 
 
+def get_image_api_batch_n(requested: int) -> int:
+    """丝路网关单次请求不支持 n>1（会报 Unknown parameter: tools[0].n），改为每次 n=1 由上层循环凑张数。"""
+    batch_n = max(1, int(requested or 1))
+    base_url = os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL).strip() or DEFAULT_OPENAI_BASE_URL
+    if is_silkroad_openai_gateway(base_url):
+        return 1
+    return min(batch_n, 4)
+
+
+def is_tools_batch_n_error(exc: Exception) -> bool:
+    message = " ".join(str(error) for error in iter_exception_chain(exc)).lower()
+    return "tools[0].n" in message or "unknown parameter: 'tools[0].n'" in message
+
+
 def resolve_openai_image_model(model: str, base_url: str) -> str:
     normalized = (model or DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL
     gateway = (base_url or DEFAULT_OPENAI_BASE_URL).strip() or DEFAULT_OPENAI_BASE_URL
@@ -305,6 +319,8 @@ def classify_image_api_error(exc: Exception) -> str:
 def is_retriable_image_api_error(exc: Exception) -> bool:
     if is_moderation_blocked_error(exc):
         return False
+    if is_tools_batch_n_error(exc):
+        return True
     error_kind = classify_image_api_error(exc)
     if error_kind in {"billing_limit", "moderation_blocked", "model_not_found", "api_error"}:
         return False
@@ -331,12 +347,15 @@ def execute_image_generation_with_retries(
 
     for attempt in range(1, max_attempts + 1):
         remaining = expected_count - len(accumulated)
+        batch_n = get_image_api_batch_n(remaining)
         print(
             f"{stage_label}第 {attempt}/{max_attempts} 次调用生图接口"
-            f"（本轮 n={remaining}，已累计 {len(accumulated)}/{expected_count}）…"
+            f"（本轮 n={batch_n}，目标剩余 {remaining}，已累计 {len(accumulated)}/{expected_count}）…"
         )
         try:
-            response = call_api(remaining)
+            if batch_n < remaining:
+                print(f"{stage_label}网关限制单次 n={batch_n}（目标剩余 {remaining} 张，将分多次请求）…")
+            response = call_api(batch_n)
             batch_items = extract_image_items(response)
             if batch_items:
                 take_count = min(len(batch_items), remaining)
