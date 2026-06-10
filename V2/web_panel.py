@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -55,9 +56,20 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.01"
+PANEL_VERSION = "v1.02"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
+DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
+PUBLISH_PLAN_FILE = ROOT_DIR / "publish_plan.json"
+VALID_MEAL_TAGS = ("breakfast", "lunch", "dinner", "late_night")
+MEAL_TAG_LABELS = {
+    "breakfast": "早餐",
+    "lunch": "午餐",
+    "dinner": "晚餐",
+    "late_night": "夜宵",
+}
+PLAN_SLOT_KEYS = ("morning", "noon", "evening")
+PLAN_SLOT_LABELS = {"morning": "早", "noon": "中", "evening": "晚"}
 VALID_HISTORY_SORTS = {"favorite", "created_desc", "created_asc", "name", "image_first"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 SILENT_HTTP_LOG_PATHS = {
@@ -204,12 +216,192 @@ def toggle_dish_favorite(raw_path: str) -> dict[str, Any]:
     }
 
 
+def normalize_meal_tags(raw_tags: Any) -> list[str]:
+    if not isinstance(raw_tags, list):
+        return []
+    normalized: list[str] = []
+    for item in raw_tags:
+        tag = str(item or "").strip()
+        if tag in VALID_MEAL_TAGS and tag not in normalized:
+            normalized.append(tag)
+    return normalized
+
+
+def load_dish_meal_tags() -> dict[str, list[str]]:
+    if not DISH_MEAL_TAGS_FILE.exists():
+        return {}
+    try:
+        payload = json.loads(DISH_MEAL_TAGS_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    paths = payload.get("paths")
+    if not isinstance(paths, dict):
+        return {}
+    result: dict[str, list[str]] = {}
+    for key, value in paths.items():
+        path_key = str(key).strip()
+        if not path_key:
+            continue
+        tags = normalize_meal_tags(value)
+        if tags:
+            result[path_key] = tags
+    return result
+
+
+def save_dish_meal_tags(tags_map: dict[str, list[str]]) -> None:
+    cleaned: dict[str, list[str]] = {}
+    for key, value in tags_map.items():
+        path_key = str(key).strip()
+        tags = normalize_meal_tags(value)
+        if path_key and tags:
+            cleaned[path_key] = tags
+    DISH_MEAL_TAGS_FILE.write_text(
+        json.dumps({"paths": cleaned}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def set_dish_meal_tags(raw_path: str, raw_tags: Any) -> dict[str, Any]:
+    folder = resolve_output_path(raw_path)
+    path_key = str(folder.resolve())
+    tags_map = load_dish_meal_tags()
+    tags = normalize_meal_tags(raw_tags)
+    if tags:
+        tags_map[path_key] = tags
+    else:
+        tags_map.pop(path_key, None)
+    save_dish_meal_tags(tags_map)
+    return {"path": path_key, "meal_tags": tags}
+
+
+def batch_update_dish_meal_tags(
+    raw_paths: list[str],
+    *,
+    add_tags: list[str] | None = None,
+    remove_tags: list[str] | None = None,
+) -> dict[str, Any]:
+    tags_map = load_dish_meal_tags()
+    add_list = normalize_meal_tags(add_tags or [])
+    remove_set = set(normalize_meal_tags(remove_tags or []))
+    updated: list[str] = []
+    for raw_path in raw_paths:
+        path_text = str(raw_path or "").strip()
+        if not path_text:
+            continue
+        folder = resolve_output_path(path_text)
+        path_key = str(folder.resolve())
+        current = set(tags_map.get(path_key, []))
+        current.update(add_list)
+        current -= remove_set
+        tags = normalize_meal_tags(list(current))
+        if tags:
+            tags_map[path_key] = tags
+        else:
+            tags_map.pop(path_key, None)
+        updated.append(path_key)
+    save_dish_meal_tags(tags_map)
+    return {"updated": updated, "count": len(updated)}
+
+
+def remove_dish_meal_tags(path_text: str) -> None:
+    path_key = str(Path(path_text).resolve())
+    tags_map = load_dish_meal_tags()
+    if path_key in tags_map:
+        tags_map.pop(path_key, None)
+        save_dish_meal_tags(tags_map)
+
+
+def default_publish_plan_range() -> tuple[str, str]:
+    today = time.strftime("%Y-%m-%d")
+    end = time.strftime("%Y-%m-%d", time.localtime(time.time() + 6 * 86400))
+    return today, end
+
+
+def normalize_publish_plan_slots(raw_slots: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(raw_slots, dict):
+        return {}
+    result: dict[str, dict[str, str]] = {}
+    for date_key, slot_map in raw_slots.items():
+        date_text = str(date_key).strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_text):
+            continue
+        if not isinstance(slot_map, dict):
+            continue
+        normalized_slots: dict[str, str] = {}
+        for slot_key in PLAN_SLOT_KEYS:
+            path_text = str(slot_map.get(slot_key, "")).strip()
+            if path_text:
+                try:
+                    normalized_slots[slot_key] = str(resolve_output_path(path_text).resolve())
+                except Exception:
+                    continue
+        if normalized_slots:
+            result[date_text] = normalized_slots
+    return result
+
+
+def load_publish_plan() -> dict[str, Any]:
+    if not PUBLISH_PLAN_FILE.exists():
+        start, end = default_publish_plan_range()
+        return {"start": start, "end": end, "slots": {}}
+    try:
+        payload = json.loads(PUBLISH_PLAN_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    start = str(payload.get("start", "")).strip()
+    end = str(payload.get("end", "")).strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end):
+        start, end = default_publish_plan_range()
+    if start > end:
+        start, end = end, start
+    return {
+        "start": start,
+        "end": end,
+        "slots": normalize_publish_plan_slots(payload.get("slots")),
+    }
+
+
+def save_publish_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    start = str(plan.get("start", "")).strip()
+    end = str(plan.get("end", "")).strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end):
+        raise ValueError("日期范围格式无效。")
+    if start > end:
+        start, end = end, start
+    slots = normalize_publish_plan_slots(plan.get("slots"))
+    payload = {"start": start, "end": end, "slots": slots}
+    PUBLISH_PLAN_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return payload
+
+
+def remove_path_from_publish_plan(path_text: str) -> None:
+    path_key = str(Path(path_text).resolve())
+    plan = load_publish_plan()
+    slots = plan.get("slots", {})
+    changed = False
+    for date_key, slot_map in list(slots.items()):
+        for slot_key in PLAN_SLOT_KEYS:
+            if slot_map.get(slot_key) == path_key:
+                slot_map.pop(slot_key, None)
+                changed = True
+        if not slot_map:
+            slots.pop(date_key, None)
+    if changed:
+        save_publish_plan({**plan, "slots": slots})
+
+
 def history_revision() -> str:
     dirs = collect_history_dirs()
+    tag_mtime = DISH_MEAL_TAGS_FILE.stat().st_mtime if DISH_MEAL_TAGS_FILE.exists() else 0.0
+    plan_mtime = PUBLISH_PLAN_FILE.stat().st_mtime if PUBLISH_PLAN_FILE.exists() else 0.0
     if not dirs:
-        return "0:0"
+        return f"0:0:{tag_mtime:.3f}:{plan_mtime:.3f}"
     max_mtime = max(path.stat().st_mtime for path in dirs)
-    return f"{len(dirs)}:{max_mtime:.3f}"
+    return f"{len(dirs)}:{max_mtime:.3f}:{tag_mtime:.3f}:{plan_mtime:.3f}"
 
 
 def publish_status_snapshot(*, log_from: int = 0) -> dict[str, Any]:
@@ -402,6 +594,7 @@ HTML_PAGE = """<!doctype html>
       --pri:#020617; --ok:#22c55e; --warn:#f59e0b; --danger:#ef4444;
       --shadow:0 10px 28px rgba(0,0,0,.35);
       --col-left:720px;
+      --col-plan:200px;
       --col-gallery:720px;
       --col-mid:400px;
       --col-publish:118px;
@@ -438,7 +631,7 @@ HTML_PAGE = """<!doctype html>
       display:grid;
       width:max-content;
       min-width:100%;
-      grid-template-columns:var(--col-left) var(--splitter) var(--col-gallery) var(--splitter) var(--col-mid) var(--splitter) var(--col-publish) var(--splitter) var(--col-custom);
+      grid-template-columns:var(--col-left) var(--splitter) var(--col-plan) var(--splitter) var(--col-gallery) var(--splitter) var(--col-mid) var(--splitter) var(--col-publish) var(--splitter) var(--col-custom);
       gap:0;
       align-items:start;
       min-height:calc(100vh - 120px);
@@ -449,6 +642,55 @@ HTML_PAGE = """<!doctype html>
       height:calc(100vh - 88px);overflow:auto;
     }
     .panel-left{margin-right:6px}
+    .panel-plan{margin:0 4px;padding:8px;display:flex;flex-direction:column;gap:6px;min-width:0}
+    .panel-plan .panel-title{font-size:14px;margin:0 0 4px}
+    .plan-range{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:6px}
+    .plan-range input{padding:5px 6px;font-size:11px;border-radius:8px}
+    .plan-list{display:flex;flex-direction:column;gap:6px;overflow:auto;flex:1;padding-right:2px}
+    .plan-day{border:1px solid #283449;border-radius:8px;padding:6px;background:#0f172a}
+    .plan-day-date{font-size:11px;color:#94a3b8;margin-bottom:4px}
+    .plan-day-slots{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
+    .plan-slot{
+      min-height:42px;border:1px dashed #334155;border-radius:6px;background:#0b1220;padding:3px;
+      display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:2px;font-size:10px;color:#64748b;
+    }
+    .plan-slot.drag-over{border-color:#60a5fa;background:#172554}
+    .plan-slot-label{font-size:9px;color:#64748b;text-align:center;line-height:1}
+    .plan-slot-chip{
+      font-size:10px;line-height:1.25;padding:3px 4px;border-radius:4px;background:#1e293b;border:1px solid #475569;
+      color:#e2e8f0;cursor:grab;word-break:break-all;
+    }
+    .plan-slot-chip:active{cursor:grabbing}
+    .meal-filter-row{display:flex;flex-wrap:wrap;gap:5px;margin:0 0 8px}
+    .meal-filter-btn{
+      padding:4px 9px;font-size:11px;border-radius:999px;border:1px solid #334155;background:#0b1220;color:#cbd5e1;cursor:pointer;
+    }
+    .batch-edit-bar{
+      display:none;flex-wrap:wrap;gap:5px;margin:0 0 8px;padding:6px;border:1px solid #334155;border-radius:8px;background:#0b1220;
+    }
+    .batch-edit-bar.open{display:flex}
+    .batch-edit-bar button{padding:5px 8px;font-size:11px;border-radius:8px;border:1px solid #475569;background:#111827;color:#e2e8f0;cursor:pointer}
+    .batch-edit-bar .danger-btn{border-color:#7f1d1d;color:#fecaca}
+    .history-cover{position:relative}
+    .history-tag-add{
+      position:absolute;top:3px;right:3px;z-index:4;width:18px;height:18px;border-radius:999px;border:1px solid #475569;
+      background:rgba(15,23,42,.9);color:#e2e8f0;font-size:13px;line-height:16px;padding:0;cursor:pointer;
+    }
+    .history-tag-badges{display:flex;flex-wrap:wrap;gap:2px;margin-top:3px}
+    .history-tag-badge{font-size:9px;padding:1px 4px;border-radius:999px;background:#1e3a5f;color:#bfdbfe;border:1px solid #334155}
+    .tag-popover{
+      position:absolute;top:22px;right:0;z-index:12;min-width:108px;padding:6px;border:1px solid #475569;border-radius:8px;
+      background:#111827;box-shadow:var(--shadow);display:none;
+    }
+    .tag-popover.open{display:block}
+    .tag-popover label{display:flex;align-items:center;gap:5px;margin:0 0 4px;font-size:11px;color:#e2e8f0;cursor:pointer}
+    .tag-popover input{width:auto;margin:0}
+    .history-item.draggable-pool{cursor:grab}
+    .history-item.draggable-pool:active{cursor:grabbing}
+    .custom-tile-open{
+      position:absolute;right:4px;bottom:4px;z-index:2;padding:2px 6px;font-size:10px;border-radius:6px;
+      border:1px solid #475569;background:rgba(15,23,42,.88);color:#e2e8f0;cursor:pointer;
+    }
     .panel-mid{margin:0 6px}
     .panel-right{margin:0 6px}
     .panel-publish{margin-left:4px;display:flex;flex-direction:column;gap:6px;min-width:0;padding:8px}
@@ -468,6 +710,7 @@ HTML_PAGE = """<!doctype html>
     .custom-status{min-height:20px;font-size:11px;color:var(--sub);line-height:1.4}
     .custom-history{display:grid;grid-template-columns:1fr;gap:6px;max-height:calc(100vh - 300px);overflow:auto;padding-right:2px}
     .custom-tile{position:relative;aspect-ratio:1/1;border-radius:10px;border:1px solid #334155;background:#0b1220;overflow:hidden;cursor:pointer}
+    .custom-tile .custom-tile-open{opacity:.92}
     .custom-tile img{width:100%;height:100%;object-fit:cover;display:block}
     .custom-tile.pending{display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:12px;text-align:center;padding:8px;background:linear-gradient(135deg,#0f172a,#1e293b)}
     .custom-preview-modal{position:fixed;inset:0;background:rgba(2,6,23,.78);display:flex;align-items:center;justify-content:center;z-index:90;padding:24px}
@@ -732,7 +975,7 @@ HTML_PAGE = """<!doctype html>
       .four-col{grid-template-columns:1fr}
       .splitter{display:none}
       .panel{height:auto}
-      .panel-left,.panel-mid,.panel-right,.panel-publish,.panel-custom{margin:0 0 10px}
+      .panel-left,.panel-plan,.panel-mid,.panel-right,.panel-publish,.panel-custom{margin:0 0 10px}
       .history-grid{max-height:none}
     }
     @media(max-width:860px){
@@ -788,18 +1031,46 @@ HTML_PAGE = """<!doctype html>
               <option value="created_asc">创建时间（旧→新）</option>
               <option value="name">菜名 A→Z</option>
             </select>
-            <button id="batchDeleteBtn" type="button">批量移出</button>
-            <button id="batchDeleteAllBtn" type="button" class="danger-btn hidden">全部移出</button>
+            <button id="batchEditBtn" type="button">批量编辑</button>
           </div>
         </div>
+        <div id="mealFilterRow" class="meal-filter-row">
+          <button type="button" class="meal-filter-btn active" data-meal-filter="">全部</button>
+          <button type="button" class="meal-filter-btn" data-meal-filter="breakfast">早餐</button>
+          <button type="button" class="meal-filter-btn" data-meal-filter="lunch">午餐</button>
+          <button type="button" class="meal-filter-btn" data-meal-filter="dinner">晚餐</button>
+          <button type="button" class="meal-filter-btn" data-meal-filter="late_night">夜宵</button>
+        </div>
         <input id="historySearch" class="history-search" type="search" placeholder="搜索菜名…" autocomplete="off" />
+        <div id="batchEditBar" class="batch-edit-bar">
+          <button id="batchRemoveBtn" type="button" class="danger-btn">批量移出</button>
+          <button type="button" data-batch-add="breakfast">+早餐</button>
+          <button type="button" data-batch-add="lunch">+午餐</button>
+          <button type="button" data-batch-add="dinner">+晚餐</button>
+          <button type="button" data-batch-add="late_night">+夜宵</button>
+          <button type="button" data-batch-remove="breakfast">-早餐</button>
+          <button type="button" data-batch-remove="lunch">-午餐</button>
+          <button type="button" data-batch-remove="dinner">-晚餐</button>
+          <button type="button" data-batch-remove="late_night">-夜宵</button>
+        </div>
         <div id="history" class="history-grid"></div>
         <div id="historyLoadMore" class="load-more">
           <button id="loadMoreBtn" type="button">载入更多</button>
         </div>
       </section>
 
-      <div id="splitterLeft" class="splitter" title="拖拽调整宽度"></div>
+      <div id="splitterLeft" class="splitter" title="拖拽调整菜品池宽度"></div>
+
+      <aside class="panel panel-plan">
+        <h3 class="panel-title">发布计划</h3>
+        <div class="plan-range">
+          <input id="planStartDate" type="date" title="开始日期" />
+          <input id="planEndDate" type="date" title="结束日期" />
+        </div>
+        <div id="planList" class="plan-list"></div>
+      </aside>
+
+      <div id="splitterPlan" class="splitter" title="拖拽调整发布计划宽度"></div>
 
       <section class="panel panel-right">
         <div class="result-card">
@@ -1073,10 +1344,17 @@ HTML_PAGE = """<!doctype html>
       taskQueueExpanded: false,
       publishSnapshot: {running: false, platform: "", output_dir: ""},
       colLeft: 720,
+      colPlan: 200,
       colGallery: 720,
       colMid: 400,
       colPublish: 118,
       colCustom: 228,
+      historyMealFilter: "",
+      historyItemCache: {},
+      mealTagLabels: {breakfast:"早餐", lunch:"午餐", dinner:"晚餐", late_night:"夜宵"},
+      publishPlan: {start:"", end:"", slots:{}},
+      tagPopoverPath: "",
+      customImagesDir: "",
       historyPoolCols: "3",
       historySearchQuery: "",
       galleryLightboxOpen: false,
@@ -1095,8 +1373,8 @@ HTML_PAGE = """<!doctype html>
       textSaveStatus: "",
       publishLogIndex: 0,
       publishPolling: false,
-      batchDeleteMode: false,
-      batchDeleteSelected: new Set(),
+      batchEditMode: false,
+      batchEditSelected: new Set(),
       selectedHistoryItem: null,
       customRefs: [],
       customPolling: false,
@@ -1105,7 +1383,12 @@ HTML_PAGE = """<!doctype html>
     const $ = (id) => document.getElementById(id);
     const QUALITY_INDEX = { low: 0, medium: 1, high: 2, auto: 3 };
     const INDEX_QUALITY = ["low", "medium", "high", "auto"];
-    const LAYOUT_STORAGE_KEY = "v2_panel_layout_v2";
+    const LAYOUT_STORAGE_KEY = "v2_panel_layout_v3";
+    const LAYOUT_STORAGE_KEY_V2 = "v2_panel_layout_v2";
+    const MEAL_TAG_KEYS = ["breakfast", "lunch", "dinner", "late_night"];
+    const PLAN_SLOT_KEYS = ["morning", "noon", "evening"];
+    const PLAN_SLOT_LABELS = {morning:"早", noon:"中", evening:"晚"};
+    const DRAG_DISH_MIME = "application/x-dish-path";
     const LAYOUT_STORAGE_KEY_V1 = "v2_panel_layout_v1";
     const HISTORY_SORT_STORAGE_KEY = "v2_history_sort_v1";
     const HISTORY_COLS_STORAGE_KEY = "v2_history_pool_cols_v1";
@@ -1208,31 +1491,240 @@ HTML_PAGE = """<!doctype html>
         .map((id) => $(id).value);
     }
 
-    function setBatchDeleteMode(enabled){
-      state.batchDeleteMode = Boolean(enabled);
-      state.batchDeleteSelected = new Set();
-      $("history").classList.toggle("batch-mode", state.batchDeleteMode);
-      $("batchDeleteBtn").textContent = state.batchDeleteMode ? "取消批量" : "批量移出";
-      $("batchDeleteAllBtn").classList.toggle("hidden", !state.batchDeleteMode);
-      $("batchDeleteAllBtn").disabled = true;
+    function setBatchEditMode(enabled){
+      state.batchEditMode = Boolean(enabled);
+      state.batchEditSelected = new Set();
+      $("history").classList.toggle("batch-mode", state.batchEditMode);
+      $("batchEditBtn").textContent = state.batchEditMode ? "取消批量" : "批量编辑";
+      $("batchEditBar")?.classList.toggle("open", state.batchEditMode);
       Array.from($("history").querySelectorAll(".history-item")).forEach((el) => {
         el.classList.remove("batch-selected");
+        el.draggable = !state.batchEditMode;
         const checkbox = el.querySelector(".history-check input");
         if(checkbox){ checkbox.checked = false; }
       });
     }
 
-    function updateBatchDeleteUi(){
-      const count = state.batchDeleteSelected.size;
-      $("batchDeleteAllBtn").disabled = count < 1;
-      $("batchDeleteAllBtn").textContent = count > 0 ? `全部移出（${count}）` : "全部移出";
+    function updateBatchEditUi(){
+      const count = state.batchEditSelected.size;
+      const removeBtn = $("batchRemoveBtn");
+      if(removeBtn){
+        removeBtn.disabled = count < 1;
+        removeBtn.textContent = count > 0 ? `批量移出（${count}）` : "批量移出";
+      }
     }
 
-    function toggleBatchDeletePath(path, checked){
+    function toggleBatchEditPath(path, checked){
       if(!path){ return; }
-      if(checked){ state.batchDeleteSelected.add(path); }
-      else{ state.batchDeleteSelected.delete(path); }
-      updateBatchDeleteUi();
+      if(checked){ state.batchEditSelected.add(path); }
+      else{ state.batchEditSelected.delete(path); }
+      updateBatchEditUi();
+    }
+
+    function mealTagLabel(tag){
+      return state.mealTagLabels[tag] || tag;
+    }
+
+    function renderMealTagBadges(tags){
+      return (tags || []).map((tag) => `<span class="history-tag-badge">${mealTagLabel(tag)}</span>`).join("");
+    }
+
+    function closeAllTagPopovers(){
+      Array.from(document.querySelectorAll(".tag-popover.open")).forEach((el) => el.classList.remove("open"));
+      state.tagPopoverPath = "";
+    }
+
+    async function saveMealTags(path, tags){
+      const res = await fetch("/api/dish_tags", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({path, tags}),
+      });
+      const data = await res.json();
+      if(!res.ok){ throw new Error(data.error || "保存标签失败"); }
+      if(state.historyItemCache[path]){ state.historyItemCache[path].meal_tags = data.meal_tags || []; }
+      const card = Array.from($("history").querySelectorAll(".history-item")).find((el) => el.dataset.path === path);
+      if(card){
+        card.dataset.mealTags = JSON.stringify(data.meal_tags || []);
+        const badges = card.querySelector(".history-tag-badges");
+        if(badges){ badges.innerHTML = renderMealTagBadges(data.meal_tags || []); }
+        MEAL_TAG_KEYS.forEach((tag) => {
+          const input = card.querySelector(`.tag-popover input[data-tag="${tag}"]`);
+          if(input){ input.checked = (data.meal_tags || []).includes(tag); }
+        });
+      }
+      applyHistorySearchFilter();
+      return data;
+    }
+
+    async function batchUpdateMealTags(paths, {add=[], remove=[]}){
+      const list = (paths || []).filter(Boolean);
+      if(!list.length){ setStatus("请先勾选菜品。", "warn"); return; }
+      const res = await fetch("/api/dish_tags/batch", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({paths: list, add, remove}),
+      });
+      const data = await res.json();
+      if(!res.ok){ throw new Error(data.error || "批量更新标签失败"); }
+      await loadHistory(true);
+      setStatus(`已更新 ${data.count || list.length} 个菜品的标签。`, "ok");
+    }
+
+    function getDishLabel(path){
+      const cached = state.historyItemCache[path];
+      if(cached?.dish_name){ return cached.dish_name; }
+      const base = String(path || "").split(/[\\\\/]/).pop() || "菜品";
+      const parts = base.split("_");
+      return parts.length >= 3 ? parts.slice(2).join("_") : base;
+    }
+
+    function listPlanDateRange(){
+      const start = state.publishPlan.start || "";
+      const end = state.publishPlan.end || start;
+      if(!start || !end){ return []; }
+      const dates = [];
+      const cur = new Date(start + "T00:00:00");
+      const endDate = new Date(end + "T00:00:00");
+      while(cur <= endDate){
+        dates.push(cur.toISOString().slice(0, 10));
+        cur.setDate(cur.getDate() + 1);
+      }
+      return dates;
+    }
+
+    async function savePublishPlan(plan){
+      const res = await fetch("/api/publish_plan", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(plan),
+      });
+      const data = await res.json();
+      if(!res.ok){ throw new Error(data.error || "保存发布计划失败"); }
+      state.publishPlan = data;
+      renderPublishPlan();
+      return data;
+    }
+
+    function clearPlanSlotInMemory(plan, date, slot){
+      if(!plan.slots?.[date]){ return; }
+      delete plan.slots[date][slot];
+      if(!Object.keys(plan.slots[date]).length){ delete plan.slots[date]; }
+    }
+
+    function removePathFromPlanMemory(plan, path, exceptDate="", exceptSlot=""){
+      Object.keys(plan.slots || {}).forEach((date) => {
+        PLAN_SLOT_KEYS.forEach((slot) => {
+          if(plan.slots[date][slot] === path){
+            if(date === exceptDate && slot === exceptSlot){ return; }
+            clearPlanSlotInMemory(plan, date, slot);
+          }
+        });
+      });
+    }
+
+    async function assignPlanSlot(date, slot, path, fromDate="", fromSlot=""){
+      const plan = JSON.parse(JSON.stringify(state.publishPlan || {start:"", end:"", slots:{}}));
+      if(fromDate && fromSlot){ clearPlanSlotInMemory(plan, fromDate, fromSlot); }
+      if(path){
+        if(!plan.slots[date]){ plan.slots[date] = {}; }
+        plan.slots[date][slot] = path;
+      }else{
+        clearPlanSlotInMemory(plan, date, slot);
+      }
+      await savePublishPlan(plan);
+    }
+
+    function bindPlanSlotDrop(slotEl, date, slot){
+      slotEl.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        slotEl.classList.add("drag-over");
+      });
+      slotEl.addEventListener("dragleave", () => slotEl.classList.remove("drag-over"));
+      slotEl.addEventListener("drop", async (event) => {
+        event.preventDefault();
+        slotEl.classList.remove("drag-over");
+        const path = event.dataTransfer.getData(DRAG_DISH_MIME);
+        if(!path){ return; }
+        const fromDate = event.dataTransfer.getData("application/x-plan-from-date");
+        const fromSlot = event.dataTransfer.getData("application/x-plan-from-slot");
+        try{
+          await assignPlanSlot(date, slot, path, fromDate, fromSlot);
+        }catch(err){
+          setStatus("更新发布计划失败：" + err.message, "warn");
+        }
+      });
+    }
+
+    function renderPublishPlan(){
+      const box = $("planList");
+      if(!box){ return; }
+      box.innerHTML = "";
+      const dates = listPlanDateRange();
+      if(!dates.length){
+        box.innerHTML = '<div class="history-empty">请选择日期范围</div>';
+        return;
+      }
+      dates.forEach((date) => {
+        const day = document.createElement("div");
+        day.className = "plan-day";
+        day.innerHTML = `<div class="plan-day-date">${date}</div><div class="plan-day-slots"></div>`;
+        const slotsWrap = day.querySelector(".plan-day-slots");
+        PLAN_SLOT_KEYS.forEach((slot) => {
+          const slotEl = document.createElement("div");
+          slotEl.className = "plan-slot";
+          slotEl.dataset.date = date;
+          slotEl.dataset.slot = slot;
+          const path = state.publishPlan?.slots?.[date]?.[slot] || "";
+          slotEl.innerHTML = `<div class="plan-slot-label">${PLAN_SLOT_LABELS[slot]}</div>`;
+          if(path){
+            const chip = document.createElement("div");
+            chip.className = "plan-slot-chip";
+            chip.textContent = getDishLabel(path);
+            chip.draggable = true;
+            chip.dataset.path = path;
+            chip.addEventListener("dragstart", (event) => {
+              event.dataTransfer.setData(DRAG_DISH_MIME, path);
+              event.dataTransfer.setData("application/x-plan-from-date", date);
+              event.dataTransfer.setData("application/x-plan-from-slot", slot);
+            });
+            slotEl.appendChild(chip);
+          }
+          bindPlanSlotDrop(slotEl, date, slot);
+          slotsWrap.appendChild(slotEl);
+        });
+        box.appendChild(day);
+      });
+    }
+
+    function initPublishPlanUi(){
+      const plan = state.publishPlan || {};
+      if($("planStartDate")){ $("planStartDate").value = plan.start || ""; }
+      if($("planEndDate")){ $("planEndDate").value = plan.end || ""; }
+      renderPublishPlan();
+    }
+
+    function bindHistoryPoolDropZone(){
+      const grid = $("history");
+      if(!grid || grid.dataset.dropBound === "1"){ return; }
+      grid.dataset.dropBound = "1";
+      grid.addEventListener("dragover", (event) => {
+        if(event.dataTransfer.types.includes(DRAG_DISH_MIME)){
+          event.preventDefault();
+        }
+      });
+      grid.addEventListener("drop", async (event) => {
+        const fromDate = event.dataTransfer.getData("application/x-plan-from-date");
+        const fromSlot = event.dataTransfer.getData("application/x-plan-from-slot");
+        if(!fromDate || !fromSlot){ return; }
+        event.preventDefault();
+        try{
+          await assignPlanSlot(fromDate, fromSlot, "", fromDate, fromSlot);
+          setStatus("已从发布计划移回菜品池。", "ok");
+        }catch(err){
+          setStatus("移回菜品池失败：" + err.message, "warn");
+        }
+      });
     }
 
     function setStatus(text, level=""){
@@ -1423,8 +1915,8 @@ HTML_PAGE = """<!doctype html>
       setStatus(`已切到运行中菜品：${item.dish_name}`, "ok");
     }
 
-    const PANEL_COL_MIN = {left: 240, gallery: 280, mid: 320, publish: 96, custom: 180};
-    const PANEL_COL_DEFAULT = {left: 720, gallery: 720, mid: 400, publish: 118, custom: 228};
+    const PANEL_COL_MIN = {left: 240, plan: 160, gallery: 280, mid: 320, publish: 96, custom: 180};
+    const PANEL_COL_DEFAULT = {left: 720, plan: 200, gallery: 720, mid: 400, publish: 118, custom: 228};
 
     function clampPanelCol(key, value){
       const min = PANEL_COL_MIN[key] || 120;
@@ -1433,11 +1925,13 @@ HTML_PAGE = """<!doctype html>
 
     function 应用面板栏宽(next={}){
       state.colLeft = clampPanelCol("left", next.left ?? state.colLeft);
+      state.colPlan = clampPanelCol("plan", next.plan ?? state.colPlan);
       state.colGallery = clampPanelCol("gallery", next.gallery ?? state.colGallery);
       state.colMid = clampPanelCol("mid", next.mid ?? state.colMid);
       state.colPublish = clampPanelCol("publish", next.publish ?? state.colPublish);
       state.colCustom = clampPanelCol("custom", next.custom ?? state.colCustom);
       document.documentElement.style.setProperty("--col-left", `${state.colLeft}px`);
+      document.documentElement.style.setProperty("--col-plan", `${state.colPlan}px`);
       document.documentElement.style.setProperty("--col-gallery", `${state.colGallery}px`);
       document.documentElement.style.setProperty("--col-mid", `${state.colMid}px`);
       document.documentElement.style.setProperty("--col-publish", `${state.colPublish}px`);
@@ -1448,6 +1942,7 @@ HTML_PAGE = """<!doctype html>
       try{
         localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify({
           left: state.colLeft,
+          plan: state.colPlan,
           gallery: state.colGallery,
           mid: state.colMid,
           publish: state.colPublish,
@@ -1463,6 +1958,20 @@ HTML_PAGE = """<!doctype html>
           const data = JSON.parse(raw);
           应用面板栏宽({
             left: data.left,
+            plan: data.plan,
+            gallery: data.gallery,
+            mid: data.mid,
+            publish: data.publish,
+            custom: data.custom,
+          });
+          return;
+        }
+        const legacyV2 = localStorage.getItem(LAYOUT_STORAGE_KEY_V2);
+        if(legacyV2){
+          const data = JSON.parse(legacyV2);
+          应用面板栏宽({
+            left: data.left,
+            plan: 200,
             gallery: data.gallery,
             mid: data.mid,
             publish: data.publish,
@@ -1497,10 +2006,14 @@ HTML_PAGE = """<!doctype html>
 
     function applyHistorySearchFilter(){
       const q = (state.historySearchQuery || "").trim().toLowerCase();
+      const mealFilter = state.historyMealFilter || "";
       let visible = 0;
       Array.from($("history").querySelectorAll(".history-item")).forEach((el) => {
         const name = el.querySelector(".history-name")?.textContent?.trim().toLowerCase() || "";
-        const show = !q || name.includes(q);
+        let tags = [];
+        try{ tags = JSON.parse(el.dataset.mealTags || "[]"); }catch{}
+        let show = !q || name.includes(q);
+        if(mealFilter && !tags.includes(mealFilter)){ show = false; }
         el.style.display = show ? "" : "none";
         if(show){ visible++; }
       });
@@ -1623,12 +2136,13 @@ HTML_PAGE = """<!doctype html>
     function 初始化拖拽分栏(){
       const splitters = [
         {el: $("splitterLeft"), key: "left"},
+        {el: $("splitterPlan"), key: "plan"},
         {el: $("splitterGallery"), key: "gallery"},
         {el: $("splitterMid"), key: "mid"},
         {el: $("splitterPublish"), key: "publish"},
       ].filter((item) => item.el);
 
-      const colStateKey = {left: "colLeft", gallery: "colGallery", mid: "colMid", publish: "colPublish"};
+      const colStateKey = {left: "colLeft", plan: "colPlan", gallery: "colGallery", mid: "colMid", publish: "colPublish"};
       const bindDrag = (el, key) => {
         el.onmousedown = (e) => {
           e.preventDefault();
@@ -2270,9 +2784,10 @@ HTML_PAGE = """<!doctype html>
         state.selectedHistoryPath = "";
         state.selectedHistoryItem = null;
       }
-      setBatchDeleteMode(false);
+      setBatchEditMode(false);
       bumpSuppressHistoryAutoReload();
       list.forEach((path) => removeHistoryCardFromDom(path));
+      renderPublishPlan();
     }
 
     async function selectHistoryItem(item, card){
@@ -2318,24 +2833,37 @@ HTML_PAGE = """<!doctype html>
     }
 
     function createHistoryCard(item){
+      if(item?.path){ state.historyItemCache[item.path] = item; }
+      const mealTags = item.meal_tags || [];
       const div = document.createElement("div");
-      div.className = "history-item";
+      div.className = "history-item draggable-pool";
       div.dataset.path = item.path || "";
+      div.dataset.mealTags = JSON.stringify(mealTags);
+      div.draggable = !state.batchEditMode;
       const cover = item.preview_image
         ? `<img src="${fileUrl(item.preview_image)}" alt="${item.dish_name || item.name}" />`
         : `<div class="history-empty">暂无图片</div>`;
+      const tagChecks = MEAL_TAG_KEYS.map((tag) => {
+        const checked = mealTags.includes(tag) ? " checked" : "";
+        return `<label><input type="checkbox" data-tag="${tag}"${checked} />${mealTagLabel(tag)}</label>`;
+      }).join("");
       const timeText = item.created_at || item.name.split("_").slice(0,2).join(" ");
       const favorited = Boolean(item.favorited);
       div.innerHTML = `
-        <label class="history-check" title="勾选移出">
+        <label class="history-check" title="勾选批量操作">
           <input type="checkbox" data-path="${item.path || ""}" />
         </label>
-        <div class="history-cover">${cover}</div>
+        <div class="history-cover">
+          ${cover}
+          <button type="button" class="history-tag-add" title="餐次标签">+</button>
+          <div class="tag-popover">${tagChecks}</div>
+        </div>
         <div class="history-meta">
           <div class="history-meta-top">
             <div class="history-name">${item.dish_name || item.name}</div>
             <button type="button" class="history-fav${favorited ? " active" : ""}" data-op="favorite" title="${favorited ? "取消收藏" : "收藏"}">♥</button>
           </div>
+          <div class="history-tag-badges">${renderMealTagBadges(mealTags)}</div>
           <div class="history-time">${timeText}</div>
         </div>
         <div class="history-ops">
@@ -2344,23 +2872,56 @@ HTML_PAGE = """<!doctype html>
           <button data-op="delete" class="del">移出</button>
         </div>
       `;
+      div.addEventListener("dragstart", (event) => {
+        if(state.batchEditMode){ event.preventDefault(); return; }
+        event.dataTransfer.setData(DRAG_DISH_MIME, item.path || "");
+        event.dataTransfer.setData("text/plain", item.dish_name || item.name || "");
+        event.dataTransfer.effectAllowed = "move";
+      });
       const checkbox = div.querySelector(".history-check input");
       checkbox.onchange = (e) => {
         e.stopPropagation();
         const checked = Boolean(checkbox.checked);
         div.classList.toggle("batch-selected", checked);
-        toggleBatchDeletePath(item.path, checked);
+        toggleBatchEditPath(item.path, checked);
       };
       checkbox.onclick = (e) => e.stopPropagation();
       div.onclick = async () => {
-        if(state.batchDeleteMode){
+        if(state.batchEditMode){
           checkbox.checked = !checkbox.checked;
           div.classList.toggle("batch-selected", checkbox.checked);
-          toggleBatchDeletePath(item.path, checkbox.checked);
+          toggleBatchEditPath(item.path, checkbox.checked);
           return;
         }
         await selectHistoryItem(item, div);
       };
+      const tagAddBtn = div.querySelector(".history-tag-add");
+      const tagPopover = div.querySelector(".tag-popover");
+      if(tagAddBtn && tagPopover){
+        tagAddBtn.onclick = (event) => {
+          event.stopPropagation();
+          const willOpen = !tagPopover.classList.contains("open");
+          closeAllTagPopovers();
+          if(willOpen){
+            tagPopover.classList.add("open");
+            state.tagPopoverPath = item.path || "";
+          }
+        };
+        tagPopover.onclick = (event) => event.stopPropagation();
+        tagPopover.querySelectorAll("input[data-tag]").forEach((input) => {
+          input.onchange = async () => {
+            const tags = MEAL_TAG_KEYS.filter((tag) => {
+              const el = tagPopover.querySelector(`input[data-tag="${tag}"]`);
+              return el && el.checked;
+            });
+            try{
+              await saveMealTags(item.path, tags);
+            }catch(err){
+              setStatus("保存标签失败：" + err.message, "warn");
+            }
+          };
+        });
+      }
       const ops = div.querySelector(".history-ops");
       ops.onclick = async (e) => {
         e.stopPropagation();
@@ -2425,16 +2986,17 @@ HTML_PAGE = """<!doctype html>
         });
         state.historyOffset += items.length;
         markSelectedHistoryCard();
-        if(state.batchDeleteMode){
+        if(state.batchEditMode){
           $("history").classList.add("batch-mode");
           Array.from($("history").querySelectorAll(".history-item")).forEach((el) => {
             const path = el.dataset.path || "";
-            const checked = state.batchDeleteSelected.has(path);
+            const checked = state.batchEditSelected.has(path);
             const checkbox = el.querySelector(".history-check input");
             if(checkbox){ checkbox.checked = checked; }
             el.classList.toggle("batch-selected", checked);
+            el.draggable = false;
           });
-          updateBatchDeleteUi();
+          updateBatchEditUi();
         }
         $("loadMoreBtn").style.display = state.historyHasMore ? "inline-block" : "none";
         if(!$("history").children.length){
@@ -2527,6 +3089,22 @@ HTML_PAGE = """<!doctype html>
           img.loading = "lazy";
           item.appendChild(img);
           item.ondblclick = () => openCustomPreview(tile.path);
+          const openBtn = document.createElement("button");
+          openBtn.type = "button";
+          openBtn.className = "custom-tile-open";
+          openBtn.textContent = "打开目录";
+          openBtn.title = "打开自定义生图目录";
+          openBtn.onclick = async (event) => {
+            event.stopPropagation();
+            try{
+              const dir = tile.output_dir || state.customImagesDir;
+              if(!dir){ setCustomStatus("未找到自定义生图目录。", "warn"); return; }
+              await openOutputPath(dir);
+            }catch(err){
+              setCustomStatus("打开目录失败：" + err.message, "warn");
+            }
+          };
+          item.appendChild(openBtn);
         }else{
           item.textContent = "正在生成";
         }
@@ -2551,6 +3129,7 @@ HTML_PAGE = """<!doctype html>
         const res = await fetch("/api/custom_image/status");
         const data = await res.json();
         if(!res.ok){ throw new Error(data.error || "读取自定义生图状态失败"); }
+        if(data.images_dir){ state.customImagesDir = data.images_dir; }
         const snapshot = JSON.stringify(data.tiles || []);
         if(snapshot !== state.customTilesSnapshot){
           state.customTilesSnapshot = snapshot;
@@ -2728,6 +3307,9 @@ HTML_PAGE = """<!doctype html>
       await loadHistory(true);
       await fetchRunStatus();
       await fetchPublishStatus({silent: true});
+      if(data.meal_tag_labels){ state.mealTagLabels = data.meal_tag_labels; }
+      if(data.publish_plan){ state.publishPlan = data.publish_plan; initPublishPlanUi(); }
+      if(data.custom_images_dir){ state.customImagesDir = data.custom_images_dir; }
       if(showMsg){ setStatus("页面状态已刷新。", "ok"); }
     }
 
@@ -2861,7 +3443,49 @@ HTML_PAGE = """<!doctype html>
       $("modeSupplementBtn").onclick = () => setMode("supplement");
       $("modeIdeaBtn").onclick = () => setMode("idea");
       $("ideaDishName").oninput = syncIdeaCountUi;
-      $("batchDeleteBtn").onclick = () => setBatchDeleteMode(!state.batchDeleteMode);
+      $("batchEditBtn").onclick = () => setBatchEditMode(!state.batchEditMode);
+      $("batchRemoveBtn")?.addEventListener("click", async () => {
+        try{
+          await 批量删除历史(Array.from(state.batchEditSelected));
+        }catch(err){
+          setStatus("批量移出失败：" + err.message, "warn");
+        }
+      });
+      $("batchEditBar")?.addEventListener("click", async (event) => {
+        const target = event.target;
+        if(!(target instanceof HTMLElement)){ return; }
+        const addTag = target.dataset?.batchAdd;
+        const removeTag = target.dataset?.batchRemove;
+        if(!addTag && !removeTag){ return; }
+        try{
+          await batchUpdateMealTags(
+            Array.from(state.batchEditSelected),
+            addTag ? {add: [addTag]} : {remove: [removeTag]}
+          );
+        }catch(err){
+          setStatus("批量标签操作失败：" + err.message, "warn");
+        }
+      });
+      $("mealFilterRow")?.addEventListener("click", (event) => {
+        const target = event.target;
+        if(!(target instanceof HTMLElement)){ return; }
+        const btn = target.closest(".meal-filter-btn");
+        if(!btn){ return; }
+        state.historyMealFilter = btn.dataset.mealFilter || "";
+        Array.from($("mealFilterRow").querySelectorAll(".meal-filter-btn")).forEach((el) => {
+          el.classList.toggle("active", el === btn);
+        });
+        applyHistorySearchFilter();
+      });
+      $("planStartDate")?.addEventListener("change", async () => {
+        const plan = {...state.publishPlan, start: $("planStartDate").value || ""};
+        try{ await savePublishPlan(plan); }catch(err){ setStatus("更新计划日期失败：" + err.message, "warn"); }
+      });
+      $("planEndDate")?.addEventListener("change", async () => {
+        const plan = {...state.publishPlan, end: $("planEndDate").value || ""};
+        try{ await savePublishPlan(plan); }catch(err){ setStatus("更新计划日期失败：" + err.message, "warn"); }
+      });
+      document.addEventListener("click", () => closeAllTagPopovers());
       $("historyColsSelect")?.addEventListener("change", () => {
         应用菜品池列数($("historyColsSelect").value || "3");
       });
@@ -2874,13 +3498,6 @@ HTML_PAGE = """<!doctype html>
         state.historySort = $("historySortSelect").value || "favorite";
         localStorage.setItem(HISTORY_SORT_STORAGE_KEY, state.historySort);
         await loadHistory(true);
-      };
-      $("batchDeleteAllBtn").onclick = async () => {
-        try{
-          await 批量删除历史(Array.from(state.batchDeleteSelected));
-        }catch(err){
-          setStatus("批量删除失败：" + err.message, "warn");
-        }
       };
       $("imageTabBtn").onclick = () => setRightTab("image");
       $("textTabBtn").onclick = () => setRightTab("text");
@@ -2980,6 +3597,7 @@ HTML_PAGE = """<!doctype html>
     加载面板栏宽();
     加载菜品池列数();
     初始化拖拽分栏();
+    bindHistoryPoolDropZone();
     loadState();
     fetchCustomImageStatus({silent: true});
     startAutoRefresh();
@@ -3503,6 +4121,7 @@ def list_history(limit: int = 30, offset: int = 0, sort: str = "favorite") -> li
     if limit < 1:
         limit = 30
     favorites = load_dish_favorites()
+    meal_tags_map = load_dish_meal_tags()
     dirs = sort_history_dirs(collect_history_dirs(), sort, favorites)
     rows: list[dict[str, Any]] = []
     sliced = dirs[offset : offset + limit]
@@ -3524,6 +4143,7 @@ def list_history(limit: int = 30, offset: int = 0, sort: str = "favorite") -> li
                 "created_at": format_folder_time(folder.name),
                 "favorited": folder_key in favorites,
                 "favorited_at": favorites.get(folder_key, ""),
+                "meal_tags": meal_tags_map.get(folder_key, []),
                 "path": str(folder),
                 "preview_image": summary.get("preview_image", ""),
                 "images": summary.get("images", []),
@@ -3555,6 +4175,9 @@ def delete_history_folders(raw_paths: list[str]) -> list[str]:
         if not path_text:
             continue
         archived.append(str(archive_history_folder(path_text)))
+        remove_dish_favorite(path_text)
+        remove_dish_meal_tags(path_text)
+        remove_path_from_publish_plan(path_text)
     if not archived:
         raise ValueError("没有可移出的菜品目录。")
     return archived
@@ -3927,8 +4550,14 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                     "history_revision": history_revision(),
                     "last_result": LAST_RESULT or {},
                     "publish_platforms": {key: item["label"] for key, item in PUBLISH_PLATFORMS.items()},
+                    "meal_tag_labels": MEAL_TAG_LABELS,
+                    "publish_plan": load_publish_plan(),
+                    "custom_images_dir": str((ROOT_DIR / "custom_image_gen" / "images").resolve()),
                 }
             )
+            return
+        if parsed.path == "/api/publish_plan":
+            self._send_json(load_publish_plan())
             return
         if parsed.path == "/api/history":
             query = parse_qs(parsed.query)
@@ -4050,6 +4679,9 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             "/api/publish_login_confirm",
             "/api/history_batch_delete",
             "/api/history_favorite",
+            "/api/dish_tags",
+            "/api/dish_tags/batch",
+            "/api/publish_plan",
             "/api/text_assets_save",
         }:
             self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
@@ -4090,6 +4722,38 @@ class V2PanelHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/history_favorite":
             try:
                 self._send_json(toggle_dish_favorite(str(payload.get("path", "")).strip()))
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
+            return
+        if parsed.path == "/api/dish_tags":
+            try:
+                self._send_json(
+                    set_dish_meal_tags(
+                        str(payload.get("path", "")).strip(),
+                        payload.get("tags") or [],
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
+            return
+        if parsed.path == "/api/dish_tags/batch":
+            try:
+                raw_paths = payload.get("paths") or []
+                if not isinstance(raw_paths, list):
+                    raise ValueError("paths 必须是数组。")
+                self._send_json(
+                    batch_update_dish_meal_tags(
+                        [str(item) for item in raw_paths],
+                        add_tags=payload.get("add") or payload.get("add_tags") or [],
+                        remove_tags=payload.get("remove") or payload.get("remove_tags") or [],
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
+            return
+        if parsed.path == "/api/publish_plan":
+            try:
+                self._send_json(save_publish_plan(payload))
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": str(exc)}, code=400)
             return
