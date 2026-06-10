@@ -56,7 +56,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.10"
+PANEL_VERSION = "v1.11"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -602,20 +602,18 @@ def force_stop_background_work() -> None:
 
 def _spawn_panel_restart_script() -> None:
     bat_path = REPO_ROOT / "restart_v2_web_panel.bat"
-    if not bat_path.is_file():
-        python_exe = resolve_project_python()
-        script_path = ROOT_DIR / "web_panel.py"
+    if bat_path.is_file():
         subprocess.Popen(
-            [python_exe, str(script_path)],
+            ["cmd", "/c", "start", "/min", "", str(bat_path)],
             cwd=str(REPO_ROOT),
-            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
-            | getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return
+    python_exe = resolve_project_python()
+    script_path = ROOT_DIR / "web_panel.py"
     subprocess.Popen(
-        ["cmd", "/c", str(bat_path)],
+        [python_exe, str(script_path)],
         cwd=str(REPO_ROOT),
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
     )
 
 
@@ -698,6 +696,7 @@ HTML_PAGE = """<!doctype html>
     .chips{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     .chip{font-size:12px;background:#0b1220;border:1px solid #334155;padding:6px 10px;border-radius:999px;color:#dbe7ff}
     .version-tag{font-size:12px;color:#e2e8f0;background:#1e293b;border:1px solid #475569;border-radius:999px;padding:4px 10px}
+    .offline-tag{font-size:12px;color:#fecaca;background:#450a0a;border:1px solid #7f1d1d;border-radius:999px;padding:4px 10px}
     .top-actions{display:flex;gap:8px}
     button{transition:background .15s ease,border-color .15s ease,box-shadow .15s ease,color .15s ease,transform .12s ease}
     button:hover{border-color:#60a5fa!important;box-shadow:0 0 0 2px rgba(96,165,250,.22)}
@@ -1082,6 +1081,7 @@ HTML_PAGE = """<!doctype html>
       <div class="top-brand">
         <div class="title">造菜控制台</div>
         <span class="version-tag">__PANEL_VERSION__</span>
+        <span id="panelOfflineTag" class="offline-tag hidden">面板已断开</span>
       </div>
       <div class="top-actions">
         <button id="openOutputTopBtn" type="button">打开目录</button>
@@ -1467,6 +1467,7 @@ HTML_PAGE = """<!doctype html>
       publishLogIndex: 0,
       publishPolling: false,
       publishPollTimer: null,
+      panelOnline: true,
       batchEditMode: false,
       batchEditSelected: new Set(),
       selectedHistoryItem: null,
@@ -2236,6 +2237,49 @@ HTML_PAGE = """<!doctype html>
       box.className = "publish-status" + (level ? (" " + level) : "");
     }
 
+    function isFetchNetworkError(err){
+      const msg = String(err?.message || err || "");
+      return err instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(msg);
+    }
+
+    async function pingPanel(timeoutMs=2500){
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      try{
+        const res = await fetch("/api/state", {cache:"no-store", signal: ctrl.signal});
+        return res.ok;
+      }catch{
+        return false;
+      }finally{
+        clearTimeout(timer);
+      }
+    }
+
+    function setPanelOnlineUi(online){
+      state.panelOnline = Boolean(online);
+      const tag = $("panelOfflineTag");
+      if(tag){ tag.classList.toggle("hidden", online); }
+      const publishRunning = Boolean(state.publishSnapshot?.running);
+      if($("publishBtn")){
+        $("publishBtn").disabled = !online || publishRunning;
+      }
+      if($("runBtn")){
+        $("runBtn").disabled = !online;
+      }
+    }
+
+    async function ensurePanelOnline(actionLabel="操作"){
+      if(await pingPanel()){
+        setPanelOnlineUi(true);
+        return true;
+      }
+      setPanelOnlineUi(false);
+      const msg = `面板未连接（8765 无响应），无法${actionLabel}。请点击顶栏「重启程序」。`;
+      setStatus(msg, "warn");
+      setPublishStatus(msg, "warn");
+      return false;
+    }
+
     function showLoginModal(message){
       $("loginModalMsg").textContent = message || "请在浏览器中完成平台登录后，点击下方按钮继续。";
       $("loginModal").classList.remove("hidden");
@@ -2310,6 +2354,13 @@ HTML_PAGE = """<!doctype html>
         }
         if(data.running){ state.publishPolling = true; }
       }catch(err){
+        if(isFetchNetworkError(err)){
+          setPanelOnlineUi(false);
+          if(!silent){
+            setPublishStatus("面板未连接，请点击顶栏「重启程序」。", "warn");
+          }
+          return;
+        }
         if(!silent){ setPublishStatus("读取发布状态失败：" + err.message, "warn"); }
       }
     }
@@ -2322,9 +2373,11 @@ HTML_PAGE = """<!doctype html>
       }catch{}
       stopPublishStatusPolling();
       stopPolling();
+      setPanelOnlineUi(false);
       setTimeout(() => {
-        setStatus("程序已终止或连接已断开。可手动双击 restart_v2_web_panel.bat 重新启动。", "warn");
-      }, 1200);
+        setStatus("程序已终止。请点击顶栏「重启程序」恢复服务。", "warn");
+        setPublishStatus("面板已停止，发布/造菜不可用。", "warn");
+      }, 800);
     }
 
     async function restartPanelProgram(){
@@ -2354,6 +2407,7 @@ HTML_PAGE = """<!doctype html>
     }
 
     async function startPublish(){
+      if(!await ensurePanelOnline("发布")){ return; }
       const outputPath = (state.selectedHistoryPath || state.currentOutputPath || "").trim();
       if(!outputPath || outputPath === "-"){
         setPublishStatus("请先在菜品池或发布计划选择一个菜品。", "warn");
@@ -2380,6 +2434,11 @@ HTML_PAGE = """<!doctype html>
         $("publishBtn").disabled = true;
         await fetchPublishStatus();
       }catch(err){
+        if(isFetchNetworkError(err)){
+          setPanelOnlineUi(false);
+          setPublishStatus("面板未连接，请点击顶栏「重启程序」后再发布。", "warn");
+          return;
+        }
         setPublishStatus("发布失败：" + err.message, "warn");
       }
     }
@@ -3099,7 +3158,12 @@ HTML_PAGE = """<!doctype html>
         await loadDishDetail(path);
       }catch(err){
         applyDishDetail(item);
-        $("resultMsg").textContent = "读取菜品详情失败，已显示缓存信息：" + String(err.message || err);
+        if(isFetchNetworkError(err)){
+          setPanelOnlineUi(false);
+          $("resultMsg").textContent = "面板未连接，已显示缓存信息。请点击顶栏「重启程序」。";
+        }else{
+          $("resultMsg").textContent = "读取菜品详情失败，已显示缓存信息：" + String(err.message || err);
+        }
         $("resultMsg").className = "status warn";
       }
       if(state.mode === "target"){
@@ -3489,8 +3553,11 @@ HTML_PAGE = """<!doctype html>
 
     function startAutoRefresh(){
       if(state.autoRefreshTimer){ return; }
-      state.autoRefreshTimer = setInterval(() => {
+      state.autoRefreshTimer = setInterval(async () => {
         if(document.hidden){ return; }
+        const online = await pingPanel(1800);
+        if(online !== state.panelOnline){ setPanelOnlineUi(online); }
+        if(!online){ return; }
         fetchRunStatus({silent: true});
         fetchPublishStatus({silent: true});
         fetchCustomImageStatus({silent: true});
@@ -3906,6 +3973,7 @@ HTML_PAGE = """<!doctype html>
     加载菜品池列数();
     初始化拖拽分栏();
     bindHistoryPoolDropZone();
+    pingPanel().then((online) => setPanelOnlineUi(online));
     loadState();
     fetchCustomImageStatus({silent: true});
     startAutoRefresh();
