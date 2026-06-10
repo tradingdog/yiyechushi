@@ -56,7 +56,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.04"
+PANEL_VERSION = "v1.05"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -660,6 +660,7 @@ HTML_PAGE = """<!doctype html>
       display:flex;flex-direction:column;gap:2px;padding:2px;border-radius:6px;background:#1e293b;border:1px solid #475569;
       color:#e2e8f0;cursor:grab;min-width:0;flex:1;
     }
+    .plan-slot-chip.selected{border-color:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,.28)}
     .plan-slot-chip:active{cursor:grabbing}
     .plan-slot-chip img{width:100%;height:42px;object-fit:cover;border-radius:4px;background:#111827}
     .plan-slot-chip-name{font-size:9px;line-height:1.25;word-break:break-all;text-align:center}
@@ -1382,6 +1383,7 @@ HTML_PAGE = """<!doctype html>
       batchEditMode: false,
       batchEditSelected: new Set(),
       selectedHistoryItem: null,
+      selectionSource: "pool",
       customRefs: [],
       customPolling: false,
       customTilesSnapshot: ""
@@ -1634,6 +1636,7 @@ HTML_PAGE = """<!doctype html>
       state.publishPlan = data;
       renderPublishPlan();
       applyHistorySearchFilter();
+      reconcileSelectionSource();
       return data;
     }
 
@@ -1696,6 +1699,10 @@ HTML_PAGE = """<!doctype html>
         event.dataTransfer.setData("application/x-plan-from-date", date);
         event.dataTransfer.setData("application/x-plan-from-slot", slot);
         event.dataTransfer.effectAllowed = "move";
+      });
+      chip.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        await selectDishByPath(path, "plan");
       });
       chip.addEventListener("dblclick", async (event) => {
         event.stopPropagation();
@@ -1779,6 +1786,7 @@ HTML_PAGE = """<!doctype html>
         });
         box.appendChild(day);
       });
+      markSelectedDishUi();
     }
 
     function initPublishPlanUi(){
@@ -2194,7 +2202,7 @@ HTML_PAGE = """<!doctype html>
     async function startPublish(){
       const outputPath = (state.selectedHistoryPath || state.currentOutputPath || "").trim();
       if(!outputPath || outputPath === "-"){
-        setPublishStatus("请先在左侧菜品池选择一个菜品。", "warn");
+        setPublishStatus("请先在菜品池或发布计划选择一个菜品。", "warn");
         return;
       }
       const platforms = getSelectedPublishPlatforms();
@@ -2854,6 +2862,8 @@ HTML_PAGE = """<!doctype html>
       if(state.selectedHistoryPath === path){
         state.selectedHistoryPath = "";
         state.selectedHistoryItem = null;
+        state.selectionSource = "pool";
+        markSelectedDishUi();
       }
     }
 
@@ -2874,6 +2884,8 @@ HTML_PAGE = """<!doctype html>
       if(list.includes(state.selectedHistoryPath)){
         state.selectedHistoryPath = "";
         state.selectedHistoryItem = null;
+        state.selectionSource = "pool";
+        markSelectedDishUi();
       }
       setBatchEditMode(false);
       bumpSuppressHistoryAutoReload();
@@ -2882,13 +2894,54 @@ HTML_PAGE = """<!doctype html>
       applyHistorySearchFilter();
     }
 
-    async function selectHistoryItem(item, card){
-      state.selectedHistoryPath = item.path;
+    function markSelectedDishUi(){
+      const path = state.selectedHistoryPath || "";
+      const source = state.selectionSource || "pool";
+      Array.from($("history").querySelectorAll(".history-item")).forEach((el) => {
+        el.classList.toggle("active", source === "pool" && el.dataset.path === path);
+      });
+      Array.from(document.querySelectorAll(".plan-slot-chip")).forEach((el) => {
+        el.classList.toggle("selected", source === "plan" && el.dataset.path === path);
+      });
+    }
+
+    function reconcileSelectionSource(){
+      const path = state.selectedHistoryPath || "";
+      if(!path){ markSelectedDishUi(); return; }
+      const inPlan = collectPlanAssignedPaths().has(path);
+      const poolVisible = Array.from($("history").querySelectorAll(".history-item")).some((el) => (
+        el.dataset.path === path && el.style.display !== "none"
+      ));
+      if(inPlan && !poolVisible){
+        state.selectionSource = "plan";
+      }else if(poolVisible){
+        state.selectionSource = "pool";
+      }
+      markSelectedDishUi();
+    }
+
+    async function selectDishByPath(path, source="pool"){
+      if(!path){ return; }
+      let item = state.historyItemCache[path];
+      if(!item?.dish_name || !item?.images?.length){
+        try{
+          const res = await fetch(`/api/dish_detail?path=${encodeURIComponent(path)}`);
+          const detail = await res.json();
+          if(res.ok){
+            item = {...(item || {}), ...detail, path};
+            state.historyItemCache[path] = item;
+          }
+        }catch{}
+      }
+      if(!item){ item = {path, dish_name: getDishLabel(path)}; }
+
+      state.selectedHistoryPath = path;
       state.selectedHistoryItem = item;
-      Array.from($("history").querySelectorAll(".history-item")).forEach((el) => el.classList.remove("active"));
-      if(card){ card.classList.add("active"); }
+      state.selectionSource = source;
+      markSelectedDishUi();
+
       try{
-        await loadDishDetail(item.path);
+        await loadDishDetail(path);
       }catch(err){
         applyDishDetail(item);
         $("resultMsg").textContent = "读取菜品详情失败，已显示缓存信息：" + String(err.message || err);
@@ -2897,12 +2950,16 @@ HTML_PAGE = """<!doctype html>
       if(state.mode === "target"){
         applyTargetDishFromItem(state.selectedHistoryItem || item);
       }
-      await loadTextAssets(item.path);
+      await loadTextAssets(path);
       if($("resultMsg").className === "status"){
         $("resultMsg").textContent = "已同步菜品目录状态。";
       }
       updateViewContextBar();
       setRunState(state.running, state.runningPercent);
+    }
+
+    async function selectHistoryItem(item, card){
+      await selectDishByPath(item.path, "pool");
     }
 
     async function toggleHistoryFavorite(path, button){
@@ -3045,11 +3102,7 @@ HTML_PAGE = """<!doctype html>
     }
 
     function markSelectedHistoryCard(){
-      const selected = state.selectedHistoryPath;
-      if(!selected){ return; }
-      Array.from($("history").querySelectorAll(".history-item")).forEach((el) => {
-        el.classList.toggle("active", el.dataset.path === selected);
-      });
+      markSelectedDishUi();
     }
 
     async function loadHistory(reset=false){
