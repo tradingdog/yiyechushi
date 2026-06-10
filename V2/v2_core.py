@@ -1959,21 +1959,51 @@ _TITLE_LIMIT_HINT = (
     "标题必须不超过 20 个汉字（40 字符上限；汉字/表情/符号等非 ASCII 计 2、英文/数字计 1，表情也算字符）。"
 )
 
+_TITLE_CLICHE_FORBIDDEN_HINT = (
+    "标题禁止「几碗饭/连吃几碗/连炫几碗」类套话（如「三碗饭」「连炫三碗」「连吃三碗」「能干两碗」等）；"
+    "勿用数量+碗/碗饭作钩子，换写口感、做法亮点、场景或反差，各平台标题句式要有变化。"
+)
+
+_FORBIDDEN_TITLE_CLICHE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"连[吃炫馋扒撬]"), "连吃/连炫几碗类套话"),
+    (re.compile(r"[吃炫干馋][一二三四五六七八九十百千万两\d]+碗"), "吃/炫N碗类套话"),
+    (re.compile(r"[一二三四五六七八九十百千万两\d]+碗饭"), "N碗饭类套话"),
+)
+
+
+def reject_cliche_bowl_title(title: str) -> str | None:
+    text = str(title or "").strip()
+    if not text:
+        return None
+    for pattern, label in _FORBIDDEN_TITLE_CLICHE_PATTERNS:
+        if pattern.search(text):
+            return (
+                f"标题含禁用{label}（如「三碗饭」「连炫三碗」「连吃三碗」），"
+                f"请改写：{text}"
+            )
+    return None
+
 V2_PUBLISH_PLATFORM_TASKS: dict[str, str] = {
-    "douyin": f"为这个新菜写抖音的标题、描述和正好 5 个话题（不超过 5 个）。{_TITLE_LIMIT_HINT}要有钩子，符合抖音爆款思路。",
+    "douyin": (
+        f"为这个新菜写抖音的标题、描述和正好 5 个话题（不超过 5 个）。{_TITLE_LIMIT_HINT}"
+        f"{_TITLE_CLICHE_FORBIDDEN_HINT}要有钩子，符合抖音爆款思路。"
+    ),
     "xiaohongshu": (
         f"为这个新菜写小红书的标题、描述和 10 个话题。{_TITLE_LIMIT_HINT}"
-        "要有钩子，符合小红书图文用户的爆款思路。"
+        f"{_TITLE_CLICHE_FORBIDDEN_HINT}要有钩子，符合小红书图文用户的爆款思路。"
     ),
     "weixin_mp": (
         f"为这个新菜写微信公众号的标题、描述和正好 10 个话题（不超过 10 个）。"
-        f"{_TITLE_LIMIT_HINT}要有钩子，符合公众号图文用户的阅读习惯。"
+        f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}要有钩子，符合公众号图文用户的阅读习惯。"
     ),
     "weixin_channels": (
         f"为这个新菜写微信视频号的标题、描述和正好 30 个话题（不超过 30 个）。"
-        f"{_TITLE_LIMIT_HINT}要有钩子，符合视频号图文传播特点。"
+        f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}要有钩子，符合视频号图文传播特点。"
     ),
-    "kuaishou": f"为这个新菜写快手的标题、描述和 4 个话题。{_TITLE_LIMIT_HINT}要有钩子，符合快手爆款思路。",
+    "kuaishou": (
+        f"为这个新菜写快手的标题、描述和 4 个话题。{_TITLE_LIMIT_HINT}"
+        f"{_TITLE_CLICHE_FORBIDDEN_HINT}要有钩子，符合快手爆款思路。"
+    ),
 }
 
 
@@ -2005,11 +2035,12 @@ def build_v2_publish_multimodal_prompt(dish_payload: dict[str, str]) -> str:
 
 通用要求：
 1) 标题、描述都要口语化、有食欲、有画面感，禁止套话（如“先收藏”“原创融合”“想吃时照着做”）。
-2) 描述 2–4 句，写口感、场景、做法亮点，可自然提菜名，但不要写成说明书。
-3) topics 数组每项以 # 开头，不要菜品全名话题，不要 #阿叶造新菜。
-4) 各平台 title 均必须不超过 20 个汉字（40 字符；汉字/表情/符号等非 ASCII 计 2、英文/数字计 1，表情也算字符），超出会被截断或判不合格。
-5) topics 数组长度必须与各平台要求完全一致：抖音 5、小红书 10、微信公众号 10、微信视频号 30、快手 4；不能合并公众号与视频号。
-6) 只输出 JSON，不要 Markdown，不要解释。格式如下：
+2) 各平台标题禁止「几碗饭/连吃几碗/连炫几碗」类句式（如「三碗饭」「连炫三碗」「连吃三碗」）；勿用数量+碗作钩子，句式要有变化。
+3) 描述 2–4 句，写口感、场景、做法亮点，可自然提菜名，但不要写成说明书。
+4) topics 数组每项以 # 开头，不要菜品全名话题，不要 #阿叶造新菜。
+5) 各平台 title 均必须不超过 20 个汉字（40 字符；汉字/表情/符号等非 ASCII 计 2、英文/数字计 1，表情也算字符），超出会被截断或判不合格。
+6) topics 数组长度必须与各平台要求完全一致：抖音 5、小红书 10、微信公众号 10、微信视频号 30、快手 4；不能合并公众号与视频号。
+7) 只输出 JSON，不要 Markdown，不要解释。格式如下：
 {{
   "douyin": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
   "xiaohongshu": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
@@ -2046,6 +2077,9 @@ def parse_v2_publish_platform_payload(raw_payload: dict[str, Any]) -> dict[str, 
         if not isinstance(block, dict):
             raise ValueError(f"缺少平台字段：{platform_key}")
         title = normalize_publish_title(str(block.get("title", "")).strip(), platform_key=platform_key)
+        cliche_error = reject_cliche_bowl_title(title)
+        if cliche_error:
+            raise ValueError(f"{platform_key} {cliche_error}")
         description = str(block.get("description", "")).strip()
         topics = normalize_v2_publish_topics(block.get("topics"), topic_count)
         if not title:
