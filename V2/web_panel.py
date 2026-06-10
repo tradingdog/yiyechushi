@@ -56,7 +56,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.03"
+PANEL_VERSION = "v1.04"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -1593,9 +1593,9 @@ HTML_PAGE = """<!doctype html>
     }
 
     function dirnamePath(path){
-      const normalized = String(path || "").replace(/\\/g, "/");
-      const idx = normalized.lastIndexOf("/");
-      return idx > 0 ? normalized.slice(0, idx) : normalized;
+      const parts = String(path || "").split(/[/\\\\]/);
+      parts.pop();
+      return parts.join("/");
     }
 
     function collectPlanAssignedPaths(){
