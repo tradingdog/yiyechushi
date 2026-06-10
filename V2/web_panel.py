@@ -56,7 +56,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.09"
+PANEL_VERSION = "v1.10"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -124,6 +124,8 @@ PUBLISH_LOGIN_MESSAGE = ""
 PUBLISH_LOGIN_CONFIRM_KIND = "enter"
 PUBLISH_LOGIN_EVENT: threading.Event | None = None
 MAX_PUBLISH_LOG_LINES = 2000
+PANEL_SERVER: ThreadingHTTPServer | None = None
+ACTIVE_PUBLISH_PROCS: list[subprocess.Popen] = []
 
 
 def append_run_log(text: str) -> None:
@@ -472,14 +474,19 @@ def run_single_platform_publish(platform_key: str, output_dir: Path) -> None:
         errors="replace",
         env=publish_env,
     )
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        append_publish_log(line)
-        confirm_kind = _wait_for_publish_login(line, platform["label"])
-        if confirm_kind and proc.stdin is not None:
-            proc.stdin.write("y\n" if confirm_kind == "y" else "\n")
-            proc.stdin.flush()
-    return_code = proc.wait()
+    ACTIVE_PUBLISH_PROCS.append(proc)
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            append_publish_log(line)
+            confirm_kind = _wait_for_publish_login(line, platform["label"])
+            if confirm_kind and proc.stdin is not None:
+                proc.stdin.write("y\n" if confirm_kind == "y" else "\n")
+                proc.stdin.flush()
+        return_code = proc.wait()
+    finally:
+        if proc in ACTIVE_PUBLISH_PROCS:
+            ACTIVE_PUBLISH_PROCS.remove(proc)
     if return_code != 0:
         raise RuntimeError(f"{platform['label']} 发布脚本退出码 {return_code}，请查看日志。")
     append_publish_log(f"===== 完成发布：{platform['label']} =====")
@@ -560,6 +567,78 @@ def confirm_publish_login() -> None:
         event = PUBLISH_LOGIN_EVENT
     if event is not None:
         event.set()
+
+
+def _kill_subprocess(proc: subprocess.Popen[Any]) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except Exception:  # noqa: BLE001
+        pass
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def force_stop_background_work() -> None:
+    global RUNNING, CURRENT_TASK, PUBLISH_RUNNING, PUBLISH_LOGIN_REQUIRED
+    with RUN_LOCK:
+        TASK_QUEUE.clear()
+        RUNNING = False
+        CURRENT_TASK = None
+    with PUBLISH_LOCK:
+        PUBLISH_RUNNING = False
+        PUBLISH_LOGIN_REQUIRED = False
+        login_event = PUBLISH_LOGIN_EVENT
+    if login_event is not None:
+        login_event.set()
+    for proc in list(ACTIVE_PUBLISH_PROCS):
+        _kill_subprocess(proc)
+
+
+def _spawn_panel_restart_script() -> None:
+    bat_path = REPO_ROOT / "restart_v2_web_panel.bat"
+    if not bat_path.is_file():
+        python_exe = resolve_project_python()
+        script_path = ROOT_DIR / "web_panel.py"
+        subprocess.Popen(
+            [python_exe, str(script_path)],
+            cwd=str(REPO_ROOT),
+            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return
+    subprocess.Popen(
+        ["cmd", "/c", str(bat_path)],
+        cwd=str(REPO_ROOT),
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
+def schedule_panel_shutdown(*, restart: bool = False) -> None:
+    force_stop_background_work()
+    append_run_log(f"[{time.strftime('%H:%M:%S')}] 面板{'重启' if restart else '终止'}请求已收到。")
+
+    def _finish() -> None:
+        time.sleep(0.35)
+        if restart:
+            try:
+                _spawn_panel_restart_script()
+            except Exception as exc:  # noqa: BLE001
+                append_run_log(f"[{time.strftime('%H:%M:%S')}] 启动重启脚本失败：{exc}")
+        server = PANEL_SERVER
+        if server is not None:
+            try:
+                server.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
+        os._exit(0)
+
+    threading.Thread(target=_finish, daemon=True).start()
 
 
 class LiveLogWriter:
@@ -1008,6 +1087,8 @@ HTML_PAGE = """<!doctype html>
         <button id="openOutputTopBtn" type="button">打开目录</button>
         <button id="copyOutputTopBtn" type="button">复制路径</button>
         <button id="refreshTopBtn" type="button">刷新菜品池</button>
+        <button id="restartPanelBtn" type="button">重启程序</button>
+        <button id="shutdownPanelBtn" type="button" class="danger-btn">终止程序</button>
       </div>
     </div>
 
@@ -2231,6 +2312,45 @@ HTML_PAGE = """<!doctype html>
       }catch(err){
         if(!silent){ setPublishStatus("读取发布状态失败：" + err.message, "warn"); }
       }
+    }
+
+    async function shutdownPanelProgram(){
+      if(!confirm("确定终止造菜控制台？\\n进行中的造菜/发布任务会被中断，8765 端口服务将停止。")){ return; }
+      setStatus("正在终止程序…", "warn");
+      try{
+        await fetch("/api/panel_shutdown", {method:"POST"});
+      }catch{}
+      stopPublishStatusPolling();
+      stopPolling();
+      setTimeout(() => {
+        setStatus("程序已终止或连接已断开。可手动双击 restart_v2_web_panel.bat 重新启动。", "warn");
+      }, 1200);
+    }
+
+    async function restartPanelProgram(){
+      if(!confirm("确定重启造菜控制台？\\n页面将在服务恢复后自动刷新。")){ return; }
+      setStatus("正在重启程序，请稍候…");
+      try{
+        await fetch("/api/panel_restart", {method:"POST"});
+      }catch{}
+      stopPublishStatusPolling();
+      stopPolling();
+      let tries = 0;
+      const timer = setInterval(async () => {
+        tries += 1;
+        try{
+          const res = await fetch("/api/state", {cache:"no-store"});
+          if(res.ok){
+            clearInterval(timer);
+            setStatus("程序已重启，正在刷新页面…", "ok");
+            location.reload();
+          }
+        }catch{}
+        if(tries >= 45){
+          clearInterval(timer);
+          setStatus("重启超时，请手动双击 restart_v2_web_panel.bat。", "warn");
+        }
+      }, 1000);
     }
 
     async function startPublish(){
@@ -3738,6 +3858,8 @@ HTML_PAGE = """<!doctype html>
       };
       $("openOutputTopBtn").onclick = async () => { try{ await openOutputPath(); }catch(err){ setStatus("打开目录失败：" + err.message, "warn"); } };
       $("refreshTopBtn").onclick = () => loadState(true);
+      $("restartPanelBtn").onclick = () => restartPanelProgram();
+      $("shutdownPanelBtn").onclick = () => shutdownPanelProgram();
       $("taskBar").addEventListener("click", (event) => {
         const target = event.target;
         if(!(target instanceof HTMLElement)){ return; }
@@ -4869,6 +4991,8 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             "/api/dish_tags/batch",
             "/api/publish_plan",
             "/api/text_assets_save",
+            "/api/panel_shutdown",
+            "/api/panel_restart",
         }:
             self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
             return
@@ -4949,6 +5073,14 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True})
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": str(exc)}, code=400)
+            return
+        if parsed.path == "/api/panel_shutdown":
+            schedule_panel_shutdown(restart=False)
+            self._send_json({"ok": True, "message": "面板正在终止。"})
+            return
+        if parsed.path == "/api/panel_restart":
+            schedule_panel_shutdown(restart=True)
+            self._send_json({"ok": True, "message": "面板正在重启。"})
             return
         if parsed.path == "/api/publish_start":
             try:
@@ -5062,10 +5194,12 @@ class V2PanelHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    global PANEL_SERVER
     reexec_in_project_venv_if_needed()
     ensure_runtime_config_loaded()
     init_custom_image_service()
     server = ThreadingHTTPServer((HOST, PORT), V2PanelHandler)
+    PANEL_SERVER = server
     print(f"V2 前端面板已启动：http://{HOST}:{PORT}")
     print("按 Ctrl+C 停止服务。")
     server.serve_forever()
