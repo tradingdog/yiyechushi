@@ -56,7 +56,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.02"
+PANEL_VERSION = "v1.03"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -651,16 +651,19 @@ HTML_PAGE = """<!doctype html>
     .plan-day-date{font-size:11px;color:#94a3b8;margin-bottom:4px}
     .plan-day-slots{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
     .plan-slot{
-      min-height:42px;border:1px dashed #334155;border-radius:6px;background:#0b1220;padding:3px;
+      min-height:78px;border:1px dashed #334155;border-radius:6px;background:#0b1220;padding:3px;
       display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:2px;font-size:10px;color:#64748b;
     }
     .plan-slot.drag-over{border-color:#60a5fa;background:#172554}
-    .plan-slot-label{font-size:9px;color:#64748b;text-align:center;line-height:1}
+    .plan-slot-label{font-size:9px;color:#64748b;text-align:center;line-height:1;flex:0 0 auto}
     .plan-slot-chip{
-      font-size:10px;line-height:1.25;padding:3px 4px;border-radius:4px;background:#1e293b;border:1px solid #475569;
-      color:#e2e8f0;cursor:grab;word-break:break-all;
+      display:flex;flex-direction:column;gap:2px;padding:2px;border-radius:6px;background:#1e293b;border:1px solid #475569;
+      color:#e2e8f0;cursor:grab;min-width:0;flex:1;
     }
     .plan-slot-chip:active{cursor:grabbing}
+    .plan-slot-chip img{width:100%;height:42px;object-fit:cover;border-radius:4px;background:#111827}
+    .plan-slot-chip-name{font-size:9px;line-height:1.25;word-break:break-all;text-align:center}
+    .plan-slot-chip.empty-img .plan-slot-chip-name{margin-top:8px}
     .meal-filter-row{display:flex;flex-wrap:wrap;gap:5px;margin:0 0 8px}
     .meal-filter-btn{
       padding:4px 9px;font-size:11px;border-radius:999px;border:1px solid #334155;background:#0b1220;color:#cbd5e1;cursor:pointer;
@@ -671,17 +674,19 @@ HTML_PAGE = """<!doctype html>
     .batch-edit-bar.open{display:flex}
     .batch-edit-bar button{padding:5px 8px;font-size:11px;border-radius:8px;border:1px solid #475569;background:#111827;color:#e2e8f0;cursor:pointer}
     .batch-edit-bar .danger-btn{border-color:#7f1d1d;color:#fecaca}
-    .history-cover{position:relative}
+    .history-cover{position:relative;overflow:visible}
+    .history-cover-media{width:100%;height:100%;overflow:hidden;border-radius:7px;background:#111827;display:flex;align-items:center;justify-content:center}
     .history-tag-add{
-      position:absolute;top:3px;right:3px;z-index:4;width:18px;height:18px;border-radius:999px;border:1px solid #475569;
+      position:absolute;top:3px;right:3px;z-index:14;width:18px;height:18px;border-radius:999px;border:1px solid #475569;
       background:rgba(15,23,42,.9);color:#e2e8f0;font-size:13px;line-height:16px;padding:0;cursor:pointer;
     }
     .history-tag-badges{display:flex;flex-wrap:wrap;gap:2px;margin-top:3px}
     .history-tag-badge{font-size:9px;padding:1px 4px;border-radius:999px;background:#1e3a5f;color:#bfdbfe;border:1px solid #334155}
     .tag-popover{
-      position:absolute;top:22px;right:0;z-index:12;min-width:108px;padding:6px;border:1px solid #475569;border-radius:8px;
+      position:absolute;top:22px;right:0;z-index:30;min-width:112px;padding:6px 8px;border:1px solid #475569;border-radius:8px;
       background:#111827;box-shadow:var(--shadow);display:none;
     }
+    .history-grid.pool-compact .tag-popover{left:0;right:auto}
     .tag-popover.open{display:block}
     .tag-popover label{display:flex;align-items:center;gap:5px;margin:0 0 4px;font-size:11px;color:#e2e8f0;cursor:pointer}
     .tag-popover input{width:auto;margin:0}
@@ -869,7 +874,7 @@ HTML_PAGE = """<!doctype html>
     .history-grid.pool-compact.batch-mode .history-check{display:flex}
     .history-empty{color:var(--sub);font-size:12px;grid-column:1/-1}
     .history-item{
-      position:relative;border:1px solid #2f3b55;border-radius:10px;background:#0f172a;overflow:hidden;cursor:pointer;
+      position:relative;border:1px solid #2f3b55;border-radius:10px;background:#0f172a;overflow:visible;cursor:pointer;
       transition:transform .15s ease,border-color .15s ease;
       display:grid;grid-template-columns:18px 52px 1fr;grid-template-areas:"check cover meta" "ops ops ops";gap:6px;align-items:center;padding:8px;
     }
@@ -916,7 +921,7 @@ HTML_PAGE = """<!doctype html>
     .view-context-bar strong{color:#e2e8f0;font-weight:700}
     .running-context.active{color:#fbbf24}
     .running-context.publish{color:#86efac}
-    .history-cover{grid-area:cover;width:52px;height:52px;background:#111827;border-radius:7px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+    .history-cover{grid-area:cover;width:52px;height:52px;background:transparent;border-radius:7px;display:flex;align-items:center;justify-content:center;overflow:visible}
     .history-cover img{width:100%;height:100%;object-fit:cover}
     .history-meta{grid-area:meta;padding:0;min-width:0}
     .history-meta-top{display:flex;align-items:flex-start;justify-content:space-between;gap:4px}
@@ -1359,6 +1364,7 @@ HTML_PAGE = """<!doctype html>
       historySearchQuery: "",
       galleryLightboxOpen: false,
       galleryLightboxIndex: 0,
+      lightboxSource: "gallery",
       activeRightTab: "image",
       selectedHistoryPath: "",
       galleryFilter: "all",
@@ -1579,6 +1585,30 @@ HTML_PAGE = """<!doctype html>
       return parts.length >= 3 ? parts.slice(2).join("_") : base;
     }
 
+    function getDishPreviewImage(path){
+      const item = state.historyItemCache[path];
+      if(item?.preview_image){ return item.preview_image; }
+      const images = item?.images || [];
+      return images.length ? images[0] : "";
+    }
+
+    function dirnamePath(path){
+      const normalized = String(path || "").replace(/\\/g, "/");
+      const idx = normalized.lastIndexOf("/");
+      return idx > 0 ? normalized.slice(0, idx) : normalized;
+    }
+
+    function collectPlanAssignedPaths(){
+      const paths = new Set();
+      Object.values(state.publishPlan?.slots || {}).forEach((daySlots) => {
+        PLAN_SLOT_KEYS.forEach((slot) => {
+          const p = daySlots?.[slot];
+          if(p){ paths.add(p); }
+        });
+      });
+      return paths;
+    }
+
     function listPlanDateRange(){
       const start = state.publishPlan.start || "";
       const end = state.publishPlan.end || start;
@@ -1603,6 +1633,7 @@ HTML_PAGE = """<!doctype html>
       if(!res.ok){ throw new Error(data.error || "保存发布计划失败"); }
       state.publishPlan = data;
       renderPublishPlan();
+      applyHistorySearchFilter();
       return data;
     }
 
@@ -1627,12 +1658,75 @@ HTML_PAGE = """<!doctype html>
       const plan = JSON.parse(JSON.stringify(state.publishPlan || {start:"", end:"", slots:{}}));
       if(fromDate && fromSlot){ clearPlanSlotInMemory(plan, fromDate, fromSlot); }
       if(path){
+        Object.keys(plan.slots || {}).forEach((d) => {
+          PLAN_SLOT_KEYS.forEach((s) => {
+            if(d === date && s === slot){ return; }
+            if(plan.slots[d]?.[s] === path){ clearPlanSlotInMemory(plan, d, s); }
+          });
+        });
         if(!plan.slots[date]){ plan.slots[date] = {}; }
         plan.slots[date][slot] = path;
       }else{
         clearPlanSlotInMemory(plan, date, slot);
       }
       await savePublishPlan(plan);
+    }
+
+    function createPlanSlotChip(path, date, slot){
+      const chip = document.createElement("div");
+      chip.className = "plan-slot-chip";
+      chip.draggable = true;
+      chip.dataset.path = path;
+      const preview = getDishPreviewImage(path);
+      if(preview){
+        const img = document.createElement("img");
+        img.src = fileUrl(preview);
+        img.alt = getDishLabel(path);
+        img.draggable = false;
+        chip.appendChild(img);
+      }else{
+        chip.classList.add("empty-img");
+      }
+      const nameEl = document.createElement("div");
+      nameEl.className = "plan-slot-chip-name";
+      nameEl.textContent = getDishLabel(path);
+      chip.appendChild(nameEl);
+      chip.addEventListener("dragstart", (event) => {
+        event.dataTransfer.setData(DRAG_DISH_MIME, path);
+        event.dataTransfer.setData("application/x-plan-from-date", date);
+        event.dataTransfer.setData("application/x-plan-from-slot", slot);
+        event.dataTransfer.effectAllowed = "move";
+      });
+      chip.addEventListener("dblclick", async (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        await openPlanDishLightbox(path);
+      });
+      return chip;
+    }
+
+    async function openPlanDishLightbox(path){
+      if(!path){ return; }
+      let item = state.historyItemCache[path];
+      if(!item?.images?.length){
+        try{
+          const res = await fetch(`/api/dish_detail?path=${encodeURIComponent(path)}`);
+          const detail = await res.json();
+          if(res.ok){
+            item = {...(item || {}), ...detail, path};
+            state.historyItemCache[path] = item;
+          }
+        }catch{}
+      }
+      const images = (item?.images || []).filter(Boolean);
+      if(!images.length && item?.preview_image){ images.push(item.preview_image); }
+      if(!images.length){
+        setStatus("该菜品暂无可预览图片。", "warn");
+        return;
+      }
+      state.lightboxSource = "plan";
+      state.galleryImages = images;
+      openGalleryLightbox(0);
     }
 
     function bindPlanSlotDrop(slotEl, date, slot){
@@ -1678,17 +1772,7 @@ HTML_PAGE = """<!doctype html>
           const path = state.publishPlan?.slots?.[date]?.[slot] || "";
           slotEl.innerHTML = `<div class="plan-slot-label">${PLAN_SLOT_LABELS[slot]}</div>`;
           if(path){
-            const chip = document.createElement("div");
-            chip.className = "plan-slot-chip";
-            chip.textContent = getDishLabel(path);
-            chip.draggable = true;
-            chip.dataset.path = path;
-            chip.addEventListener("dragstart", (event) => {
-              event.dataTransfer.setData(DRAG_DISH_MIME, path);
-              event.dataTransfer.setData("application/x-plan-from-date", date);
-              event.dataTransfer.setData("application/x-plan-from-slot", slot);
-            });
-            slotEl.appendChild(chip);
+            slotEl.appendChild(createPlanSlotChip(path, date, slot));
           }
           bindPlanSlotDrop(slotEl, date, slot);
           slotsWrap.appendChild(slotEl);
@@ -2007,13 +2091,17 @@ HTML_PAGE = """<!doctype html>
     function applyHistorySearchFilter(){
       const q = (state.historySearchQuery || "").trim().toLowerCase();
       const mealFilter = state.historyMealFilter || "";
+      const inPlan = collectPlanAssignedPaths();
       let visible = 0;
       Array.from($("history").querySelectorAll(".history-item")).forEach((el) => {
+        const path = el.dataset.path || "";
         const name = el.querySelector(".history-name")?.textContent?.trim().toLowerCase() || "";
         let tags = [];
         try{ tags = JSON.parse(el.dataset.mealTags || "[]"); }catch{}
         let show = !q || name.includes(q);
         if(mealFilter && !tags.includes(mealFilter)){ show = false; }
+        if(inPlan.has(path)){ show = false; }
+        el.classList.toggle("in-publish-plan", inPlan.has(path));
         el.style.display = show ? "" : "none";
         if(show){ visible++; }
       });
@@ -2227,6 +2315,7 @@ HTML_PAGE = """<!doctype html>
 
     function closeGalleryLightbox(){
       state.galleryLightboxOpen = false;
+      state.lightboxSource = "gallery";
       $("galleryLightbox").classList.add("hidden");
       $("galleryLightboxImg").removeAttribute("src");
     }
@@ -2247,7 +2336,9 @@ HTML_PAGE = """<!doctype html>
       const total = state.galleryImages.length;
       state.galleryLightboxIndex = (state.galleryLightboxIndex + delta + total) % total;
       updateGalleryLightboxImage();
-      showGalleryImage(state.galleryLightboxIndex);
+      if(state.lightboxSource !== "plan"){
+        showGalleryImage(state.galleryLightboxIndex);
+      }
     }
 
     function 显示无图占位(提示="暂未生成图片"){
@@ -2788,6 +2879,7 @@ HTML_PAGE = """<!doctype html>
       bumpSuppressHistoryAutoReload();
       list.forEach((path) => removeHistoryCardFromDom(path));
       renderPublishPlan();
+      applyHistorySearchFilter();
     }
 
     async function selectHistoryItem(item, card){
@@ -2854,7 +2946,7 @@ HTML_PAGE = """<!doctype html>
           <input type="checkbox" data-path="${item.path || ""}" />
         </label>
         <div class="history-cover">
-          ${cover}
+          <div class="history-cover-media">${cover}</div>
           <button type="button" class="history-tag-add" title="餐次标签">+</button>
           <div class="tag-popover">${tagChecks}</div>
         </div>
@@ -3093,12 +3185,12 @@ HTML_PAGE = """<!doctype html>
           openBtn.type = "button";
           openBtn.className = "custom-tile-open";
           openBtn.textContent = "打开目录";
-          openBtn.title = "打开自定义生图目录";
+          openBtn.title = "打开该图片所在目录";
           openBtn.onclick = async (event) => {
             event.stopPropagation();
             try{
-              const dir = tile.output_dir || state.customImagesDir;
-              if(!dir){ setCustomStatus("未找到自定义生图目录。", "warn"); return; }
+              const dir = dirnamePath(tile.path);
+              if(!dir){ setCustomStatus("未找到图片目录。", "warn"); return; }
               await openOutputPath(dir);
             }catch(err){
               setCustomStatus("打开目录失败：" + err.message, "warn");
@@ -3304,12 +3396,12 @@ HTML_PAGE = """<!doctype html>
       state.logNextIndex = 0;
       $("logPanel").textContent = "";
       state.historyRevision = data.history_revision || "";
-      await loadHistory(true);
-      await fetchRunStatus();
-      await fetchPublishStatus({silent: true});
       if(data.meal_tag_labels){ state.mealTagLabels = data.meal_tag_labels; }
       if(data.publish_plan){ state.publishPlan = data.publish_plan; initPublishPlanUi(); }
       if(data.custom_images_dir){ state.customImagesDir = data.custom_images_dir; }
+      await loadHistory(true);
+      await fetchRunStatus();
+      await fetchPublishStatus({silent: true});
       if(showMsg){ setStatus("页面状态已刷新。", "ok"); }
     }
 
