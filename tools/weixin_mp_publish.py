@@ -72,7 +72,7 @@ DEFAULT_UPLOAD3_MENU_Y = 728
 DEFAULT_UPLOAD3_CLICK_X = 881
 DEFAULT_UPLOAD3_CLICK_Y = 768
 DEFAULT_WINDOWS_OPEN_DIALOG_WAIT_MS = 1_500
-DEFAULT_AFTER_COVER_EDITOR_WAIT_MS = 800
+DEFAULT_AFTER_COVER_EDITOR_WAIT_MS = 1_200
 DEFAULT_COVER_CROP_DRAG_START_X = 662
 DEFAULT_COVER_CROP_DRAG_START_Y = 555
 DEFAULT_COVER_CROP_DRAG_END_Y = 410
@@ -227,6 +227,28 @@ def modify_cover_button_locators(page: Page) -> tuple[Locator, ...]:
         page.locator("a.js_modifyCover"),
         page.locator("a.common_edit.js_modifyCover"),
         page.locator("a.weui-desktop-icon-btn.js_modifyCover"),
+    )
+
+
+def cover_preview_hover_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.locator(".share_cover").first,
+        page.locator(".js_cover_area").first,
+        page.locator("#js_cover_area").first,
+        page.locator("a.js_modifyCover").first.locator(
+            "xpath=ancestor::*[contains(@class,'cover') or contains(@class,'share')][1]"
+        ),
+    )
+
+
+def cover_crop_confirm_button_locators(page: Page) -> tuple[Locator, ...]:
+    dialog = page.locator("div.weui-desktop-dialog:visible")
+    return (
+        dialog.locator("button.weui-desktop-btn_primary").filter(has_text="确认"),
+        dialog.locator("div.weui-desktop-dialog__ft button.weui-desktop-btn_primary"),
+        dialog.get_by_role("button", name="确认"),
+        page.locator("button.weui-desktop-btn_primary").filter(has_text="确认"),
+        page.get_by_role("button", name="确认"),
     )
 
 
@@ -545,6 +567,48 @@ def save_as_draft(page: Page) -> None:
     print("已点击保存为草稿。")
 
 
+def find_cover_hover_target(page: Page) -> Locator:
+    for locator in cover_preview_hover_locators(page):
+        try:
+            if locator.count() == 0:
+                continue
+            box = locator.bounding_box()
+            if box and box.get("width", 0) > 80 and box.get("height", 0) > 80:
+                print(f"已定位封面悬停区域：{box}")
+                return locator
+        except Exception:
+            continue
+    raise RuntimeError("未找到公众号封面悬停区域（.share_cover）。")
+
+
+def wait_cover_crop_icon_visible(page: Page, timeout_ms: int = 5_000) -> Locator:
+    deadline = time.time() + timeout_ms / 1000
+    while time.time() < deadline:
+        for locator in modify_cover_button_locators(page):
+            try:
+                item = locator.first
+                if item.count() and item.is_visible():
+                    return item
+            except Exception:
+                pass
+        page.wait_for_timeout(200)
+    raise RuntimeError("悬停封面后仍未出现裁剪图标（js_modifyCover）。")
+
+
+def open_cover_crop_modal(page: Page) -> None:
+    prepare_weixin_chrome_page(page)
+    hover_target = find_cover_hover_target(page)
+    hover_target.scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+    hover_target.hover()
+    print("已悬停封面预览区，等待裁剪图标出现。")
+    page.wait_for_timeout(600)
+    crop_icon = wait_cover_crop_icon_visible(page)
+    crop_icon.click(force=True)
+    print("已点击封面裁剪图标。")
+    page.wait_for_timeout(1_200)
+
+
 def drag_cover_crop_up(page: Page, settings: WeixinPublishSettings) -> None:
     prepare_weixin_chrome_page(page)
     start_x = settings.cover_crop_drag_start_x
@@ -562,16 +626,14 @@ def drag_cover_crop_up(page: Page, settings: WeixinPublishSettings) -> None:
 
 
 def adjust_weixin_cover_crop(page: Page, settings: WeixinPublishSettings) -> None:
-    prepare_weixin_chrome_page(page)
-    click_locator(page, modify_cover_button_locators(page), description="封面裁剪框", timeout_ms=30_000)
-    page.wait_for_timeout(settings.after_cover_editor_wait_ms)
+    open_cover_crop_modal(page)
     click_locator(page, forward_card_cover_locators(page), description="3:4转发卡片封面", timeout_ms=30_000)
     page.wait_for_timeout(settings.after_cover_editor_wait_ms)
     drag_cover_crop_up(page, settings)
     page.wait_for_timeout(500)
-    click_locator_via_dom(page, dialog_confirm_button_locators(page), description="封面裁剪确认", timeout_ms=30_000)
+    click_locator_via_dom(page, cover_crop_confirm_button_locators(page), description="封面裁剪确认", timeout_ms=30_000)
     page.wait_for_timeout(1_000)
-    print("已完成公众号封面裁剪调整。")
+    print("已完成公众号封面裁剪调整（含确认）。")
 
 
 def to_cdp_settings(settings: WeixinPublishSettings) -> PublishSettings:
