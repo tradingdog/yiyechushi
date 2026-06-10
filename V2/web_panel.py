@@ -56,7 +56,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.08"
+PANEL_VERSION = "v1.09"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -1385,6 +1385,7 @@ HTML_PAGE = """<!doctype html>
       textSaveStatus: "",
       publishLogIndex: 0,
       publishPolling: false,
+      publishPollTimer: null,
       batchEditMode: false,
       batchEditSelected: new Set(),
       selectedHistoryItem: null,
@@ -2163,6 +2164,18 @@ HTML_PAGE = """<!doctype html>
       $("loginModal").classList.add("hidden");
     }
 
+    function startPublishStatusPolling(){
+      stopPublishStatusPolling();
+      state.publishPollTimer = setInterval(() => fetchPublishStatus({silent: true}), 500);
+    }
+
+    function stopPublishStatusPolling(){
+      if(state.publishPollTimer){
+        clearInterval(state.publishPollTimer);
+        state.publishPollTimer = null;
+      }
+    }
+
     async function confirmPublishLogin(){
       try{
         const res = await fetch("/api/publish_login_confirm", {method:"POST"});
@@ -2207,6 +2220,7 @@ HTML_PAGE = """<!doctype html>
           : "发布";
         if(!data.running && state.publishPolling){
           state.publishPolling = false;
+          stopPublishStatusPolling();
           if(data.error){
             if(!silent){ setPublishStatus("发布失败：\\n" + data.error, "warn"); }
           }else if(state.publishLogIndex > 0){
@@ -2241,6 +2255,7 @@ HTML_PAGE = """<!doctype html>
         const data = await res.json();
         if(!res.ok){ throw new Error(data.error || "发布启动失败"); }
         state.publishPolling = true;
+        startPublishStatusPolling();
         appendLogs([`[${new Date().toLocaleTimeString()}] 发布任务已启动：${platforms.join("、")}`]);
         $("publishBtn").disabled = true;
         await fetchPublishStatus();

@@ -41,6 +41,7 @@ from tools.douyin_publish import (  # noqa: E402
     type_text_humanly,
     wait_for_locator,
 )
+from tools.publish_login import wait_for_panel_login  # noqa: E402
 from tools.screen_template_match import match_template_on_page  # noqa: E402
 from tools.weixin_mp_publish import confirm_windows_open_dialog, paste_text_to_clipboard  # noqa: E402
 
@@ -496,11 +497,14 @@ def ensure_channels_logged_in(page: Page, settings: WeixinChannelsPublishSetting
             print(f"已检测到视频号登录态（匹配度 {score:.3f}）。")
             return
 
-        print(
-            "未在页面中匹配到视频号登录标识（阈值 "
-            f"{settings.login_match_threshold}）。可能已退出登录，请重新扫码登录。"
+        wait_for_panel_login(
+            platform_label="微信视频号",
+            confirm_kind="enter",
+            hint=(
+                "未在页面中匹配到视频号登录标识（阈值 "
+                f"{settings.login_match_threshold}）。可能已退出登录，请重新扫码登录。"
+            ),
         )
-        input("完成扫码登录后按回车继续：")
         page.reload(wait_until="domcontentloaded")
         page.wait_for_timeout(1_500)
 

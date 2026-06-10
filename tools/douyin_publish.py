@@ -499,10 +499,10 @@ def wait_for_manual_login_continue(
     platform_label: str,
     prompt: str = "完成扫码登录后按回车继续：",
 ) -> None:
-    print(f"当前{platform_label}尚未登录，请在自动化 Chrome 窗口中完成登录。")
-    print(prompt)
+    print(f"当前{platform_label}尚未登录，请在自动化 Chrome 窗口中完成登录。", flush=True)
+    print("完成扫码登录后按回车继续", flush=True)
     try:
-        input()
+        input(prompt)
     except EOFError as exc:
         raise RuntimeError(
             f"{platform_label}尚未登录，且当前为非交互环境，无法等待手动登录。"

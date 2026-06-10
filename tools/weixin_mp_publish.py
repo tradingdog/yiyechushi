@@ -46,6 +46,7 @@ from tools.douyin_publish import (  # noqa: E402
     type_text_humanly,
     wait_for_locator,
 )
+from tools.publish_login import wait_for_panel_login  # noqa: E402
 from tools.screen_template_match import match_template_on_page  # noqa: E402
 
 
@@ -303,15 +304,14 @@ def ensure_weixin_mp_logged_in(page: Page, settings: WeixinPublishSettings) -> N
             print(f"已检测到公众号后台登录态（匹配度 {score:.3f}）。")
             return
 
-        print(
-            "未在页面中匹配到公众号后台登录标识（阈值 "
-            f"{settings.login_match_threshold}）。请在浏览器中扫码登录公众号。"
+        wait_for_panel_login(
+            platform_label="微信公众号",
+            confirm_kind="y",
+            hint=(
+                "未在页面中匹配到公众号后台登录标识（阈值 "
+                f"{settings.login_match_threshold}）。请在浏览器中扫码登录公众号。"
+            ),
         )
-        answer = input("登录完成后请输入 y 继续：").strip().lower()
-        if answer != "y":
-            print("请输入 y 继续。")
-            continue
-
         page.reload(wait_until="domcontentloaded")
         page.wait_for_timeout(1_500)
 

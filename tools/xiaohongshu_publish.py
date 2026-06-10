@@ -41,6 +41,7 @@ from tools.douyin_publish import (  # noqa: E402
     type_text_humanly,
     wait_for_locator,
 )
+from tools.publish_login import wait_for_panel_login  # noqa: E402
 from tools.screen_template_match import match_template_on_page  # noqa: E402
 from tools.weixin_mp_publish import confirm_windows_open_dialog  # noqa: E402
 
@@ -255,15 +256,14 @@ def ensure_xiaohongshu_logged_in(page: Page, settings: XiaohongshuPublishSetting
             print(f"已检测到小红书创作者登录态（匹配度 {score:.3f}）。")
             return
 
-        print(
-            "未在页面中匹配到「发布笔记」按钮（阈值 "
-            f"{settings.login_match_threshold}）。请在小红书创作者中心完成登录。"
+        wait_for_panel_login(
+            platform_label="小红书",
+            confirm_kind="y",
+            hint=(
+                "未在页面中匹配到「发布笔记」按钮（阈值 "
+                f"{settings.login_match_threshold}）。请在小红书创作者中心完成登录。"
+            ),
         )
-        answer = input("登录完成后请输入 y 继续：").strip().lower()
-        if answer != "y":
-            print("请输入 y 继续。")
-            continue
-
         page.reload(wait_until="domcontentloaded")
         page.wait_for_timeout(1_500)
 
