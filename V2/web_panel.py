@@ -56,7 +56,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.05"
+PANEL_VERSION = "v1.06"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -79,6 +79,10 @@ SILENT_HTTP_LOG_PATHS = {
     "/api/file",
 }
 REPO_ROOT = ROOT_DIR.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tools.project_python import reexec_in_project_venv_if_needed, resolve_project_python
 
 PUBLISH_PLATFORMS: dict[str, dict[str, str]] = {
     "douyin": {"label": "抖音", "script": "douyin_publish_v2_test.py"},
@@ -455,8 +459,9 @@ def run_single_platform_publish(platform_key: str, output_dir: Path) -> None:
     publish_env["PYTHONUNBUFFERED"] = "1"
     publish_env["PYTHONIOENCODING"] = "utf-8"
     publish_env["PYTHONUTF8"] = "1"
+    python_exe = resolve_project_python()
     proc = subprocess.Popen(
-        [sys.executable, str(script_path), str(output_dir)],
+        [python_exe, str(script_path), str(output_dir)],
         cwd=str(REPO_ROOT),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -5021,6 +5026,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    reexec_in_project_venv_if_needed()
     ensure_runtime_config_loaded()
     init_custom_image_service()
     server = ThreadingHTTPServer((HOST, PORT), V2PanelHandler)

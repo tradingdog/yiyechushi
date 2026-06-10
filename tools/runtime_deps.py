@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tools.project_python import reexec_in_project_venv_if_needed, resolve_project_python
+
 ROOT_DIR = Path(__file__).resolve().parents[1]
 REQUIREMENTS_FILE = ROOT_DIR / "requirements.txt"
 
@@ -30,6 +32,7 @@ def missing_runtime_modules() -> list[str]:
 
 
 def ensure_project_runtime_dependencies() -> None:
+    reexec_in_project_venv_if_needed()
     missing_packages = missing_runtime_modules()
     if not missing_packages:
         return
@@ -41,10 +44,11 @@ def ensure_project_runtime_dependencies() -> None:
         "检测到当前 Python 环境缺少发布脚本依赖："
         + "、".join(sorted(set(missing_packages)))
     )
-    print(f"正在使用 {sys.executable} 安装 {REQUIREMENTS_FILE.name} ...")
+    python_exe = resolve_project_python()
+    print(f"正在使用 {python_exe} 安装 {REQUIREMENTS_FILE.name} ...")
 
     subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)],
+        [python_exe, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)],
     )
 
     still_missing = missing_runtime_modules()
@@ -52,7 +56,7 @@ def ensure_project_runtime_dependencies() -> None:
         raise SystemExit(
             "自动安装后仍缺少依赖："
             + "、".join(sorted(set(still_missing)))
-            + f"\n请手动执行：{sys.executable} -m pip install -r {REQUIREMENTS_FILE}"
+            + f"\n请手动执行：{python_exe} -m pip install -r {REQUIREMENTS_FILE}"
         )
 
     print("发布脚本依赖已安装完成。")
