@@ -56,7 +56,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.06"
+PANEL_VERSION = "v1.07"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -1597,6 +1597,21 @@ HTML_PAGE = """<!doctype html>
       if(item?.preview_image){ return item.preview_image; }
       const images = item?.images || [];
       return images.length ? images[0] : "";
+    }
+
+    async function hydratePublishPlanCache(){
+      const paths = [...collectPlanAssignedPaths()];
+      const missing = paths.filter((path) => !getDishPreviewImage(path));
+      if(!missing.length){ return; }
+      await Promise.all(missing.map(async (path) => {
+        try{
+          const res = await fetch(`/api/dish_detail?path=${encodeURIComponent(path)}`);
+          const detail = await res.json();
+          if(res.ok){
+            state.historyItemCache[path] = {...(state.historyItemCache[path] || {}), ...detail, path};
+          }
+        }catch{}
+      }));
     }
 
     function dirnamePath(path){
@@ -3155,6 +3170,11 @@ HTML_PAGE = """<!doctype html>
         }
         applyHistoryTaskBadges();
         applyHistorySearchFilter();
+        if(collectPlanAssignedPaths().size){
+          await hydratePublishPlanCache();
+          renderPublishPlan();
+          reconcileSelectionSource();
+        }
       }finally{
         state.historyLoading = false;
       }
@@ -3455,9 +3475,10 @@ HTML_PAGE = """<!doctype html>
       $("logPanel").textContent = "";
       state.historyRevision = data.history_revision || "";
       if(data.meal_tag_labels){ state.mealTagLabels = data.meal_tag_labels; }
-      if(data.publish_plan){ state.publishPlan = data.publish_plan; initPublishPlanUi(); }
+      if(data.publish_plan){ state.publishPlan = data.publish_plan; }
       if(data.custom_images_dir){ state.customImagesDir = data.custom_images_dir; }
       await loadHistory(true);
+      initPublishPlanUi();
       await fetchRunStatus();
       await fetchPublishStatus({silent: true});
       if(showMsg){ setStatus("页面状态已刷新。", "ok"); }
