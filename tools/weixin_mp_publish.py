@@ -70,6 +70,10 @@ DEFAULT_UPLOAD3_MENU_Y = 728
 DEFAULT_UPLOAD3_CLICK_X = 881
 DEFAULT_UPLOAD3_CLICK_Y = 768
 DEFAULT_WINDOWS_OPEN_DIALOG_WAIT_MS = 1_500
+DEFAULT_AFTER_COVER_EDITOR_WAIT_MS = 800
+DEFAULT_COVER_CROP_DRAG_START_X = 662
+DEFAULT_COVER_CROP_DRAG_START_Y = 555
+DEFAULT_COVER_CROP_DRAG_END_Y = 410
 DEFAULT_DEBUG_SCREENSHOT_WEIXIN = ROOT_DIR / "tools" / "weixin_mp_publish_last_error.png"
 
 
@@ -115,6 +119,10 @@ class WeixinPublishSettings:
     upload3_click_x: int
     upload3_click_y: int
     windows_open_dialog_wait_ms: int
+    after_cover_editor_wait_ms: int
+    cover_crop_drag_start_x: int
+    cover_crop_drag_start_y: int
+    cover_crop_drag_end_y: int
     debug_screenshot: Path
     dry_run: bool
 
@@ -209,6 +217,22 @@ def save_draft_button_locators(page: Page) -> tuple[Locator, ...]:
         page.locator("#js_submit button"),
         page.locator("#js_submit .send_wording").filter(has_text="保存为草稿"),
         page.get_by_text("保存为草稿", exact=True),
+    )
+
+
+def modify_cover_button_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.locator("a.js_modifyCover"),
+        page.locator("a.common_edit.js_modifyCover"),
+        page.locator("a.weui-desktop-icon-btn.js_modifyCover"),
+    )
+
+
+def forward_card_cover_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.get_by_text("3:4（转发卡片）", exact=False),
+        page.get_by_text("3:4(转发卡片)", exact=False),
+        page.locator("div, span, label, li").filter(has_text=re.compile(r"3:4.*转发卡片")),
     )
 
 
@@ -510,6 +534,35 @@ def save_as_draft(page: Page) -> None:
     print("已点击保存为草稿。")
 
 
+def drag_cover_crop_up(settings: WeixinPublishSettings) -> None:
+    start_x = settings.cover_crop_drag_start_x
+    start_y = settings.cover_crop_drag_start_y
+    end_y = settings.cover_crop_drag_end_y
+    pyautogui.moveTo(start_x, start_y, duration=0.3)
+    time.sleep(0.15)
+    pyautogui.mouseDown()
+    time.sleep(0.12)
+    pyautogui.moveTo(start_x, end_y, duration=0.55)
+    pyautogui.mouseUp()
+    print(
+        f"已拖动封面裁剪框：({start_x}, {start_y}) → ({start_x}, {end_y})。"
+    )
+
+
+def adjust_weixin_cover_crop(page: Page, settings: WeixinPublishSettings) -> None:
+    page.bring_to_front()
+    page.wait_for_timeout(500)
+    click_locator(page, modify_cover_button_locators(page), description="封面裁剪框", timeout_ms=30_000)
+    page.wait_for_timeout(settings.after_cover_editor_wait_ms)
+    click_locator(page, forward_card_cover_locators(page), description="3:4转发卡片封面", timeout_ms=30_000)
+    page.wait_for_timeout(settings.after_cover_editor_wait_ms)
+    drag_cover_crop_up(settings)
+    page.wait_for_timeout(500)
+    click_locator_via_dom(page, dialog_confirm_button_locators(page), description="封面裁剪确认", timeout_ms=30_000)
+    page.wait_for_timeout(1_000)
+    print("已完成公众号封面裁剪调整。")
+
+
 def to_cdp_settings(settings: WeixinPublishSettings) -> PublishSettings:
     return PublishSettings(
         output_dir=settings.output_dir,
@@ -564,6 +617,8 @@ def run_weixin_publish(settings: WeixinPublishSettings, assets: WeixinPublishAss
             fill_wechat_description(editor_page, assets, settings)
             submit_declaration(editor_page)
             save_as_draft(editor_page)
+            if not settings.dry_run:
+                adjust_weixin_cover_crop(editor_page, settings)
         except Exception:
             settings.debug_screenshot.parent.mkdir(parents=True, exist_ok=True)
             try:

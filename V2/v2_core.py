@@ -1894,29 +1894,57 @@ def infer_dish_name_from_folder(folder_name: str) -> str:
     return folder_name.strip()
 
 
-XIAOHONGSHU_TITLE_MAX_UNITS = 40
+PUBLISH_TITLE_MAX_UNITS = 40
+XIAOHONGSHU_TITLE_MAX_UNITS = PUBLISH_TITLE_MAX_UNITS
 
 
-def count_xiaohongshu_title_units(text: str) -> int:
-    """小红书标题计字：汉字等非 ASCII 计 2，英文/数字等 ASCII 计 1，上限 40（约 20 个汉字）。"""
+def count_publish_title_units(text: str) -> int:
+    """各平台标题计字：汉字/表情等非 ASCII 计 2，英文/数字等 ASCII 计 1，上限 40（约 20 个汉字）。"""
     units = 0
     for char in text:
         units += 2 if ord(char) > 127 else 1
     return units
 
 
-def normalize_xiaohongshu_title(title: str) -> str:
+def count_xiaohongshu_title_units(text: str) -> int:
+    return count_publish_title_units(text)
+
+
+def truncate_publish_title(text: str, max_units: int = PUBLISH_TITLE_MAX_UNITS) -> str:
+    units = 0
+    parts: list[str] = []
+    for char in text:
+        char_units = 2 if ord(char) > 127 else 1
+        if units + char_units > max_units:
+            break
+        units += char_units
+        parts.append(char)
+    return "".join(parts).strip()
+
+
+def normalize_publish_title(title: str, *, platform_key: str = "") -> str:
     text = str(title or "").strip()
     if not text:
-        raise ValueError("xiaohongshu 标题为空。")
-    units = count_xiaohongshu_title_units(text)
-    if units <= XIAOHONGSHU_TITLE_MAX_UNITS:
+        label = platform_key or "平台"
+        raise ValueError(f"{label} 标题为空。")
+    units = count_publish_title_units(text)
+    if units <= PUBLISH_TITLE_MAX_UNITS:
         return text
-    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", text))
-    raise ValueError(
-        f"xiaohongshu 标题超过小红书 20 字（40 字符）上限，"
-        f"当前约 {units} 字符（含 {cjk_count} 个汉字）：{text}"
+    truncated = truncate_publish_title(text, PUBLISH_TITLE_MAX_UNITS)
+    if not truncated:
+        raise ValueError(
+            f"{platform_key or '平台'} 标题超过 20 个汉字（40 字符，表情也算）上限，"
+            f"当前约 {units} 字符且无法截断：{text}"
+        )
+    print(
+        f"警告：{platform_key or '平台'} 标题超过 40 字符（含表情），"
+        f"已由 {units} 自动截断为 {count_publish_title_units(truncated)}：{truncated}"
     )
+    return truncated
+
+
+def normalize_xiaohongshu_title(title: str) -> str:
+    return normalize_publish_title(title, platform_key="xiaohongshu")
 
 
 V2_PUBLISH_PLATFORM_SPECS: tuple[tuple[str, str, int], ...] = (
@@ -1927,16 +1955,25 @@ V2_PUBLISH_PLATFORM_SPECS: tuple[tuple[str, str, int], ...] = (
     ("kuaishou", "快手", 4),
 )
 
+_TITLE_LIMIT_HINT = (
+    "标题必须不超过 20 个汉字（40 字符上限；汉字/表情/符号等非 ASCII 计 2、英文/数字计 1，表情也算字符）。"
+)
+
 V2_PUBLISH_PLATFORM_TASKS: dict[str, str] = {
-    "douyin": "为这个新菜写抖音的标题、描述和正好 5 个话题（不超过 5 个）。要有钩子，符合抖音爆款思路。",
+    "douyin": f"为这个新菜写抖音的标题、描述和正好 5 个话题（不超过 5 个）。{_TITLE_LIMIT_HINT}要有钩子，符合抖音爆款思路。",
     "xiaohongshu": (
-        "为这个新菜写小红书的标题、描述和 10 个话题。"
-        "标题必须不超过 20 个汉字（40 字符上限；汉字计 2、英文/数字计 1）。"
+        f"为这个新菜写小红书的标题、描述和 10 个话题。{_TITLE_LIMIT_HINT}"
         "要有钩子，符合小红书图文用户的爆款思路。"
     ),
-    "weixin_mp": "为这个新菜写微信公众号的标题、描述和正好 10 个话题（不超过 10 个）。要有钩子，符合公众号图文用户的阅读习惯。",
-    "weixin_channels": "为这个新菜写微信视频号的标题、描述和正好 30 个话题（不超过 30 个）。要有钩子，符合视频号图文传播特点。",
-    "kuaishou": "为这个新菜写快手的标题、描述和 4 个话题。要有钩子，符合快手爆款思路。",
+    "weixin_mp": (
+        f"为这个新菜写微信公众号的标题、描述和正好 10 个话题（不超过 10 个）。"
+        f"{_TITLE_LIMIT_HINT}要有钩子，符合公众号图文用户的阅读习惯。"
+    ),
+    "weixin_channels": (
+        f"为这个新菜写微信视频号的标题、描述和正好 30 个话题（不超过 30 个）。"
+        f"{_TITLE_LIMIT_HINT}要有钩子，符合视频号图文传播特点。"
+    ),
+    "kuaishou": f"为这个新菜写快手的标题、描述和 4 个话题。{_TITLE_LIMIT_HINT}要有钩子，符合快手爆款思路。",
 }
 
 
@@ -1970,7 +2007,7 @@ def build_v2_publish_multimodal_prompt(dish_payload: dict[str, str]) -> str:
 1) 标题、描述都要口语化、有食欲、有画面感，禁止套话（如“先收藏”“原创融合”“想吃时照着做”）。
 2) 描述 2–4 句，写口感、场景、做法亮点，可自然提菜名，但不要写成说明书。
 3) topics 数组每项以 # 开头，不要菜品全名话题，不要 #阿叶造新菜。
-4) xiaohongshu.title 必须不超过 20 个汉字（40 字符；汉字计 2、英文/数字计 1），超出会被判不合格。
+4) 各平台 title 均必须不超过 20 个汉字（40 字符；汉字/表情/符号等非 ASCII 计 2、英文/数字计 1，表情也算字符），超出会被截断或判不合格。
 5) topics 数组长度必须与各平台要求完全一致：抖音 5、小红书 10、微信公众号 10、微信视频号 30、快手 4；不能合并公众号与视频号。
 6) 只输出 JSON，不要 Markdown，不要解释。格式如下：
 {{
@@ -2008,9 +2045,7 @@ def parse_v2_publish_platform_payload(raw_payload: dict[str, Any]) -> dict[str, 
         block = raw_payload.get(platform_key)
         if not isinstance(block, dict):
             raise ValueError(f"缺少平台字段：{platform_key}")
-        title = str(block.get("title", "")).strip()
-        if platform_key == "xiaohongshu":
-            title = normalize_xiaohongshu_title(title)
+        title = normalize_publish_title(str(block.get("title", "")).strip(), platform_key=platform_key)
         description = str(block.get("description", "")).strip()
         topics = normalize_v2_publish_topics(block.get("topics"), topic_count)
         if not title:
