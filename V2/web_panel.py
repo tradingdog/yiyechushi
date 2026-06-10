@@ -56,7 +56,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.11"
+PANEL_VERSION = "v1.12"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -1468,6 +1468,7 @@ HTML_PAGE = """<!doctype html>
       publishPolling: false,
       publishPollTimer: null,
       panelOnline: true,
+      panelPingFailStreak: 0,
       batchEditMode: false,
       batchEditSelected: new Set(),
       selectedHistoryItem: null,
@@ -2242,11 +2243,11 @@ HTML_PAGE = """<!doctype html>
       return err instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(msg);
     }
 
-    async function pingPanel(timeoutMs=2500){
+    async function pingPanel(timeoutMs=4000){
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), timeoutMs);
       try{
-        const res = await fetch("/api/state", {cache:"no-store", signal: ctrl.signal});
+        const res = await fetch("/api/ping", {cache:"no-store", signal: ctrl.signal});
         return res.ok;
       }catch{
         return false;
@@ -2255,8 +2256,25 @@ HTML_PAGE = """<!doctype html>
       }
     }
 
+    function notePanelReachable(){
+      state.panelPingFailStreak = 0;
+      if(!state.panelOnline){ setPanelOnlineUi(true); }
+    }
+
+    async function refreshPanelOnlineUi(){
+      const ok = await pingPanel();
+      if(ok){
+        notePanelReachable();
+        return true;
+      }
+      state.panelPingFailStreak += 1;
+      if(state.panelPingFailStreak >= 3){ setPanelOnlineUi(false); }
+      return false;
+    }
+
     function setPanelOnlineUi(online){
       state.panelOnline = Boolean(online);
+      if(online){ state.panelPingFailStreak = 0; }
       const tag = $("panelOfflineTag");
       if(tag){ tag.classList.toggle("hidden", online); }
       const publishRunning = Boolean(state.publishSnapshot?.running);
@@ -2269,11 +2287,10 @@ HTML_PAGE = """<!doctype html>
     }
 
     async function ensurePanelOnline(actionLabel="操作"){
-      if(await pingPanel()){
-        setPanelOnlineUi(true);
+      if(await refreshPanelOnlineUi()){
         return true;
       }
-      setPanelOnlineUi(false);
+      if(state.panelOnline){ return true; }
       const msg = `面板未连接（8765 无响应），无法${actionLabel}。请点击顶栏「重启程序」。`;
       setStatus(msg, "warn");
       setPublishStatus(msg, "warn");
@@ -2318,6 +2335,7 @@ HTML_PAGE = """<!doctype html>
       try{
         const res = await fetch(`/api/publish_status?from=${state.publishLogIndex}`);
         const data = await res.json();
+        notePanelReachable();
         if(data.logs?.length){
           const tail = data.logs.slice(-6).join("\\n");
           setPublishStatus(tail || "发布中…");
@@ -3555,9 +3573,8 @@ HTML_PAGE = """<!doctype html>
       if(state.autoRefreshTimer){ return; }
       state.autoRefreshTimer = setInterval(async () => {
         if(document.hidden){ return; }
-        const online = await pingPanel(1800);
-        if(online !== state.panelOnline){ setPanelOnlineUi(online); }
-        if(!online){ return; }
+        await refreshPanelOnlineUi();
+        if(!state.panelOnline){ return; }
         fetchRunStatus({silent: true});
         fetchPublishStatus({silent: true});
         fetchCustomImageStatus({silent: true});
@@ -3569,6 +3586,7 @@ HTML_PAGE = """<!doctype html>
       try{
         const res = await fetch(`/api/run_status?from=${state.logNextIndex}`);
         const data = await res.json();
+        notePanelReachable();
         if(data.logs?.length){
           appendLogs(data.logs);
           state.logNextIndex = data.next_index || state.logNextIndex;
@@ -3973,7 +3991,7 @@ HTML_PAGE = """<!doctype html>
     加载菜品池列数();
     初始化拖拽分栏();
     bindHistoryPoolDropZone();
-    pingPanel().then((online) => setPanelOnlineUi(online));
+    refreshPanelOnlineUi();
     loadState();
     fetchCustomImageStatus({silent: true});
     startAutoRefresh();
@@ -4916,6 +4934,9 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/":
             self._send_text(HTML_PAGE, 200)
+            return
+        if parsed.path == "/api/ping":
+            self._send_json({"ok": True})
             return
         if parsed.path == "/api/state":
             self._send_json(
