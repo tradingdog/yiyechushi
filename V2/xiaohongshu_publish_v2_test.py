@@ -56,7 +56,7 @@ from tools.xiaohongshu_publish import (  # noqa: E402
     XiaohongshuPublishSettings,
     run_xiaohongshu_publish,
 )
-from publish_final_assets import resolve_publish_image_triplet  # noqa: E402
+from publish_final_assets import resolve_publish_final_dir, resolve_publish_image_triplet  # noqa: E402
 
 
 DEFAULT_V2_OUTPUT_DIR = V2_DIR / "output" / "20260604_210303_葱香陈皮羊排"
@@ -121,16 +121,6 @@ def _resolve_topic_tags(description_text: str, description_file: Path) -> tuple[
     return tuple(tags)
 
 
-def resolve_final_dir(output_dir: Path, final_dir_text: str) -> Path:
-    if final_dir_text.strip():
-        final_dir = resolve_path(final_dir_text.strip())
-    else:
-        final_dir = output_dir / DEFAULT_FINAL_DIR_NAME
-    if not final_dir.exists() or not final_dir.is_dir():
-        raise RuntimeError(f"final 图片目录不存在：{final_dir}")
-    return final_dir
-
-
 def resolve_settings(args: argparse.Namespace) -> XiaohongshuPublishSettings:
     output_dir = resolve_path(args.output_dir)
     if not output_dir.exists() or not output_dir.is_dir():
@@ -174,7 +164,7 @@ def resolve_settings(args: argparse.Namespace) -> XiaohongshuPublishSettings:
 def resolve_xiaohongshu_assets(args: argparse.Namespace) -> XiaohongshuPublishAssets:
     settings = resolve_settings(args)
     output_dir = settings.output_dir
-    final_dir = resolve_final_dir(output_dir, str(args.final_dir or ""))
+    final_dir = resolve_publish_final_dir(output_dir, final_dir_text=str(args.final_dir or ""))
 
     title_file = _find_xiaohongshu_title_file(output_dir)
     description_file = find_single_file(output_dir, XIAOHONGSHU_DESCRIPTION_SUFFIX)

@@ -202,6 +202,49 @@ def apply_final_image_sequence_names(
     return renamed_paths
 
 
+def validate_publish_image_dir(image_dir: Path, *, require_cover: bool = False) -> None:
+    resolve_publish_image_triplet(image_dir)
+    if require_cover:
+        resolve_publish_cover_image(image_dir)
+
+
+def resolve_publish_final_dir(
+    output_dir: Path,
+    *,
+    final_dir_text: str = "",
+    require_cover: bool = False,
+) -> Path:
+    """优先 publish/final（PS 合成图）；不存在或不全时回退 publish 根目录源图。"""
+    if final_dir_text.strip():
+        final_dir = Path(final_dir_text.strip()).resolve()
+        if not final_dir.is_dir():
+            raise RuntimeError(f"final 图片目录不存在：{final_dir}")
+        validate_publish_image_dir(final_dir, require_cover=require_cover)
+        return final_dir
+
+    publish_dir = output_dir / "publish"
+    final_dir = publish_dir / "final"
+    if final_dir.is_dir():
+        try:
+            validate_publish_image_dir(final_dir, require_cover=require_cover)
+            return final_dir
+        except RuntimeError:
+            pass
+
+    if publish_dir.is_dir():
+        try:
+            validate_publish_image_dir(publish_dir, require_cover=require_cover)
+            print(f"publish/final 不可用，回退使用 publish 源图目录：{publish_dir}")
+            return publish_dir
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"未找到可发布图片：{final_dir} 不存在或图片不全，且 publish 内也缺少所需图。"
+                f"\n{exc}"
+            ) from exc
+
+    raise RuntimeError(f"未找到发布目录：{publish_dir}")
+
+
 def resolve_publish_image_triplet(final_dir: Path) -> tuple[Path, Path, Path]:
     poster = find_final_image_by_slot(final_dir, "01", FINAL_IMAGE_SLOT_SPECS[0][2], label="海报图")
     detail = find_final_image_by_slot(final_dir, "02", FINAL_IMAGE_SLOT_SPECS[1][2], label="细节图")

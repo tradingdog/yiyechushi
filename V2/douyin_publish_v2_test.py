@@ -40,6 +40,7 @@ from tools.douyin_publish import (  # noqa: E402
 from image_generator import split_description_body_and_tags  # noqa: E402
 from publish_final_assets import (  # noqa: E402
     resolve_publish_cover_image,
+    resolve_publish_final_dir,
     resolve_publish_image_triplet,
 )
 
@@ -88,20 +89,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_final_dir(output_dir: Path, final_dir_text: str) -> Path:
-    if final_dir_text.strip():
-        final_dir = resolve_path(final_dir_text.strip())
-    else:
-        final_dir = output_dir / DEFAULT_FINAL_DIR_NAME
-    if not final_dir.exists() or not final_dir.is_dir():
-        raise RuntimeError(f"final 图片目录不存在：{final_dir}")
-    return final_dir
-
-
 def resolve_v2_publish_assets(args: argparse.Namespace) -> PublishAssets:
     settings = resolve_settings(args)
     output_dir = settings.output_dir
-    final_dir = resolve_final_dir(output_dir, str(args.final_dir or ""))
+    final_dir = resolve_publish_final_dir(
+        output_dir,
+        final_dir_text=str(args.final_dir or ""),
+        require_cover=True,
+    )
 
     title_file = None
     for suffix in ("_图文标题.txt", "_抖音标题.txt", "_抖音图文标题.txt"):

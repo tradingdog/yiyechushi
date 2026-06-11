@@ -56,6 +56,7 @@ from tools.kuaishou_publish import (  # noqa: E402
 )
 from publish_final_assets import (  # noqa: E402
     resolve_publish_cover_image,
+    resolve_publish_final_dir,
     resolve_publish_image_triplet,
 )
 
@@ -146,16 +147,6 @@ def _resolve_kuaishou_description_parts(description_text: str, description_file:
     return description_body, tuple(topic_tags)
 
 
-def resolve_final_dir(output_dir: Path, final_dir_text: str) -> Path:
-    if final_dir_text.strip():
-        final_dir = resolve_path(final_dir_text.strip())
-    else:
-        final_dir = output_dir / DEFAULT_FINAL_DIR_NAME
-    if not final_dir.exists() or not final_dir.is_dir():
-        raise RuntimeError(f"final 图片目录不存在：{final_dir}")
-    return final_dir
-
-
 def resolve_settings(args: argparse.Namespace) -> KuaishouPublishSettings:
     output_dir = resolve_path(args.output_dir)
     if not output_dir.exists() or not output_dir.is_dir():
@@ -195,7 +186,11 @@ def resolve_settings(args: argparse.Namespace) -> KuaishouPublishSettings:
 def resolve_kuaishou_assets(args: argparse.Namespace) -> KuaishouPublishAssets:
     settings = resolve_settings(args)
     output_dir = settings.output_dir
-    final_dir = resolve_final_dir(output_dir, str(args.final_dir or ""))
+    final_dir = resolve_publish_final_dir(
+        output_dir,
+        final_dir_text=str(args.final_dir or ""),
+        require_cover=True,
+    )
 
     description_file = find_single_file(output_dir, KUAISHOU_DESCRIPTION_SUFFIX)
     title_text, title_file = _resolve_kuaishou_title(output_dir)

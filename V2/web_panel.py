@@ -28,6 +28,7 @@ from custom_image_service import (
     is_custom_image_path,
 )
 from mode2_flow import run_supplement_for_output_dir, run_v2_mode2
+from publish_final_assets import resolve_publish_final_dir
 from idea_batch import run_idea_batch, DISH_POOL_DIR
 from v2_core import (
     IDEA_FILE,
@@ -56,7 +57,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.17"
+PANEL_VERSION = "v1.18"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -496,9 +497,11 @@ def publish_worker(output_dir_text: str, platform_keys: list[str]) -> None:
     global PUBLISH_RUNNING, PUBLISH_ERROR, PUBLISH_OUTPUT_DIR, PUBLISH_CURRENT_PLATFORM, PUBLISH_QUEUE
     try:
         output_dir = resolve_output_path(output_dir_text)
-        final_dir = output_dir / "publish" / "final"
-        if not final_dir.is_dir():
-            raise FileNotFoundError(f"未找到发布图目录：{final_dir}")
+        try:
+            final_dir = resolve_publish_final_dir(output_dir)
+        except RuntimeError as exc:
+            raise FileNotFoundError(str(exc)) from exc
+        append_publish_log(f"发布图目录：{final_dir}")
         with PUBLISH_LOCK:
             PUBLISH_OUTPUT_DIR = str(output_dir)
             PUBLISH_QUEUE = list(platform_keys)
