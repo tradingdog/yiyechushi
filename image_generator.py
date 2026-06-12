@@ -66,7 +66,7 @@ DEFAULT_AUTO_DISH_GENERATION_ENABLED = True
 DEFAULT_AUTO_DISH_REGION_CODE = "0"
 DEFAULT_PHOTOSHOP_AUTO_COMPOSITE_ENABLED = True
 DEFAULT_PUBLISH_AUTO_SELECT_ENABLED = True
-AUTO_DISH_GENERATION_RETRY_COUNT = 4
+AUTO_DISH_GENERATION_RETRY_COUNT = 8
 AUTO_DISH_RECENT_HISTORY_LIMIT = 10
 PUBLISH_ACTIVITY_TOPICS: tuple[str, ...] = (
     "抖音美食推荐官",
@@ -708,18 +708,11 @@ def build_auto_dish_generation_user_prompt(
     banned_main_ingredients = join_auto_dish_history_items(
         recent_history_restrictions.get("banned_main_ingredients", ())
     )
-    banned_flavors = join_auto_dish_history_items(recent_history_restrictions.get("banned_flavors", ()))
-    banned_methods = join_auto_dish_history_items(recent_history_restrictions.get("banned_methods", ()))
-
     history_lines: list[str] = []
     if used_generated_text != "无":
         history_lines.append(f"近10条新菜名请勿重复或只改一字：{used_generated_text}。")
     if banned_main_ingredients != "无":
         history_lines.append(f"近作主食材请勿重复：{banned_main_ingredients}。")
-    if banned_flavors != "无":
-        history_lines.append(f"近作已用过这些风味，请换别的：{banned_flavors}。")
-    if banned_methods != "无":
-        history_lines.append(f"近作已用过这些做法，请换别的：{banned_methods}。")
     history_hint = "".join(history_lines)
 
     dish_type = creation_bundle["dish_type"]
@@ -2652,6 +2645,8 @@ def join_auto_dish_history_items(items: Sequence[str]) -> str:
 def build_recent_auto_dish_restriction_profile(
     historical_generated_dish_names: Sequence[str],
     memory_entries: Sequence[dict[str, Any]] | None = None,
+    *,
+    session_banned_main_ingredients: Sequence[str] | None = None,
     limit: int = AUTO_DISH_RECENT_HISTORY_LIMIT,
 ) -> dict[str, tuple[str, ...]]:
     recent_generated_dishes = [str(name).strip() for name in historical_generated_dish_names if str(name).strip()][-limit:]
@@ -2659,6 +2654,11 @@ def build_recent_auto_dish_restriction_profile(
 
     banned_main_ingredients: list[str] = []
     seen_main_ingredients: set[str] = set()
+    for main_ingredient in reversed([str(item).strip() for item in (session_banned_main_ingredients or []) if str(item).strip()]):
+        if main_ingredient in seen_main_ingredients:
+            continue
+        seen_main_ingredients.add(main_ingredient)
+        banned_main_ingredients.append(main_ingredient)
     for entry in reversed(recent_memory_entries):
         main_ingredient = str(entry.get("main_ingredient", "")).strip()
         if not main_ingredient or main_ingredient in seen_main_ingredients:
@@ -2666,22 +2666,9 @@ def build_recent_auto_dish_restriction_profile(
         seen_main_ingredients.add(main_ingredient)
         banned_main_ingredients.append(main_ingredient)
 
-    def collect_unique_matches(family_definitions: tuple[tuple[str, tuple[str, ...]], ...]) -> tuple[str, ...]:
-        collected: list[str] = []
-        seen: set[str] = set()
-        for dish_name in reversed(recent_generated_dishes):
-            for family_name in extract_auto_dish_family_matches(dish_name, family_definitions):
-                if family_name in seen:
-                    continue
-                seen.add(family_name)
-                collected.append(family_name)
-        return tuple(collected)
-
     return {
         "recent_generated_dishes": tuple(recent_generated_dishes),
-        "banned_main_ingredients": tuple(banned_main_ingredients),
-        "banned_flavors": collect_unique_matches(AUTO_DISH_FLAVOR_FAMILIES),
-        "banned_methods": collect_unique_matches(AUTO_DISH_PRIMARY_METHOD_FAMILIES),
+        "banned_main_ingredients": tuple(banned_main_ingredients[:limit]),
     }
 
 
@@ -2770,7 +2757,9 @@ def append_auto_dish_memory(memory_file: Path, entry: dict[str, Any]) -> None:
 def pick_unused_reference_dish(candidate_dishes: list[str], used_reference_dishes: set[str]) -> str:
     available_dishes = [dish_name for dish_name in candidate_dishes if dish_name not in used_reference_dishes]
     if not available_dishes:
-        raise RuntimeError("当前区域内可用的传统参考菜已经全部使用过，请清空记忆文件或切换 AUTO_DISH_CUISINE_MODE。")
+        available_dishes = candidate_dishes
+    if not available_dishes:
+        raise RuntimeError("当前菜系范围内没有可用传统参考菜。")
     return random.choice(available_dishes)
 
 
@@ -2798,6 +2787,7 @@ def validate_auto_generated_dish_idea(
     *,
     main_ingredient: str = "",
     ingredient_library: MarketIngredientLibrary | None = None,
+    attempt_index: int = 0,
 ) -> dict[str, str]:
     dish_name = idea_payload["dish_idea"].strip()
     notes = re.sub(r"\s+", "", idea_payload["notes"]).strip()
@@ -2818,15 +2808,10 @@ def validate_auto_generated_dish_idea(
         if banned_token in dish_name:
             raise ValueError(f"菜名含有营销套话「{banned_token}」，请改成更口语、更好记的名字。")
 
-    if reference_dish and len(reference_dish) >= 2 and dish_name[:2] == reference_dish[:2]:
+    if attempt_index < 4 and reference_dish and len(reference_dish) >= 2 and dish_name[:2] == reference_dish[:2]:
         raise ValueError(
             f"新菜名「{dish_name}」与传统参考菜「{reference_dish}」前两字相同，像换皮菜，请换记忆点。"
         )
-    if reference_dish and len(reference_dish) >= 1 and len(dish_name) >= 1 and dish_name[-1] == reference_dish[-1]:
-        if len(dish_name) <= 5:
-            raise ValueError(
-                f"新菜名「{dish_name}」与参考菜「{reference_dish}」尾字相同且过短，请拉开差异。"
-            )
 
     conflicting_traditional = find_conflicting_dish_name(dish_name, traditional_dish_names)
     if conflicting_traditional:
@@ -2836,11 +2821,7 @@ def validate_auto_generated_dish_idea(
     if conflicting_history:
         raise ValueError(f"新菜名与历史生成菜「{conflicting_history}」冲突或过于接近。")
 
-    structural_conflict = find_structural_dish_conflict(dish_name, combined_text, historical_generated_dish_names)
-    if structural_conflict:
-        raise ValueError(f"新菜与历史菜「{structural_conflict}」在菜式结构和主材方向上过于接近。")
-
-    if recent_history_restrictions:
+    if recent_history_restrictions and attempt_index < 6:
         history_conflicts = find_recent_auto_dish_history_conflicts(
             combined_text,
             recent_history_restrictions,
@@ -2850,12 +2831,6 @@ def validate_auto_generated_dish_idea(
         if history_conflicts["ingredients"]:
             joined = "、".join(history_conflicts["ingredients"])
             raise ValueError(f"菜名仍像近作主食材「{joined}」，请突出本次主材「{main_ingredient or '新主料'}」。")
-        if history_conflicts["flavors"]:
-            joined = "、".join(history_conflicts["flavors"])
-            raise ValueError(f"近作已频繁使用这些风味：{joined}，请换味型。")
-        if history_conflicts["methods"]:
-            joined = "、".join(history_conflicts["methods"])
-            raise ValueError(f"近作已频繁使用这些做法：{joined}，请换技法。")
 
     if main_ingredient:
         ingredient_reason = validate_main_ingredient_usage(
@@ -2864,8 +2839,10 @@ def validate_auto_generated_dish_idea(
             main_ingredient,
             library=ingredient_library,
         )
-        if ingredient_reason:
+        if ingredient_reason and attempt_index < 6:
             raise ValueError(ingredient_reason)
+        if ingredient_reason and attempt_index >= 6 and not notes:
+            raise ValueError("自动生成的第二行描述不能为空。")
 
     return {
         "dish_idea": dish_name,
@@ -2876,6 +2853,8 @@ def validate_auto_generated_dish_idea(
 def generate_auto_dish_idea(
     idea_file: Path,
     client: OpenAI,
+    *,
+    session_banned_main_ingredients: Sequence[str] | None = None,
 ) -> dict[str, str]:
     global AUTO_DISH_MAIN_INGREDIENT_FAMILIES
 
@@ -2893,9 +2872,11 @@ def generate_auto_dish_idea(
     region_candidate_dishes = build_region_candidate_dishes(library, region_code)
     used_reference_dishes = [str(entry.get("reference_dish", "")).strip() for entry in memory_entries if str(entry.get("reference_dish", "")).strip()]
     used_generated_dishes = [str(entry.get("generated_dish_name", "")).strip() for entry in memory_entries if str(entry.get("generated_dish_name", "")).strip()]
+    session_banned = [str(item).strip() for item in (session_banned_main_ingredients or []) if str(item).strip()]
     recent_history_restrictions = build_recent_auto_dish_restriction_profile(
         used_generated_dishes,
         memory_entries=memory_entries,
+        session_banned_main_ingredients=session_banned,
     )
     reference_dish = pick_unused_reference_dish(region_candidate_dishes, set(used_reference_dishes))
     banned_main_ingredients = set(recent_history_restrictions.get("banned_main_ingredients", ()))
@@ -2926,6 +2907,7 @@ def generate_auto_dish_idea(
     last_model = ""
     for attempt_index in range(AUTO_DISH_GENERATION_RETRY_COUNT):
         if attempt_index > 0:
+            reference_dish = pick_unused_reference_dish(region_candidate_dishes, set(used_reference_dishes))
             creation_bundle = pick_creation_bundle(
                 ingredient_library,
                 banned_main_ingredients=banned_main_ingredients,
@@ -2935,9 +2917,13 @@ def generate_auto_dish_idea(
                 dish_type=creation_bundle["dish_type"],
                 compact=True,
             )
+            sample_pool = [dish_name for dish_name in region_candidate_dishes if dish_name != reference_dish]
+            sample_size = min(18, len(sample_pool))
+            region_samples = random.sample(sample_pool, sample_size) if sample_size else []
             print(
-                f"自动造菜重试 #{attempt_index + 1}：主材 {creation_bundle['main_ingredient']}；"
-                f"改刀 {creation_bundle['cut_style']}"
+                f"自动造菜重试 #{attempt_index + 1}：参考菜 {reference_dish}；"
+                f"主材 {creation_bundle['main_ingredient']}；改刀 {creation_bundle['cut_style']}；"
+                f"上次不合格：{last_error or '未知'}"
             )
         instruction_text = build_auto_dish_generation_user_prompt(
             region_label=region_profile["label"],
@@ -2975,9 +2961,11 @@ def generate_auto_dish_idea(
                 recent_history_restrictions=recent_history_restrictions,
                 main_ingredient=creation_bundle["main_ingredient"],
                 ingredient_library=ingredient_library,
+                attempt_index=attempt_index,
             )
         except ValueError as exc:
             last_error = str(exc)
+            print(f"自动造菜校验未通过（{attempt_index + 1}/{AUTO_DISH_GENERATION_RETRY_COUNT}）：{last_error}")
             continue
 
         save_dish_idea(idea_file, validated_payload["dish_idea"], validated_payload["notes"])

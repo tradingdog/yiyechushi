@@ -57,7 +57,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.20"
+PANEL_VERSION = "v1.21"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -1431,6 +1431,7 @@ HTML_PAGE = """<!doctype html>
       historyRevision: "",
       historySort: "favorite",
       suppressHistoryAutoReload: 0,
+      submittingTask: false,
       running: false,
       runningPercent: 0,
       runningElapsed: 0,
@@ -3708,6 +3709,11 @@ HTML_PAGE = """<!doctype html>
     }
 
     async function submitTask(payload, okText){
+      if(state.submittingTask){
+        setStatus("上一个任务仍在提交中，请稍候。", "warn");
+        return;
+      }
+      state.submittingTask = true;
       state.logNextIndex = 0;
       if(!state.pollTimer){ $("logPanel").textContent = ""; }
       setStatus(okText || "任务已提交，正在加入队列...");
@@ -3730,6 +3736,8 @@ HTML_PAGE = """<!doctype html>
         await fetchRunStatus();
       }catch(err){
         setStatus("失败：" + err.message, "warn");
+      }finally{
+        state.submittingTask = false;
       }
     }
 
@@ -4902,13 +4910,20 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                         return
         super().log_message(format, *args)
 
+    def _write_body(self, raw: bytes) -> None:
+        try:
+            self.wfile.write(raw)
+        except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError):
+            # 轮询端断开连接时忽略，避免长任务期间刷屏报错。
+            return
+
     def _send_json(self, payload: dict[str, Any], code: int = 200) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
-        self.wfile.write(raw)
+        self._write_body(raw)
 
     def _send_text(self, text: str, code: int = 200) -> None:
         raw = text.encode("utf-8")
@@ -4916,7 +4931,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
-        self.wfile.write(raw)
+        self._write_body(raw)
 
     def _send_file(self, file_path: Path) -> None:
         if not file_path.exists() or not file_path.is_file():
@@ -4928,7 +4943,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        self._write_body(data)
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)

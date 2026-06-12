@@ -534,7 +534,11 @@ def load_manual_dish_idea(idea_file: Path = IDEA_FILE) -> dict[str, str]:
     return {"dish_name": dish_name, "notes": notes}
 
 
-def auto_generate_dish_idea(client: OpenAI) -> dict[str, str]:
+def auto_generate_dish_idea(
+    client: OpenAI,
+    *,
+    session_banned_main_ingredients: list[str] | None = None,
+) -> dict[str, str]:
     del client
 
     # 对齐 V1 自动造菜配置，默认把记忆文件落在 V2 目录下。
@@ -549,7 +553,11 @@ def auto_generate_dish_idea(client: OpenAI) -> dict[str, str]:
 
     v1_client = v1_build_text_client()
     try:
-        payload = v1_generate_auto_dish_idea(idea_file=IDEA_FILE, client=v1_client)
+        payload = v1_generate_auto_dish_idea(
+            idea_file=IDEA_FILE,
+            client=v1_client,
+            session_banned_main_ingredients=session_banned_main_ingredients,
+        )
     finally:
         close_method = getattr(v1_client, "close", None)
         if callable(close_method):
@@ -564,6 +572,9 @@ def auto_generate_dish_idea(client: OpenAI) -> dict[str, str]:
         "memory_file": payload.get("memory_file", ""),
         "library_file": payload.get("library_file", ""),
         "generation_model": payload.get("generation_model", ""),
+        "main_ingredient": payload.get("main_ingredient", ""),
+        "dish_type": payload.get("dish_type", ""),
+        "cut_style": payload.get("cut_style", ""),
     }
 
 

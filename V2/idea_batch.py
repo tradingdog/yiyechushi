@@ -25,13 +25,17 @@ def _prepare_single_payload(
     dish_name: str,
     notes: str,
     doubao_client: Any,
+    session_banned_main_ingredients: list[str] | None = None,
 ) -> dict[str, str]:
     if mode == "file":
         if not dish_name.strip():
             raise ValueError("手动模式下，菜名不能为空。")
         write_dish_idea_file(dish_name.strip(), notes.strip(), idea_file=IDEA_FILE)
         return load_manual_dish_idea(idea_file=IDEA_FILE)
-    payload = auto_generate_dish_idea(doubao_client)
+    payload = auto_generate_dish_idea(
+        doubao_client,
+        session_banned_main_ingredients=session_banned_main_ingredients or [],
+    )
     write_dish_idea_file(payload["dish_name"], payload.get("notes", ""), idea_file=IDEA_FILE)
     return payload
 
@@ -64,6 +68,7 @@ def run_idea_batch(
 
     doubao_client = build_doubao_client()
     entries: list[dict[str, str]] = []
+    session_banned_main_ingredients: list[str] = []
     try:
         for index in range(1, count + 1):
             print(f"--- 第 {index}/{count} 条 ---")
@@ -72,7 +77,11 @@ def run_idea_batch(
                 dish_name=dish_name,
                 notes=notes,
                 doubao_client=doubao_client,
+                session_banned_main_ingredients=session_banned_main_ingredients,
             )
+            main_ingredient = str(dish_payload.get("main_ingredient", "")).strip()
+            if main_ingredient:
+                session_banned_main_ingredients.append(main_ingredient)
             name = str(dish_payload.get("dish_name", "")).strip() or f"新菜{index}"
             folder = batch_dir / f"{index:04d}_{sanitize_file_name(name)}"
             folder.mkdir(parents=True, exist_ok=True)
