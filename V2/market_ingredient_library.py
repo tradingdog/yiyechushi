@@ -168,16 +168,30 @@ def pick_cut_style(library: MarketIngredientLibrary, *, dish_type: str) -> str:
     return random.choice(styles) if styles else "切块"
 
 
-def pick_creation_bundle(library: MarketIngredientLibrary) -> dict[str, str]:
+def _pick_entry(
+    entries: list[IngredientEntry],
+    *,
+    banned_names: set[str],
+) -> IngredientEntry:
+    available = [entry for entry in entries if entry.name not in banned_names]
+    return random.choice(available or entries)
+
+
+def pick_creation_bundle(
+    library: MarketIngredientLibrary,
+    *,
+    banned_main_ingredients: set[str] | None = None,
+) -> dict[str, str]:
+    banned_names = banned_main_ingredients or set()
     dish_type = random.choice(library.dish_types or ["荤主配素", "纯素菜"])
     if dish_type == "纯素菜":
-        main_entry = random.choice(library.veg_ingredients)
+        main_entry = _pick_entry(library.veg_ingredients, banned_names=banned_names)
     else:
-        main_entry = random.choice(library.meat_ingredients)
+        main_entry = _pick_entry(library.meat_ingredients, banned_names=banned_names)
 
     side_hint = ""
     if dish_type == "荤主配素":
-        side_entry = random.choice(library.veg_ingredients)
+        side_entry = _pick_entry(library.veg_ingredients, banned_names=banned_names)
         side_hint = f"{side_entry.name}（{side_entry.part}）"
 
     return {

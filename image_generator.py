@@ -705,15 +705,17 @@ def build_auto_dish_generation_user_prompt(
     region_sample_text = join_auto_dish_history_items(region_samples[:12])
     cuisine_hint = f"菜系气质：{region_label}。" if region_label.strip() else ""
 
-    banned_ingredients = join_auto_dish_history_items(recent_history_restrictions.get("banned_ingredients", ()))
+    banned_main_ingredients = join_auto_dish_history_items(
+        recent_history_restrictions.get("banned_main_ingredients", ())
+    )
     banned_flavors = join_auto_dish_history_items(recent_history_restrictions.get("banned_flavors", ()))
     banned_methods = join_auto_dish_history_items(recent_history_restrictions.get("banned_methods", ()))
 
     history_lines: list[str] = []
     if used_generated_text != "无":
         history_lines.append(f"近10条新菜名请勿重复或只改一字：{used_generated_text}。")
-    if banned_ingredients != "无":
-        history_lines.append(f"近作已用过这些主材方向，请换别的：{banned_ingredients}。")
+    if banned_main_ingredients != "无":
+        history_lines.append(f"近作主食材请勿重复：{banned_main_ingredients}。")
     if banned_flavors != "无":
         history_lines.append(f"近作已用过这些风味，请换别的：{banned_flavors}。")
     if banned_methods != "无":
@@ -825,7 +827,9 @@ def ensure_runtime_config_loaded() -> None:
     merged_values.update(parse_env_file(ROOT_DIR / ".env"))
 
     for key, value in merged_values.items():
-        os.environ[key] = value
+        # V2 面板会先写入 V2/config.env；此处勿覆盖已存在的运行时配置。
+        if not os.environ.get(key, "").strip():
+            os.environ[key] = value
 
     _RUNTIME_CONFIG_LOADED = True
 
@@ -2647,9 +2651,20 @@ def join_auto_dish_history_items(items: Sequence[str]) -> str:
 
 def build_recent_auto_dish_restriction_profile(
     historical_generated_dish_names: Sequence[str],
+    memory_entries: Sequence[dict[str, Any]] | None = None,
     limit: int = AUTO_DISH_RECENT_HISTORY_LIMIT,
 ) -> dict[str, tuple[str, ...]]:
     recent_generated_dishes = [str(name).strip() for name in historical_generated_dish_names if str(name).strip()][-limit:]
+    recent_memory_entries = [entry for entry in (memory_entries or []) if isinstance(entry, dict)][-limit:]
+
+    banned_main_ingredients: list[str] = []
+    seen_main_ingredients: set[str] = set()
+    for entry in reversed(recent_memory_entries):
+        main_ingredient = str(entry.get("main_ingredient", "")).strip()
+        if not main_ingredient or main_ingredient in seen_main_ingredients:
+            continue
+        seen_main_ingredients.add(main_ingredient)
+        banned_main_ingredients.append(main_ingredient)
 
     def collect_unique_matches(family_definitions: tuple[tuple[str, tuple[str, ...]], ...]) -> tuple[str, ...]:
         collected: list[str] = []
@@ -2664,7 +2679,7 @@ def build_recent_auto_dish_restriction_profile(
 
     return {
         "recent_generated_dishes": tuple(recent_generated_dishes),
-        "banned_ingredients": collect_unique_matches(AUTO_DISH_MAIN_INGREDIENT_FAMILIES),
+        "banned_main_ingredients": tuple(banned_main_ingredients),
         "banned_flavors": collect_unique_matches(AUTO_DISH_FLAVOR_FAMILIES),
         "banned_methods": collect_unique_matches(AUTO_DISH_PRIMARY_METHOD_FAMILIES),
     }
@@ -2673,15 +2688,20 @@ def build_recent_auto_dish_restriction_profile(
 def find_recent_auto_dish_history_conflicts(
     candidate_text: str,
     recent_history_restrictions: dict[str, Sequence[str]],
+    *,
+    dish_name: str = "",
+    current_main_ingredient: str = "",
 ) -> dict[str, tuple[str, ...]]:
-    banned_ingredients = set(recent_history_restrictions.get("banned_ingredients", ()))
+    banned_main_ingredients = set(recent_history_restrictions.get("banned_main_ingredients", ()))
     banned_flavors = set(recent_history_restrictions.get("banned_flavors", ()))
     banned_methods = set(recent_history_restrictions.get("banned_methods", ()))
 
+    ingredient_check_text = dish_name.strip() or candidate_text
     ingredient_conflicts = tuple(
-        family_name
-        for family_name in extract_auto_dish_family_matches(candidate_text, AUTO_DISH_MAIN_INGREDIENT_FAMILIES)
-        if family_name in banned_ingredients
+        banned_name
+        for banned_name in banned_main_ingredients
+        if banned_name != current_main_ingredient.strip()
+        and ingredient_appears_in_text(ingredient_check_text, banned_name)
     )
     flavor_conflicts = tuple(
         family_name
@@ -2821,10 +2841,15 @@ def validate_auto_generated_dish_idea(
         raise ValueError(f"新菜与历史菜「{structural_conflict}」在菜式结构和主材方向上过于接近。")
 
     if recent_history_restrictions:
-        history_conflicts = find_recent_auto_dish_history_conflicts(combined_text, recent_history_restrictions)
+        history_conflicts = find_recent_auto_dish_history_conflicts(
+            combined_text,
+            recent_history_restrictions,
+            dish_name=dish_name,
+            current_main_ingredient=main_ingredient,
+        )
         if history_conflicts["ingredients"]:
             joined = "、".join(history_conflicts["ingredients"])
-            raise ValueError(f"近作已频繁使用这些主材方向：{joined}，请换食材或部位。")
+            raise ValueError(f"菜名仍像近作主食材「{joined}」，请突出本次主材「{main_ingredient or '新主料'}」。")
         if history_conflicts["flavors"]:
             joined = "、".join(history_conflicts["flavors"])
             raise ValueError(f"近作已频繁使用这些风味：{joined}，请换味型。")
@@ -2868,9 +2893,16 @@ def generate_auto_dish_idea(
     region_candidate_dishes = build_region_candidate_dishes(library, region_code)
     used_reference_dishes = [str(entry.get("reference_dish", "")).strip() for entry in memory_entries if str(entry.get("reference_dish", "")).strip()]
     used_generated_dishes = [str(entry.get("generated_dish_name", "")).strip() for entry in memory_entries if str(entry.get("generated_dish_name", "")).strip()]
-    recent_history_restrictions = build_recent_auto_dish_restriction_profile(used_generated_dishes)
+    recent_history_restrictions = build_recent_auto_dish_restriction_profile(
+        used_generated_dishes,
+        memory_entries=memory_entries,
+    )
     reference_dish = pick_unused_reference_dish(region_candidate_dishes, set(used_reference_dishes))
-    creation_bundle = pick_creation_bundle(ingredient_library)
+    banned_main_ingredients = set(recent_history_restrictions.get("banned_main_ingredients", ()))
+    creation_bundle = pick_creation_bundle(
+        ingredient_library,
+        banned_main_ingredients=banned_main_ingredients,
+    )
     library_text = render_traditional_dish_library_text(library, region_code)
     ingredient_library_text = render_ingredient_library_text(
         ingredient_library,
@@ -2892,7 +2924,21 @@ def generate_auto_dish_idea(
 
     last_error = ""
     last_model = ""
-    for _ in range(AUTO_DISH_GENERATION_RETRY_COUNT):
+    for attempt_index in range(AUTO_DISH_GENERATION_RETRY_COUNT):
+        if attempt_index > 0:
+            creation_bundle = pick_creation_bundle(
+                ingredient_library,
+                banned_main_ingredients=banned_main_ingredients,
+            )
+            ingredient_library_text = render_ingredient_library_text(
+                ingredient_library,
+                dish_type=creation_bundle["dish_type"],
+                compact=True,
+            )
+            print(
+                f"自动造菜重试 #{attempt_index + 1}：主材 {creation_bundle['main_ingredient']}；"
+                f"改刀 {creation_bundle['cut_style']}"
+            )
         instruction_text = build_auto_dish_generation_user_prompt(
             region_label=region_profile["label"],
             reference_dish=reference_dish,
