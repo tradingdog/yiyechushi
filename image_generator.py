@@ -35,6 +35,7 @@ from market_ingredient_library import (
     MarketIngredientLibrary,
     build_ingredient_families,
     find_used_library_ingredient_families,
+    ingredient_appears_in_text,
     load_market_ingredient_library,
     pick_creation_bundle,
     render_ingredient_library_text,
@@ -3075,13 +3076,15 @@ def get_text_fallback_model() -> str:
 def get_text_temperature() -> float:
     ensure_runtime_config_loaded()
     provider = get_text_provider()
-    if provider == "doubao":
-        text = os.getenv("DOUBAO_TEXT_TEMPERATURE", "0.2").strip() or "0.2"
-    else:
-        text = os.getenv("OPENAI_TEXT_TEMPERATURE", "0.2").strip() or "0.2"
+    raw_value = os.getenv("MODEL_TEMPERATURE", "").strip()
+    if not raw_value:
+        if provider == "doubao":
+            raw_value = os.getenv("DOUBAO_TEXT_TEMPERATURE", "0.2").strip() or "0.2"
+        else:
+            raw_value = os.getenv("OPENAI_TEXT_TEMPERATURE", "0.2").strip() or "0.2"
 
     try:
-        return float(text)
+        return float(raw_value)
     except ValueError as exc:
         raise RuntimeError("文本温度参数必须是数字。") from exc
 

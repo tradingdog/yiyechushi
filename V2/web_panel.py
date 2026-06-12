@@ -57,7 +57,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.21"
+PANEL_VERSION = "v1.22"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -3751,6 +3751,7 @@ HTML_PAGE = """<!doctype html>
           action: "idea_only",
           mode,
           cuisine_mode: $("cuisineMode").value.trim(),
+          model_temperature: $("temperature").value.trim(),
           dish_name: dishName,
           notes: "",
           idea_count: String(count)
