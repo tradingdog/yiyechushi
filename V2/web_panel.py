@@ -57,7 +57,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.23"
+PANEL_VERSION = "v1.24"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -326,6 +326,22 @@ def default_publish_plan_range() -> tuple[str, str]:
     return today, end
 
 
+def normalize_published_dates(raw_dates: Any) -> list[str]:
+    if not isinstance(raw_dates, list):
+        return []
+    dates: list[str] = []
+    seen: set[str] = set()
+    for raw_date in raw_dates:
+        date_text = str(raw_date).strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_text):
+            continue
+        if date_text in seen:
+            continue
+        seen.add(date_text)
+        dates.append(date_text)
+    return sorted(dates)
+
+
 def normalize_publish_plan_slots(raw_slots: Any) -> dict[str, dict[str, str]]:
     if not isinstance(raw_slots, dict):
         return {}
@@ -352,7 +368,7 @@ def normalize_publish_plan_slots(raw_slots: Any) -> dict[str, dict[str, str]]:
 def load_publish_plan() -> dict[str, Any]:
     if not PUBLISH_PLAN_FILE.exists():
         start, end = default_publish_plan_range()
-        return {"start": start, "end": end, "slots": {}}
+        return {"start": start, "end": end, "slots": {}, "published_dates": []}
     try:
         payload = json.loads(PUBLISH_PLAN_FILE.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
@@ -369,6 +385,7 @@ def load_publish_plan() -> dict[str, Any]:
         "start": start,
         "end": end,
         "slots": normalize_publish_plan_slots(payload.get("slots")),
+        "published_dates": normalize_published_dates(payload.get("published_dates")),
     }
 
 
@@ -380,7 +397,8 @@ def save_publish_plan(plan: dict[str, Any]) -> dict[str, Any]:
     if start > end:
         start, end = end, start
     slots = normalize_publish_plan_slots(plan.get("slots"))
-    payload = {"start": start, "end": end, "slots": slots}
+    published_dates = normalize_published_dates(plan.get("published_dates"))
+    payload = {"start": start, "end": end, "slots": slots, "published_dates": published_dates}
     PUBLISH_PLAN_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return payload
 
@@ -734,7 +752,14 @@ HTML_PAGE = """<!doctype html>
     .plan-range input{padding:5px 6px;font-size:11px;border-radius:8px}
     .plan-list{display:flex;flex-direction:column;gap:6px;overflow:auto;flex:1;padding-right:2px}
     .plan-day{border:1px solid #283449;border-radius:8px;padding:6px;background:#0f172a}
-    .plan-day-date{font-size:11px;color:#94a3b8;margin-bottom:4px}
+    .plan-day.published{border-color:#166534;background:#0f1f17}
+    .plan-day-header{display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px}
+    .plan-day-date{font-size:11px;color:#94a3b8;flex:1;min-width:0}
+    .plan-day.published .plan-day-date{color:#86efac}
+    .plan-day-done{display:flex;align-items:center;gap:4px;flex-shrink:0;cursor:pointer;user-select:none}
+    .plan-day-done input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#38bdf8}
+    .plan-day-done span{font-size:10px;color:#64748b;line-height:1}
+    .plan-day.published .plan-day-done span{color:#86efac}
     .plan-day-slots{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
     .plan-slot{
       min-height:78px;border:1px dashed #334155;border-radius:6px;background:#0b1220;padding:3px;
@@ -1448,7 +1473,7 @@ HTML_PAGE = """<!doctype html>
       historyMealFilter: "",
       historyItemCache: {},
       mealTagLabels: {breakfast:"早餐", lunch:"午餐", dinner:"晚餐", late_night:"夜宵"},
-      publishPlan: {start:"", end:"", slots:{}},
+      publishPlan: {start:"", end:"", slots:{}, published_dates:[]},
       tagPopoverPath: "",
       customImagesDir: "",
       historyPoolCols: "3",
@@ -1865,6 +1890,15 @@ HTML_PAGE = """<!doctype html>
       });
     }
 
+    async function togglePlanDatePublished(date, checked){
+      const plan = JSON.parse(JSON.stringify(state.publishPlan || {start:"", end:"", slots:{}, published_dates:[]}));
+      const published = new Set(plan.published_dates || []);
+      if(checked){ published.add(date); }
+      else{ published.delete(date); }
+      plan.published_dates = Array.from(published).sort();
+      await savePublishPlan(plan);
+    }
+
     function renderPublishPlan(){
       const box = $("planList");
       if(!box){ return; }
@@ -1875,10 +1909,40 @@ HTML_PAGE = """<!doctype html>
         return;
       }
       dates.forEach((date) => {
+        const publishedDates = new Set(state.publishPlan?.published_dates || []);
+        const isPublished = publishedDates.has(date);
         const day = document.createElement("div");
-        day.className = "plan-day";
-        day.innerHTML = `<div class="plan-day-date">${date}</div><div class="plan-day-slots"></div>`;
-        const slotsWrap = day.querySelector(".plan-day-slots");
+        day.className = "plan-day" + (isPublished ? " published" : "");
+        const header = document.createElement("div");
+        header.className = "plan-day-header";
+        const dateEl = document.createElement("div");
+        dateEl.className = "plan-day-date";
+        dateEl.textContent = date;
+        const doneWrap = document.createElement("label");
+        doneWrap.className = "plan-day-done";
+        doneWrap.title = isPublished ? "点击取消「已发布」标记" : "点击标记为已发布";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = isPublished;
+        checkbox.addEventListener("click", (event) => event.stopPropagation());
+        checkbox.addEventListener("change", async () => {
+          try{
+            await togglePlanDatePublished(date, checkbox.checked);
+          }catch(err){
+            checkbox.checked = !checkbox.checked;
+            setStatus("更新发布状态失败：" + err.message, "warn");
+          }
+        });
+        const doneLabel = document.createElement("span");
+        doneLabel.textContent = "已发";
+        doneWrap.appendChild(checkbox);
+        doneWrap.appendChild(doneLabel);
+        header.appendChild(dateEl);
+        header.appendChild(doneWrap);
+        const slotsWrap = document.createElement("div");
+        slotsWrap.className = "plan-day-slots";
+        day.appendChild(header);
+        day.appendChild(slotsWrap);
         PLAN_SLOT_KEYS.forEach((slot) => {
           const slotEl = document.createElement("div");
           slotEl.className = "plan-slot";
