@@ -542,6 +542,8 @@ def auto_generate_dish_idea(client: OpenAI) -> dict[str, str]:
         os.environ["AUTO_DISH_MEMORY_FILE"] = "V2/dish_idea_memory.jsonl"
     if not os.getenv("AUTO_DISH_LIBRARY_FILE", "").strip():
         os.environ["AUTO_DISH_LIBRARY_FILE"] = "chuantongcaipu.txt"
+    if not os.getenv("AUTO_DISH_INGREDIENT_LIBRARY_FILE", "").strip():
+        os.environ["AUTO_DISH_INGREDIENT_LIBRARY_FILE"] = "V2/cankao/zhushicai.txt"
     if not os.getenv("AUTO_DISH_CUISINE_MODE", "").strip():
         os.environ["AUTO_DISH_CUISINE_MODE"] = DEFAULT_AUTO_DISH_CUISINE_MODE
 

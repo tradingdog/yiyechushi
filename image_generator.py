@@ -12,6 +12,7 @@ import random
 import re
 import shutil
 import ssl
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -26,10 +27,26 @@ from guide_pages.shared import GUIDE_PAGE_MACHINE_LABELS
 
 
 ROOT_DIR = Path(__file__).resolve().parent
+V2_DIR = ROOT_DIR / "V2"
+if str(V2_DIR) not in sys.path:
+    sys.path.insert(0, str(V2_DIR))
+
+from market_ingredient_library import (
+    MarketIngredientLibrary,
+    build_ingredient_families,
+    find_used_library_ingredient_families,
+    load_market_ingredient_library,
+    pick_creation_bundle,
+    render_ingredient_library_text,
+    resolve_ingredient_library_file,
+    validate_main_ingredient_usage,
+)
+
 DEFAULT_CONFIG_FILE = ROOT_DIR / "config.env"
 DEFAULT_PROMPT_FILE = ROOT_DIR / "临时调试prompt.txt"
 DEFAULT_IDEA_FILE = ROOT_DIR / "dish_name.txt"
 DEFAULT_TRADITIONAL_DISH_FILE = ROOT_DIR / "chuantongcaipu.txt"
+DEFAULT_AUTO_DISH_INGREDIENT_LIBRARY_FILE = ROOT_DIR / "V2" / "cankao" / "zhushicai.txt"
 DEFAULT_AUTO_DISH_MEMORY_FILE = ROOT_DIR / "dish_idea_memory.jsonl"
 OUTPUT_ROOT_DIR = ROOT_DIR / "output"
 DEFAULT_OUTPUT_DIR = OUTPUT_ROOT_DIR
@@ -195,15 +212,65 @@ GUIDE_LINE_STALE_KEYWORDS = (
     "超有面子",
     "有面子",
 )
-AUTO_DISH_BANNED_NAME_TOKENS: tuple[str, ...] = ()
+AUTO_DISH_BANNED_NAME_TOKENS: tuple[str, ...] = (
+    "秘制",
+    "绝味",
+    "灵魂",
+    "天花板",
+    "爆款",
+    "网红",
+    "惊艳",
+    "震撼",
+)
 AUTO_DISH_NAME_MIN_CHARS = 3
 AUTO_DISH_NAME_MAX_CHARS = 8
-# 用户要求：不使用这批本地限制词表去约束豆包发挥。
-AUTO_DISH_NAME_ACTION_TOKENS: tuple[str, ...] = ()
-AUTO_DISH_STRUCTURE_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = ()
+AUTO_DISH_NAME_ACTION_TOKENS: tuple[str, ...] = (
+    "红烧",
+    "清蒸",
+    "爆炒",
+    "干煸",
+    "干锅",
+    "凉拌",
+    "油焖",
+    "香煎",
+    "白灼",
+    "炖煮",
+    "焖",
+    "烩",
+    "焗",
+    "煲",
+    "卤",
+    "烤",
+    "炸",
+)
+AUTO_DISH_STRUCTURE_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("盖饭拌饭类", ("盖饭", "拌饭", "烩饭", "炒饭")),
+    ("面粉主食类", ("拌面", "汤面", "炒面", "米粉", "粉丝")),
+    ("夹饼夹馍类", ("夹饼", "夹馍", "卷饼", "手抓饼")),
+    ("汤羹类", ("汤", "羹", "煲")),
+    ("凉拌类", ("凉拌", "冷盘", "色拉")),
+)
 AUTO_DISH_MAIN_INGREDIENT_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = ()
-AUTO_DISH_FLAVOR_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = ()
-AUTO_DISH_PRIMARY_METHOD_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = ()
+AUTO_DISH_FLAVOR_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("蒜香", ("蒜香", "蒜蓉")),
+    ("葱香", ("葱香", "葱爆", "葱油")),
+    ("酱香", ("酱香", "酱焖", "豉香")),
+    ("椒麻", ("椒麻", "藤椒", "花椒")),
+    ("酸辣", ("酸辣", "酸汤")),
+    ("糖醋", ("糖醋", "咕咾")),
+    ("蜜汁", ("蜜汁", "照烧")),
+    ("香辣", ("香辣", "麻辣", "干锅")),
+    ("咸鲜", ("咸鲜", "清炒", "清蒸")),
+    ("五香", ("五香", "卤香")),
+)
+AUTO_DISH_PRIMARY_METHOD_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("煎炸烤", ("煎", "炸", "烤", "焗")),
+    ("炖煮焖", ("炖", "焖", "煲", "烧")),
+    ("爆炒滑炒", ("爆", "炒", "煸")),
+    ("凉拌冷吃", ("凉拌", "冷吃", "白灼")),
+    ("干锅干煸", ("干锅", "干煸")),
+    ("蒸", ("蒸",)),
+)
 AUTO_DISH_REGION_PROFILES: dict[str, dict[str, Any]] = {
     "0": {
         "label": "全球随机",
@@ -586,7 +653,20 @@ def build_recipe_user_prompt(dish_idea: str, notes: str) -> str:
 
 
 def build_auto_dish_generation_system_prompt(region_label: str) -> str:
-    return ""
+    cuisine_hint = f"菜系气质可参考：{region_label}。" if region_label.strip() else ""
+    return f"""你是「一夜厨神」的原创中餐研发顾问。你的任务不是把家常菜换个字，而是用中国人菜市场里真正会买的食材，设计听得懂、想下单、也想回家做的原创菜。
+
+{cuisine_hint}
+
+硬性原则：
+1. 主食材必须来自附件「菜市场食材库」，并在菜名或描述第一句中明确体现。
+2. 优先大众食材的新搭配、新口感、新呈现；可以借鉴传统菜的技法，但不得产出换皮家常菜。
+3. 菜名 3 至 8 个纯中文汉字，顺口好记，一听就好吃；禁止比喻式、营销式、抽象菜名。
+4. 第二行描述写清楚：主材部位与改刀、搭配食材、调味酱汁、关键火候、出锅状态与摆盘；用家常话，不要菜谱腔。
+5. 人类愿意买单：食材常见、步骤可在家复现、味道有记忆点；避免牵强组合、猎奇堆砌、把辅料全塞进菜名。
+6. 不得与附件传统菜库中的菜名重复，也不得与已给历史新菜名重复。
+
+输出格式固定：第一行菜名，第二行描述，不要空行，不要 JSON，不要编号。"""
 
 
 def render_traditional_dish_library_text(
@@ -612,23 +692,55 @@ def build_auto_dish_generation_user_prompt(
     region_label: str,
     reference_dish: str,
     library_file_name: str,
+    ingredient_library_file_name: str,
+    creation_bundle: dict[str, str],
     region_samples: list[str],
     used_reference_dishes: list[str],
     used_generated_dishes: list[str],
     recent_history_restrictions: dict[str, tuple[str, ...]],
     retry_feedback: str = "",
 ) -> str:
-    del region_samples, used_reference_dishes, used_generated_dishes
     used_generated_text = join_auto_dish_history_items(recent_history_restrictions.get("recent_generated_dishes", ()))
-    cuisine_hint = f"菜系范围：{region_label}。" if region_label.strip() else ""
-    history_hint = (
-        f"近10条历史新菜名请勿重复：{used_generated_text}。"
-        if used_generated_text != "无"
-        else ""
-    )
+    used_reference_text = join_auto_dish_history_items(used_reference_dishes[-8:])
+    region_sample_text = join_auto_dish_history_items(region_samples[:12])
+    cuisine_hint = f"菜系气质：{region_label}。" if region_label.strip() else ""
+
+    banned_ingredients = join_auto_dish_history_items(recent_history_restrictions.get("banned_ingredients", ()))
+    banned_flavors = join_auto_dish_history_items(recent_history_restrictions.get("banned_flavors", ()))
+    banned_methods = join_auto_dish_history_items(recent_history_restrictions.get("banned_methods", ()))
+
+    history_lines: list[str] = []
+    if used_generated_text != "无":
+        history_lines.append(f"近10条新菜名请勿重复或只改一字：{used_generated_text}。")
+    if banned_ingredients != "无":
+        history_lines.append(f"近作已用过这些主材方向，请换别的：{banned_ingredients}。")
+    if banned_flavors != "无":
+        history_lines.append(f"近作已用过这些风味，请换别的：{banned_flavors}。")
+    if banned_methods != "无":
+        history_lines.append(f"近作已用过这些做法，请换别的：{banned_methods}。")
+    history_hint = "".join(history_lines)
+
+    dish_type = creation_bundle["dish_type"]
+    main_ingredient = creation_bundle["main_ingredient"]
+    side_hint = creation_bundle.get("side_hint", "")
+    side_line = f"建议搭配素菜：{side_hint}。" if side_hint else "本道为纯素菜，全程不用荤料。"
+
     feedback_hint = f"\n上次输出不合格：{retry_feedback}" if retry_feedback.strip() else ""
 
-    return f"""{cuisine_hint}请阅读随附的「{library_file_name}」传统菜库，以「{reference_dish}」为主要参考，生成市面上没有的新菜名，并用简短语言描述做法（食材、配菜、酱汁、烹饪流程和出菜摆盘）。可更换食材、口味和烹饪流程创造全新菜；菜名 3 至 8 个汉字；食材需大众化；不要比喻式或隐喻式菜名；新菜名不得与附件中的传统菜名重复。{history_hint}
+    return f"""{cuisine_hint}请阅读附件「{ingredient_library_file_name}」菜市场食材库与「{library_file_name}」传统菜库，创作一道市面上没有、但人类愿意买单的原创菜。
+
+本次创作锚点（必须遵守）：
+- 菜式：{dish_type}
+- 主食材：{main_ingredient}（{creation_bundle["main_part"]}，{creation_bundle["main_trait"]}）
+- 改刀建议：{creation_bundle["cut_style"]}
+- 口感目标：{creation_bundle["texture_anchor"]}
+- 风味方向：{creation_bundle["flavor_anchor"]}
+- 呈现载体：{creation_bundle["carrier_anchor"]}
+- {side_line}
+
+参考传统菜「{reference_dish}」时，只允许继承一个维度（技法、口感或搭配思路三选一），禁止沿用其菜名结构、前两字或尾字套路。同区域其它菜名仅供感受地域味型，不要仿造：{region_sample_text}。近期已参考过的传统菜：{used_reference_text}。
+
+原创要求：主材必须是菜市场常见货；通过部位、改刀、搭配、酱汁、火候、载体做出明显差异；菜名短、好记、一听就想吃也想做；描述第二行写具体步骤感。{history_hint}
 
 输出格式：第一行菜名，第二行描述，不要空行。{feedback_hint}""".strip()
 
@@ -638,9 +750,15 @@ def build_auto_dish_generation_user_content(
     *,
     library_text: str,
     library_file_name: str,
+    ingredient_library_text: str,
+    ingredient_library_file_name: str,
 ) -> list[dict[str, str]]:
     return [
         {"type": "text", "text": instruction_text},
+        {
+            "type": "text",
+            "text": f"【附件：{ingredient_library_file_name}】\n{ingredient_library_text.strip()}",
+        },
         {
             "type": "text",
             "text": f"【附件：{library_file_name}】\n{library_text.strip()}",
@@ -784,6 +902,14 @@ def resolve_runtime_path(env_name: str, default_path: Path) -> Path:
 
 def get_auto_dish_library_file() -> Path:
     return resolve_runtime_path("AUTO_DISH_LIBRARY_FILE", DEFAULT_TRADITIONAL_DISH_FILE)
+
+
+def get_auto_dish_ingredient_library_file() -> Path:
+    ensure_runtime_config_loaded()
+    raw_path = os.getenv("AUTO_DISH_INGREDIENT_LIBRARY_FILE", "").strip()
+    if raw_path:
+        return resolve_ingredient_library_file(raw_path)
+    return DEFAULT_AUTO_DISH_INGREDIENT_LIBRARY_FILE
 
 
 def get_auto_dish_memory_file() -> Path:
@@ -2649,9 +2775,13 @@ def validate_auto_generated_dish_idea(
     traditional_dish_names: list[str],
     historical_generated_dish_names: list[str],
     recent_history_restrictions: dict[str, tuple[str, ...]] | None = None,
+    *,
+    main_ingredient: str = "",
+    ingredient_library: MarketIngredientLibrary | None = None,
 ) -> dict[str, str]:
     dish_name = idea_payload["dish_idea"].strip()
     notes = re.sub(r"\s+", "", idea_payload["notes"]).strip()
+    combined_text = f"{dish_name}{notes}"
 
     if not re.fullmatch(rf"[\u4e00-\u9fff]{{{AUTO_DISH_NAME_MIN_CHARS},{AUTO_DISH_NAME_MAX_CHARS}}}", dish_name):
         raise ValueError(
@@ -2659,6 +2789,58 @@ def validate_auto_generated_dish_idea(
         )
     if not notes:
         raise ValueError("自动生成的第二行描述不能为空。")
+
+    mechanical_reason = find_mechanical_auto_dish_name_reason(dish_name)
+    if mechanical_reason:
+        raise ValueError(mechanical_reason)
+
+    for banned_token in AUTO_DISH_BANNED_NAME_TOKENS:
+        if banned_token in dish_name:
+            raise ValueError(f"菜名含有营销套话「{banned_token}」，请改成更口语、更好记的名字。")
+
+    if reference_dish and len(reference_dish) >= 2 and dish_name[:2] == reference_dish[:2]:
+        raise ValueError(
+            f"新菜名「{dish_name}」与传统参考菜「{reference_dish}」前两字相同，像换皮菜，请换记忆点。"
+        )
+    if reference_dish and len(reference_dish) >= 1 and len(dish_name) >= 1 and dish_name[-1] == reference_dish[-1]:
+        if len(dish_name) <= 5:
+            raise ValueError(
+                f"新菜名「{dish_name}」与参考菜「{reference_dish}」尾字相同且过短，请拉开差异。"
+            )
+
+    conflicting_traditional = find_conflicting_dish_name(dish_name, traditional_dish_names)
+    if conflicting_traditional:
+        raise ValueError(f"新菜名与传统菜库中的「{conflicting_traditional}」冲突或过于接近。")
+
+    conflicting_history = find_conflicting_dish_name(dish_name, historical_generated_dish_names)
+    if conflicting_history:
+        raise ValueError(f"新菜名与历史生成菜「{conflicting_history}」冲突或过于接近。")
+
+    structural_conflict = find_structural_dish_conflict(dish_name, combined_text, historical_generated_dish_names)
+    if structural_conflict:
+        raise ValueError(f"新菜与历史菜「{structural_conflict}」在菜式结构和主材方向上过于接近。")
+
+    if recent_history_restrictions:
+        history_conflicts = find_recent_auto_dish_history_conflicts(combined_text, recent_history_restrictions)
+        if history_conflicts["ingredients"]:
+            joined = "、".join(history_conflicts["ingredients"])
+            raise ValueError(f"近作已频繁使用这些主材方向：{joined}，请换食材或部位。")
+        if history_conflicts["flavors"]:
+            joined = "、".join(history_conflicts["flavors"])
+            raise ValueError(f"近作已频繁使用这些风味：{joined}，请换味型。")
+        if history_conflicts["methods"]:
+            joined = "、".join(history_conflicts["methods"])
+            raise ValueError(f"近作已频繁使用这些做法：{joined}，请换技法。")
+
+    if main_ingredient:
+        ingredient_reason = validate_main_ingredient_usage(
+            dish_name,
+            notes,
+            main_ingredient,
+            library=ingredient_library,
+        )
+        if ingredient_reason:
+            raise ValueError(ingredient_reason)
 
     return {
         "dish_idea": dish_name,
@@ -2670,9 +2852,15 @@ def generate_auto_dish_idea(
     idea_file: Path,
     client: OpenAI,
 ) -> dict[str, str]:
+    global AUTO_DISH_MAIN_INGREDIENT_FAMILIES
+
     library_file = get_auto_dish_library_file()
+    ingredient_library_file = get_auto_dish_ingredient_library_file()
     memory_file = get_auto_dish_memory_file()
     library = load_traditional_dish_library(library_file)
+    ingredient_library = load_market_ingredient_library(ingredient_library_file)
+    AUTO_DISH_MAIN_INGREDIENT_FAMILIES = tuple(build_ingredient_families(ingredient_library))
+
     memory_entries = load_auto_dish_memory(memory_file)
     region_code = get_auto_dish_region_code()
     region_profile = AUTO_DISH_REGION_PROFILES[region_code]
@@ -2682,11 +2870,19 @@ def generate_auto_dish_idea(
     used_generated_dishes = [str(entry.get("generated_dish_name", "")).strip() for entry in memory_entries if str(entry.get("generated_dish_name", "")).strip()]
     recent_history_restrictions = build_recent_auto_dish_restriction_profile(used_generated_dishes)
     reference_dish = pick_unused_reference_dish(region_candidate_dishes, set(used_reference_dishes))
+    creation_bundle = pick_creation_bundle(ingredient_library)
     library_text = render_traditional_dish_library_text(library, region_code)
+    ingredient_library_text = render_ingredient_library_text(
+        ingredient_library,
+        dish_type=creation_bundle["dish_type"],
+        compact=True,
+    )
     library_file_name = library_file.name
+    ingredient_library_file_name = ingredient_library_file.name
     print(
-        f"生菜附件：{library_file_name}（{library_text.count(chr(10)) + 1} 行，"
-        f"菜系范围 {region_profile['label']}）"
+        f"生菜附件：{ingredient_library_file_name} + {library_file_name}（菜系 {region_profile['label']}；"
+        f"菜式 {creation_bundle['dish_type']}；主材 {creation_bundle['main_ingredient']}；"
+        f"改刀 {creation_bundle['cut_style']}）"
     )
 
     sample_pool = [dish_name for dish_name in region_candidate_dishes if dish_name != reference_dish]
@@ -2701,6 +2897,8 @@ def generate_auto_dish_idea(
             region_label=region_profile["label"],
             reference_dish=reference_dish,
             library_file_name=library_file_name,
+            ingredient_library_file_name=ingredient_library_file_name,
+            creation_bundle=creation_bundle,
             region_samples=region_samples,
             used_reference_dishes=used_reference_dishes,
             used_generated_dishes=used_generated_dishes,
@@ -2715,6 +2913,8 @@ def generate_auto_dish_idea(
                 instruction_text,
                 library_text=library_text,
                 library_file_name=library_file_name,
+                ingredient_library_text=ingredient_library_text,
+                ingredient_library_file_name=ingredient_library_file_name,
             ),
             stage_name="自动造菜",
         )
@@ -2727,6 +2927,8 @@ def generate_auto_dish_idea(
                 traditional_dish_names=traditional_dish_names,
                 historical_generated_dish_names=used_generated_dishes,
                 recent_history_restrictions=recent_history_restrictions,
+                main_ingredient=creation_bundle["main_ingredient"],
+                ingredient_library=ingredient_library,
             )
         except ValueError as exc:
             last_error = str(exc)
@@ -2741,6 +2943,9 @@ def generate_auto_dish_idea(
                 "region_label": region_profile["label"],
                 "reference_dish": reference_dish,
                 "generated_dish_name": validated_payload["dish_idea"],
+                "dish_type": creation_bundle["dish_type"],
+                "main_ingredient": creation_bundle["main_ingredient"],
+                "cut_style": creation_bundle["cut_style"],
                 "model": last_model,
             },
         )
@@ -2751,8 +2956,12 @@ def generate_auto_dish_idea(
             "region_code": region_code,
             "region_label": region_profile["label"],
             "reference_dish": reference_dish,
+            "dish_type": creation_bundle["dish_type"],
+            "main_ingredient": creation_bundle["main_ingredient"],
+            "cut_style": creation_bundle["cut_style"],
             "memory_file": str(memory_file),
             "library_file": str(library_file),
+            "ingredient_library_file": str(ingredient_library_file),
             "generation_model": last_model,
         }
 
