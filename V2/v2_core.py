@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -304,7 +305,7 @@ def classify_image_api_error(exc: Exception) -> str:
         return "http_503"
     if "504" in message or "gateway timeout" in message:
         return "http_504"
-    if "429" in message or "rate limit" in message:
+    if "429" in message or "rate limit" in message or "unusual activity" in message:
         return "rate_limit"
     if "connection error" in message or "connection reset" in message:
         return "connection"
@@ -330,6 +331,43 @@ def is_retriable_image_api_error(exc: Exception) -> bool:
         if isinstance(error, (httpx.ConnectError, httpx.RemoteProtocolError, ConnectionError, OSError)):
             return True
     return is_timeout_error(exc)
+
+
+def classify_text_api_error(exc: Exception) -> str:
+    if is_timeout_error(exc):
+        return "timeout"
+    message = " ".join(str(error) for error in iter_exception_chain(exc)).lower()
+    if "429" in message or "rate limit" in message or "unusual activity" in message:
+        return "rate_limit"
+    if "connection error" in message or "connection reset" in message:
+        return "connection"
+    for error in iter_exception_chain(exc):
+        if isinstance(error, (httpx.ConnectError, httpx.RemoteProtocolError, ConnectionError)):
+            return "connection"
+    if "502" in message or "bad gateway" in message:
+        return "http_502"
+    if "503" in message or "service unavailable" in message:
+        return "http_503"
+    if "504" in message or "gateway timeout" in message:
+        return "http_504"
+    if "internal server error" in message or "error code: 500" in message:
+        return "http_500"
+    return "api_error"
+
+
+def is_retriable_text_api_error(exc: Exception) -> bool:
+    error_kind = classify_text_api_error(exc)
+    if error_kind in {"timeout", "http_502", "http_503", "http_504", "http_500", "rate_limit", "connection"}:
+        return True
+    for error in iter_exception_chain(exc):
+        if isinstance(error, (httpx.ConnectError, httpx.RemoteProtocolError, ConnectionError, OSError, APITimeoutError)):
+            return True
+    return is_timeout_error(exc)
+
+
+def api_retry_delay_seconds(attempt_index: int, *, error_kind: str = "") -> float:
+    base = 3.0 if error_kind in {"connection", "rate_limit", "http_500"} else 1.5
+    return min(45.0, base * (2 ** max(0, attempt_index - 1)))
 
 
 def execute_image_generation_with_retries(
@@ -398,7 +436,12 @@ def execute_image_generation_with_retries(
                         f"{failure_prefix}失败：{exc}（已累计 {len(accumulated)}/{expected_count} 张，未凑满）。"
                     ) from exc
                 raise RuntimeError(f"{failure_prefix}失败：{exc}") from exc
-            print(f"{stage_label}命中可重试错误（{error_kind}），准备第 {attempt + 1}/{max_attempts} 次…")
+            delay = api_retry_delay_seconds(attempt, error_kind=error_kind)
+            print(
+                f"{stage_label}命中可重试错误（{error_kind}），"
+                f"{delay:.0f}s 后准备第 {attempt + 1}/{max_attempts} 次…"
+            )
+            time.sleep(delay)
 
     if accumulated:
         if len(accumulated) >= expected_count:
@@ -790,10 +833,10 @@ def generate_doubao_prompt_by_template(
 请只返回 replacements JSON。
 """.strip()
 
-    max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
+    max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 5)
     response = None
     last_error: Exception | None = None
-    for _ in range(max_retry):
+    for attempt in range(1, max_retry + 1):
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -807,6 +850,12 @@ def generate_doubao_prompt_by_template(
             break
         except Exception as exc:
             last_error = exc
+            error_kind = classify_text_api_error(exc)
+            if attempt >= max_retry or not is_retriable_text_api_error(exc):
+                break
+            delay = api_retry_delay_seconds(attempt, error_kind=error_kind)
+            print(f"豆包模板改写第 {attempt} 次失败（{error_kind}），{delay:.0f}s 后重试…")
+            time.sleep(delay)
     if response is None:
         raise RuntimeError(f"豆包模板改写失败：{last_error}")
 
@@ -880,13 +929,13 @@ def generate_cankao_prompt_by_template(
 请只返回 replacements JSON。
 """.strip()
 
-    max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
+    max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 5)
     last_error: Exception | None = None
-    feedback = ""
-    for _ in range(max_retry):
+    validation_feedback = ""
+    for attempt in range(1, max_retry + 1):
         attempt_user = user_prompt
-        if feedback:
-            attempt_user = user_prompt + f"\n\n上次输出不合格：{feedback}\n请修正 replacements。"
+        if validation_feedback:
+            attempt_user = user_prompt + f"\n\n上次输出不合格：{validation_feedback}\n请修正 replacements。"
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -899,12 +948,18 @@ def generate_cankao_prompt_by_template(
             )
         except Exception as exc:
             last_error = exc
-            feedback = str(exc)
-            continue
+            error_kind = classify_text_api_error(exc)
+            if is_retriable_text_api_error(exc) and attempt < max_retry:
+                delay = api_retry_delay_seconds(attempt, error_kind=error_kind)
+                print(f"豆包模板改写第 {attempt} 次失败（{error_kind}），{delay:.0f}s 后重试…")
+                time.sleep(delay)
+                continue
+            break
 
         raw_text = extract_chat_text_output(response).strip()
         if not raw_text:
-            feedback = "豆包未返回有效内容。"
+            validation_feedback = "豆包未返回有效内容。"
+            last_error = ValueError(validation_feedback)
             continue
         try:
             payload = extract_json_object_from_text(raw_text)
@@ -920,7 +975,7 @@ def generate_cankao_prompt_by_template(
             )
             return {"model": model, "prompt": prompt_text}
         except ValueError as exc:
-            feedback = str(exc)
+            validation_feedback = str(exc)
             last_error = exc
 
     raise RuntimeError(f"豆包模板改写失败：{last_error or '未知错误'}")
@@ -1007,15 +1062,15 @@ def generate_cankao_prompt_with_images(
         user_content.append({"type": "text", "text": label})
         user_content.append({"type": "image_url", "image_url": {"url": encode_image_as_data_url(image_path)}})
 
-    max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
+    max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 5)
     last_error: Exception | None = None
-    feedback = ""
-    for _ in range(max_retry):
+    validation_feedback = ""
+    for attempt in range(1, max_retry + 1):
         attempt_content = list(user_content)
-        if feedback:
+        if validation_feedback:
             attempt_content[0] = {
                 "type": "text",
-                "text": user_prompt + f"\n\n上次输出不合格：{feedback}\n请严格按参考海报图重写 replacements。",
+                "text": user_prompt + f"\n\n上次输出不合格：{validation_feedback}\n请严格按参考海报图重写 replacements。",
             }
         try:
             response = client.chat.completions.create(
@@ -1029,12 +1084,18 @@ def generate_cankao_prompt_with_images(
             )
         except Exception as exc:
             last_error = exc
-            feedback = str(exc)
-            continue
+            error_kind = classify_text_api_error(exc)
+            if is_retriable_text_api_error(exc) and attempt < max_retry:
+                delay = api_retry_delay_seconds(attempt, error_kind=error_kind)
+                print(f"{stage_name}第 {attempt} 次失败（{error_kind}），{delay:.0f}s 后重试…")
+                time.sleep(delay)
+                continue
+            break
 
         raw_text = extract_chat_text_output(response).strip()
         if not raw_text:
-            feedback = f"{stage_name}未返回有效内容。"
+            validation_feedback = f"{stage_name}未返回有效内容。"
+            last_error = ValueError(validation_feedback)
             continue
         try:
             payload = extract_json_object_from_text(raw_text)
@@ -1055,7 +1116,7 @@ def generate_cankao_prompt_with_images(
             validate_detail_prompt_dish_consistency(dish_name, prompt_text)
             return {"model": model, "prompt": prompt_text}
         except ValueError as exc:
-            feedback = str(exc)
+            validation_feedback = str(exc)
             last_error = exc
 
     raise RuntimeError(f"{stage_name}失败：{last_error or '未知错误'}")
@@ -1235,6 +1296,11 @@ def generate_poster_bubble_copy(
             last_model = model
         except Exception as exc:
             last_error = str(exc)
+            error_kind = classify_text_api_error(exc)
+            if is_retriable_text_api_error(exc) and attempt < max_retry:
+                delay = api_retry_delay_seconds(attempt, error_kind=error_kind)
+                print(f"气泡文案第 {attempt} 次失败（{error_kind}），{delay:.0f}s 后重试…")
+                time.sleep(delay)
             continue
 
         raw_content = extract_chat_text_output(response).strip()
