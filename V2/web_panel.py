@@ -57,7 +57,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.24"
+PANEL_VERSION = "v1.25"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -804,16 +804,13 @@ HTML_PAGE = """<!doctype html>
     .tag-popover input{width:auto;margin:0}
     .history-item.draggable-pool{cursor:grab}
     .history-item.draggable-pool:active{cursor:grabbing}
-    .custom-tile-open{
-      position:absolute;right:4px;bottom:4px;z-index:2;padding:2px 6px;font-size:10px;border-radius:6px;
-      border:1px solid #475569;background:rgba(15,23,42,.88);color:#e2e8f0;cursor:pointer;
-    }
     .panel-mid{margin:0 6px}
     .panel-right{margin:0 6px}
     .panel-publish{margin-left:4px;display:flex;flex-direction:column;gap:6px;min-width:0;padding:8px}
-    .panel-custom{margin-left:4px;display:flex;flex-direction:column;gap:6px;min-width:0;padding:8px}
-    .panel-publish .panel-title,.panel-custom .panel-title{font-size:14px;margin-bottom:4px}
-    .custom-compose{display:flex;flex-direction:column;gap:8px}
+    .panel-custom{margin-left:4px;display:flex;flex-direction:column;gap:6px;min-width:0;padding:8px;overflow:hidden}
+    .panel-publish .panel-title,.panel-custom .panel-title{font-size:14px;margin-bottom:4px;flex:0 0 auto}
+    .panel-custom .sec-title{flex:0 0 auto}
+    .custom-compose{display:flex;flex-direction:column;gap:8px;flex:0 0 auto}
     .custom-prompt{width:100%;min-height:72px;max-height:140px;resize:vertical;padding:8px;border:1px solid #334155;border-radius:10px;background:#0b1220;color:#e2e8f0;font-size:12px;line-height:1.45}
     .custom-refs{display:flex;flex-wrap:wrap;gap:6px;min-height:24px}
     .custom-ref-chip{position:relative;width:52px;height:52px;border-radius:8px;overflow:hidden;border:1px solid #334155;background:#0b1220;flex:0 0 auto}
@@ -825,11 +822,40 @@ HTML_PAGE = """<!doctype html>
     .custom-generate-btn{padding:8px 10px;border:1px solid #4b5563;border-radius:10px;background:linear-gradient(180deg,#1d4ed8,#1e3a8a);color:#eff6ff;font-weight:700;cursor:pointer;white-space:nowrap;font-size:12px}
     .custom-generate-btn[disabled]{opacity:.6;cursor:not-allowed}
     .custom-status{min-height:20px;font-size:11px;color:var(--sub);line-height:1.4}
-    .custom-history{display:grid;grid-template-columns:1fr;gap:6px;max-height:calc(100vh - 300px);overflow:auto;padding-right:2px}
-    .custom-tile{position:relative;aspect-ratio:1/1;border-radius:10px;border:1px solid #334155;background:#0b1220;overflow:hidden;cursor:pointer}
-    .custom-tile .custom-tile-open{opacity:.92}
-    .custom-tile img{width:100%;height:100%;object-fit:cover;display:block}
-    .custom-tile.pending{display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:12px;text-align:center;padding:8px;background:linear-gradient(135deg,#0f172a,#1e293b)}
+    .custom-history{
+      flex:1 1 auto;min-height:140px;max-height:none;overflow-y:auto;overflow-x:hidden;
+      display:flex;flex-direction:column;gap:8px;padding-right:2px;
+    }
+    .custom-history-empty{font-size:11px;color:var(--sub);line-height:1.5;padding:8px 4px}
+    .custom-job-card{
+      display:flex;gap:8px;padding:8px;border:1px solid #334155;border-radius:10px;background:#0b1220;
+      align-items:flex-start;flex:0 0 auto;
+    }
+    .custom-job-thumbs{flex:0 0 auto;display:flex;gap:4px;flex-wrap:wrap;width:72px}
+    .custom-job-thumbs.multi{display:grid;grid-template-columns:repeat(2,34px);gap:3px;width:71px}
+    .custom-job-thumb{
+      width:72px;height:72px;border-radius:8px;overflow:hidden;border:1px solid #283449;background:#111827;
+      cursor:pointer;flex:0 0 auto;
+    }
+    .custom-job-thumbs.multi .custom-job-thumb{width:34px;height:34px}
+    .custom-job-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+    .custom-job-thumb.pending{
+      display:flex;align-items:center;justify-content:center;font-size:10px;color:#94a3b8;text-align:center;
+      padding:4px;line-height:1.3;background:linear-gradient(135deg,#0f172a,#1e293b);
+    }
+    .custom-job-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+    .custom-job-prompt{
+      font-size:11px;line-height:1.45;color:#e2e8f0;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
+      overflow:hidden;word-break:break-word;
+    }
+    .custom-job-meta{font-size:10px;color:#64748b;line-height:1.3}
+    .custom-job-actions{display:flex;gap:6px;flex-wrap:wrap}
+    .custom-job-open{
+      padding:4px 8px;font-size:10px;border-radius:6px;border:1px solid #475569;background:#111827;color:#cbd5e1;
+      cursor:pointer;white-space:nowrap;
+    }
+    .custom-job-open:hover{border-color:#60a5fa;color:#eff6ff}
+    .custom-tile-open{display:none}
     .custom-preview-modal{position:fixed;inset:0;background:rgba(2,6,23,.78);display:flex;align-items:center;justify-content:center;z-index:90;padding:24px}
     .custom-preview-modal.hidden{display:none!important}
     .custom-preview-box{position:relative;max-width:min(92vw,980px);max-height:92vh}
@@ -1391,7 +1417,7 @@ HTML_PAGE = """<!doctype html>
           </div>
           <div id="customStatus" class="custom-status">丝路 API 生图，图片保存在 V2/custom_image_gen/images/</div>
         </div>
-        <h4 class="sec-title" style="margin:6px 0 8px">历史记录</h4>
+        <h4 class="sec-title" style="margin:6px 0 4px">历史记录</h4>
         <div id="customHistory" class="custom-history"></div>
       </aside>
     </div>
@@ -3523,47 +3549,133 @@ HTML_PAGE = """<!doctype html>
       renderCustomRefs();
     }
 
+    function formatCustomJobTime(raw){
+      const text = String(raw || "").trim();
+      if(!text){ return ""; }
+      const match = text.match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/);
+      if(match){
+        return `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}`;
+      }
+      return text.replace("T", " ").slice(0, 16);
+    }
+
+    function groupCustomHistoryTiles(tiles){
+      const groups = [];
+      const seen = new Map();
+      (tiles || []).forEach((tile) => {
+        const jobId = tile.job_id || tile.path || `${tile.created_at || "job"}_${tile.slot_index || 0}`;
+        if(!seen.has(jobId)){
+          const group = {
+            job_id: jobId,
+            prompt: tile.prompt || "",
+            created_at: tile.created_at || "",
+            tiles: [],
+          };
+          seen.set(jobId, group);
+          groups.push(group);
+        }
+        seen.get(jobId).tiles.push(tile);
+      });
+      return groups;
+    }
+
     function renderCustomHistory(tiles){
       const box = $("customHistory");
       if(!box){ return; }
       box.innerHTML = "";
       if(!tiles.length){
         const empty = document.createElement("div");
-        empty.className = "custom-status";
+        empty.className = "custom-history-empty";
         empty.textContent = "暂无历史图片，输入提示词后点击生成。";
         box.appendChild(empty);
         return;
       }
-      tiles.forEach((tile) => {
-        const item = document.createElement("div");
-        item.className = "custom-tile" + (tile.status === "done" ? "" : " pending");
-        if(tile.status === "done" && tile.path){
-          const img = document.createElement("img");
-          img.src = fileUrl(tile.path);
-          img.alt = tile.prompt || "自定义生图";
-          img.loading = "lazy";
-          item.appendChild(img);
-          item.ondblclick = () => openCustomPreview(tile.path);
-          const openBtn = document.createElement("button");
-          openBtn.type = "button";
-          openBtn.className = "custom-tile-open";
-          openBtn.textContent = "打开目录";
-          openBtn.title = "打开该图片所在目录";
-          openBtn.onclick = async (event) => {
-            event.stopPropagation();
-            try{
-              const dir = dirnamePath(tile.path);
-              if(!dir){ setCustomStatus("未找到图片目录。", "warn"); return; }
-              await openOutputPath(dir);
-            }catch(err){
-              setCustomStatus("打开目录失败：" + err.message, "warn");
+      groupCustomHistoryTiles(tiles).forEach((group) => {
+        const doneTiles = group.tiles.filter((tile) => tile.status === "done" && tile.path);
+        const pendingCount = group.tiles.filter((tile) => tile.status !== "done").length;
+        const card = document.createElement("div");
+        card.className = "custom-job-card";
+
+        const thumbsWrap = document.createElement("div");
+        thumbsWrap.className = "custom-job-thumbs" + (doneTiles.length > 1 ? " multi" : "");
+
+        if(doneTiles.length){
+          doneTiles.slice(0, 4).forEach((tile, index) => {
+            const thumb = document.createElement("div");
+            thumb.className = "custom-job-thumb";
+            const img = document.createElement("img");
+            img.src = fileUrl(tile.path);
+            img.alt = group.prompt || "自定义生图";
+            img.loading = "lazy";
+            thumb.appendChild(img);
+            thumb.title = "双击预览";
+            thumb.addEventListener("dblclick", (event) => {
+              event.stopPropagation();
+              openCustomPreview(tile.path);
+            });
+            if(index === 0){
+              thumb.addEventListener("click", () => openCustomPreview(tile.path));
             }
-          };
-          item.appendChild(openBtn);
+            thumbsWrap.appendChild(thumb);
+          });
         }else{
-          item.textContent = "正在生成";
+          const pending = document.createElement("div");
+          pending.className = "custom-job-thumb pending";
+          pending.textContent = pendingCount ? "生成中" : "等待中";
+          thumbsWrap.appendChild(pending);
         }
-        box.appendChild(item);
+
+        const body = document.createElement("div");
+        body.className = "custom-job-body";
+
+        const promptEl = document.createElement("div");
+        promptEl.className = "custom-job-prompt";
+        promptEl.textContent = group.prompt || "（无提示词）";
+        promptEl.title = group.prompt || "";
+
+        const metaEl = document.createElement("div");
+        metaEl.className = "custom-job-meta";
+        const timeText = formatCustomJobTime(group.created_at);
+        const countText = doneTiles.length ? `${doneTiles.length} 张` : (pendingCount ? "生成中" : "0 张");
+        metaEl.textContent = [timeText, countText].filter(Boolean).join(" · ");
+
+        const actions = document.createElement("div");
+        actions.className = "custom-job-actions";
+        const previewBtn = document.createElement("button");
+        previewBtn.type = "button";
+        previewBtn.className = "custom-job-open";
+        previewBtn.textContent = "预览";
+        previewBtn.disabled = !doneTiles.length;
+        previewBtn.onclick = (event) => {
+          event.stopPropagation();
+          if(doneTiles[0]?.path){ openCustomPreview(doneTiles[0].path); }
+        };
+        const openBtn = document.createElement("button");
+        openBtn.type = "button";
+        openBtn.className = "custom-job-open";
+        openBtn.textContent = "打开目录";
+        openBtn.disabled = !doneTiles.length;
+        openBtn.onclick = async (event) => {
+          event.stopPropagation();
+          const path = doneTiles[0]?.path;
+          if(!path){ return; }
+          try{
+            const dir = dirnamePath(path);
+            if(!dir){ setCustomStatus("未找到图片目录。", "warn"); return; }
+            await openOutputPath(dir);
+          }catch(err){
+            setCustomStatus("打开目录失败：" + err.message, "warn");
+          }
+        };
+        actions.appendChild(previewBtn);
+        actions.appendChild(openBtn);
+
+        body.appendChild(promptEl);
+        body.appendChild(metaEl);
+        body.appendChild(actions);
+        card.appendChild(thumbsWrap);
+        card.appendChild(body);
+        box.appendChild(card);
       });
     }
 
