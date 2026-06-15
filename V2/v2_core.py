@@ -1020,6 +1020,10 @@ def generate_cankao_prompt_with_images(
     if not placeholders:
         return {"model": model, "prompt": template_text.strip()}
 
+    multi_ingredient_hint = ""
+    if "细节" in stage_name:
+        multi_ingredient_hint = infer_detail_multi_ingredient_guidance(dish_name)
+
     system_prompt = append_eating_action_guidance(
         """
 你是抖音美食图文视觉策划。请结合参考图片，只为模板变量位提供替换值。
@@ -1031,15 +1035,19 @@ def generate_cankao_prompt_with_images(
 5) 变量位含“豆包生成的气泡话语”时，必须使用用户提供的已定稿气泡文案。
 6) 每个变量位形如 {标签，示例}，必须结合菜名、补充说明与「参考海报图」生成，严禁照抄模板示例中的其它菜名或食材。
 7) 所有 replacements 必须描述参考海报中的同一道菜，不得混入模板示例菜。
+8) 变量位含“细节特写”时，若菜名含多种主食材，三宫格须分别展示不同主食材，不得三格只拍一种。
 """.strip(),
         placeholders,
     )
+    if multi_ingredient_hint:
+        system_prompt = f"{system_prompt}\n\n{multi_ingredient_hint}"
 
     placeholder_lines = "\n".join(f"{index + 1}. {placeholder}" for index, placeholder in enumerate(placeholders))
     bubble_block = f"\n气泡台词（原样填入）：{bubble_text}" if bubble_text.strip() else ""
+    multi_block = f"\n\n{multi_ingredient_hint}" if multi_ingredient_hint else ""
     user_prompt = f"""
 菜名：{dish_name}
-补充说明：{notes or "无"}{bubble_block}
+补充说明：{notes or "无"}{bubble_block}{multi_block}
 
 模板如下：
 {template_text}
@@ -1319,6 +1327,146 @@ def generate_poster_bubble_copy(
     raise RuntimeError(f"气泡文案生成失败：{last_error or '多次输出字数不合规。'}")
 
 
+class AllCandidatesDefectiveError(RuntimeError):
+    """所有候选图均被质量审核判定为明显缺陷。"""
+
+    def __init__(self, message: str, *, rejected: list[dict[str, Any]] | None = None):
+        super().__init__(message)
+        self.rejected = list(rejected or [])
+
+
+DETAIL_MAIN_INGREDIENT_TOKENS: tuple[str, ...] = (
+    "鳝段",
+    "鳝鱼",
+    "黑鱼片",
+    "鱼片",
+    "嫩鱼",
+    "鱼块",
+    "鱼头",
+    "鱼尾",
+    "牛肉",
+    "羊肉",
+    "猪肉",
+    "鸡肉",
+    "鸡腿",
+    "鸭",
+    "虾",
+    "蟹",
+    "排骨",
+    "肥肠",
+    "肚丝",
+    "豆干",
+    "豆腐",
+)
+
+
+def infer_detail_multi_ingredient_guidance(dish_name: str) -> str:
+    """菜名含多种主食材时，要求细节图三宫格分别展示。"""
+    name = dish_name.replace(" ", "").strip()
+    if not name:
+        return ""
+    found: list[str] = []
+    for token in DETAIL_MAIN_INGREDIENT_TOKENS:
+        if token not in name:
+            continue
+        if token == "鱼" and any(part in name for part in ("鱼片", "嫩鱼", "鳝段", "鳝鱼", "鱼头", "鱼尾", "鱼块")):
+            continue
+        if any(token != existing and token in existing for existing in found):
+            continue
+        if token not in found:
+            found.append(token)
+    if len(found) < 2:
+        return ""
+    joined = "、".join(found)
+    return (
+        f"菜名「{dish_name}」含多种主食材（{joined}）。"
+        "下半部分三宫格须分别展示不同主食材：至少两格各用一种主食材特写，"
+        "禁止三格全部只拍同一种主料；须与参考海报中的食材一致。"
+    )
+
+
+def filter_defective_publish_candidates(
+    client: OpenAI,
+    image_paths: list[Path],
+    *,
+    image_kind: str,
+) -> tuple[list[Path], list[dict[str, Any]]]:
+    """豆包视觉审核：剔除悬空手/筷、肢体断开等一眼可辨的错误图。"""
+    if not image_paths:
+        return [], []
+
+    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    user_content: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": (
+                f"你是图文质量审核员。请逐一检查下面 {len(image_paths)} 张{image_kind}候选图，"
+                "判断是否存在**一眼可辨的明显生成错误**，例如："
+                "手/筷子/勺子/食材悬空无依托、肢体或餐具断开漂浮、"
+                "多指/畸形手、文字乱码、容器与食材比例严重失真。"
+                "轻微风格化、景深模糊不算缺陷。"
+                "只输出 JSON："
+                '{"reviews":[{"index":1,"acceptable":true,"reason":""},...]}，'
+                "index 从 1 开始；acceptable=false 时 reason 必填（一句话）。"
+            ),
+        }
+    ]
+    for index, image_path in enumerate(image_paths, start=1):
+        user_content.append({"type": "text", "text": f"候选{index}：{image_path.name}"})
+        user_content.append({"type": "image_url", "image_url": {"url": encode_image_as_data_url(image_path)}})
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": user_content}],
+        max_tokens=800,
+        temperature=0,
+    )
+    raw_text = extract_chat_text_output(response).strip()
+    if not raw_text:
+        return list(image_paths), []
+
+    try:
+        payload = extract_json_object_from_text(raw_text)
+    except Exception as exc:
+        print(f"{image_kind}缺陷审核 JSON 解析失败，保留全部候选：{exc}")
+        return list(image_paths), []
+
+    reviews_raw = payload.get("reviews")
+    if not isinstance(reviews_raw, list):
+        return list(image_paths), []
+
+    review_by_index: dict[int, dict[str, Any]] = {}
+    for item in reviews_raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index", 0))
+        except (TypeError, ValueError):
+            continue
+        if 1 <= index <= len(image_paths):
+            review_by_index[index] = item
+
+    acceptable: list[Path] = []
+    rejected: list[dict[str, Any]] = []
+    for index, image_path in enumerate(image_paths, start=1):
+        review = review_by_index.get(index, {})
+        acceptable_flag = bool(review.get("acceptable", True))
+        reason = str(review.get("reason", "")).strip()
+        if acceptable_flag:
+            acceptable.append(image_path)
+        else:
+            rejected.append(
+                {
+                    "index": index,
+                    "acceptable": False,
+                    "reason": reason or "明显生成缺陷",
+                    "image_name": image_path.name,
+                }
+            )
+            print(f"剔除{image_kind}候选{index}（{image_path.name}）：{reason or '明显生成缺陷'}")
+    return acceptable, rejected
+
+
 def select_douyin_publish_image(
     client: OpenAI,
     image_paths: list[Path],
@@ -1342,6 +1490,7 @@ def select_douyin_publish_image(
             "type": "text",
             "text": (
                 f"选出最适合在抖音发布的{image_kind}。"
+                "优先选择无悬空手/筷、无漂浮餐具、无肢体畸形、构图完整的图片。"
                 "只输出 JSON：{\"winner_index\": 1, \"winner_reason\": \"一句话理由\"}，"
                 "winner_index 从 1 开始，对应下面候选顺序。"
             ),
@@ -1384,43 +1533,73 @@ def select_and_publish_image_group(
     candidate_paths: list[str],
     image_kind: str,
     selection_report_name: str,
+    skip_defect_filter: bool = False,
 ) -> tuple[str, str, dict[str, Any]]:
     paths = [Path(path) for path in candidate_paths if str(path).strip() and Path(path).exists()]
     if not paths:
         return "", "", {}
 
     publish_dir.mkdir(parents=True, exist_ok=True)
-    if len(paths) == 1:
-        selected = move_image_to_publish(str(paths[0]), publish_dir)
+    pool = paths
+    rejected: list[dict[str, Any]] = []
+    if not skip_defect_filter:
+        try:
+            pool, rejected = filter_defective_publish_candidates(client, pool, image_kind=image_kind)
+        except Exception as exc:
+            print(f"{image_kind}缺陷审核失败，继续原候选：{exc}")
+            pool = paths
+
+    if not pool:
+        raise AllCandidatesDefectiveError(
+            f"{image_kind}候选均含明显生成缺陷，已全部剔除（共 {len(rejected)} 张）。",
+            rejected=rejected,
+        )
+
+    if len(pool) == 1:
+        selected = move_image_to_publish(str(pool[0]), publish_dir)
         result = {
             "auto_selected": True,
             "winner_index": 1,
-            "winner_image_name": paths[0].name,
-            "winner_reason": f"仅 1 张{image_kind}，直接入 publish。",
+            "winner_image_name": pool[0].name,
+            "winner_reason": f"仅 1 张合格{image_kind}，直接入 publish。",
+            "rejected_candidates": rejected,
         }
+        if rejected:
+            save_text_output(
+                json.dumps({"rejected_candidates": rejected}, ensure_ascii=False, indent=2),
+                publish_dir / selection_report_name.replace(".json", "_剔除.json"),
+            )
         print(f"{image_kind}数量=1，直接入 publish：{selected}")
         return selected, "direct", result
 
     try:
-        selection_result = select_douyin_publish_image(client, paths, image_kind=image_kind)
+        selection_result = select_douyin_publish_image(client, pool, image_kind=image_kind)
+        if rejected:
+            selection_result["rejected_candidates"] = rejected
         winner_index = int(selection_result.get("winner_index", 1))
-        winner_path = paths[max(0, min(winner_index - 1, len(paths) - 1))]
+        winner_path = pool[max(0, min(winner_index - 1, len(pool) - 1))]
         selected = move_image_to_publish(str(winner_path), publish_dir)
         save_text_output(
             json.dumps(selection_result, ensure_ascii=False, indent=2),
             publish_dir / selection_report_name,
         )
+        if rejected:
+            save_text_output(
+                json.dumps({"rejected_candidates": rejected}, ensure_ascii=False, indent=2),
+                publish_dir / selection_report_name.replace(".json", "_剔除.json"),
+            )
         print(
             f"{image_kind}筛选完成：{selected}，理由：{selection_result.get('winner_reason', '')}"
         )
         return selected, "scored", selection_result
     except Exception as select_exc:
-        selected = move_image_to_publish(str(paths[0]), publish_dir)
+        selected = move_image_to_publish(str(pool[0]), publish_dir)
         fallback_result = {
             "auto_selected": False,
             "winner_index": 1,
-            "winner_image_name": paths[0].name,
+            "winner_image_name": pool[0].name,
             "winner_reason": f"筛选失败，回退首图：{select_exc}",
+            "rejected_candidates": rejected,
         }
         print(f"{image_kind}筛选失败，回退直通首图：{selected}")
         return selected, "fallback_direct", fallback_result

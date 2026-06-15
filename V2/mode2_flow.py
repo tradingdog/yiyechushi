@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from v2_core import (
+    AllCandidatesDefectiveError,
     CAIPU_TEMPLATE_FILE,
     CHARACTER_REFERENCE_FILE,
     snapshot_mode2_image_settings,
@@ -183,6 +184,38 @@ def generate_group_images(
     if last_exc is not None and not image_error:
         image_error = f"{stage_label}生图失败：{last_exc}"
     return saved_images, image_error
+
+
+def select_publish_group_with_defect_regeneration(
+    doubao_client,
+    *,
+    publish_dir: Path,
+    candidate_paths: list[str],
+    image_kind: str,
+    selection_report_name: str,
+    regenerate_fn=None,
+    max_regenerate_rounds: int = 1,
+) -> tuple[str, str, dict[str, Any]]:
+    """豆包缺陷审核选图；若全部不合格则重新生图后再选。"""
+    paths = list(candidate_paths)
+    for round_idx in range(max_regenerate_rounds + 1):
+        try:
+            return select_and_publish_image_group(
+                doubao_client,
+                publish_dir=publish_dir,
+                candidate_paths=paths,
+                image_kind=image_kind,
+                selection_report_name=selection_report_name,
+            )
+        except AllCandidatesDefectiveError as exc:
+            if regenerate_fn is None or round_idx >= max_regenerate_rounds:
+                raise
+            print(f"{image_kind}候选均含明显缺陷，开始第 {round_idx + 1} 次重新生图…")
+            new_paths = regenerate_fn()
+            if not new_paths:
+                raise RuntimeError(f"{image_kind}重新生图未返回新候选。") from exc
+            paths = list(new_paths)
+    raise RuntimeError(f"{image_kind}选图失败。")
 
 
 def run_v2_mode2(mode: str | None = None, *, target_output_dir: str | Path | None = None) -> dict[str, object]:
@@ -1007,12 +1040,31 @@ def run_supplement_for_output_dir(
                     errors.append(detail_error)
                 all_saved_images.extend(detail_saved_images)
                 if detail_saved_images:
-                    detail_selected_image, _, _ = select_and_publish_image_group(
+                    def _regen_detail() -> list[str]:
+                        imgs, err = generate_group_images(
+                            image_client=image_client,
+                            prompt_text=detail_prompt_result["prompt"],
+                            reference_paths=build_detail_reference_paths(poster_selected_image),
+                            settings=detail_settings,
+                            output_dir=run_output_dir,
+                            timestamp=timestamp,
+                            dish_name=dish_name,
+                            name_suffix="细节图",
+                            stage_label="细节图",
+                            moderation_fallback=True,
+                        )
+                        if err:
+                            return []
+                        all_saved_images.extend(imgs)
+                        return imgs
+
+                    detail_selected_image, _, _ = select_publish_group_with_defect_regeneration(
                         doubao_client,
                         publish_dir=publish_dir,
                         candidate_paths=detail_saved_images,
                         image_kind="细节图",
                         selection_report_name="细节图筛选结果.json",
+                        regenerate_fn=_regen_detail,
                     )
             except Exception as detail_exc:
                 errors.append(f"细节图流程失败：{detail_exc}")
@@ -1045,12 +1097,30 @@ def run_supplement_for_output_dir(
                 errors.append(recipe_error)
             all_saved_images.extend(recipe_saved_images)
             if recipe_saved_images:
-                recipe_selected_image, _, _ = select_and_publish_image_group(
+                def _regen_recipe() -> list[str]:
+                    imgs, err = generate_group_images(
+                        image_client=image_client,
+                        prompt_text=recipe_prompt_result["prompt"],
+                        reference_paths=[poster_selected_image],
+                        settings=recipe_settings,
+                        output_dir=run_output_dir,
+                        timestamp=timestamp,
+                        dish_name=dish_name,
+                        name_suffix="菜谱图",
+                        stage_label="菜谱图",
+                    )
+                    if err:
+                        return []
+                    all_saved_images.extend(imgs)
+                    return imgs
+
+                recipe_selected_image, _, _ = select_publish_group_with_defect_regeneration(
                     doubao_client,
                     publish_dir=publish_dir,
                     candidate_paths=recipe_saved_images,
                     image_kind="菜谱图",
                     selection_report_name="菜谱图筛选结果.json",
+                    regenerate_fn=_regen_recipe,
                 )
         except Exception as recipe_exc:
             errors.append(f"菜谱图流程失败：{recipe_exc}")
@@ -1083,12 +1153,30 @@ def run_supplement_for_output_dir(
                 errors.append(cover_error)
             all_saved_images.extend(cover_saved_images)
             if cover_saved_images:
-                cover_selected_image, _, _ = select_and_publish_image_group(
+                def _regen_cover() -> list[str]:
+                    imgs, err = generate_group_images(
+                        image_client=image_client,
+                        prompt_text=cover_prompt_result["prompt"],
+                        reference_paths=[poster_selected_image],
+                        settings=cover_settings,
+                        output_dir=run_output_dir,
+                        timestamp=timestamp,
+                        dish_name=dish_name,
+                        name_suffix="封面图",
+                        stage_label="封面图",
+                    )
+                    if err:
+                        return []
+                    all_saved_images.extend(imgs)
+                    return imgs
+
+                cover_selected_image, _, _ = select_publish_group_with_defect_regeneration(
                     doubao_client,
                     publish_dir=publish_dir,
                     candidate_paths=cover_saved_images,
                     image_kind="封面图",
                     selection_report_name="封面图筛选结果.json",
+                    regenerate_fn=_regen_cover,
                 )
         except Exception as cover_exc:
             errors.append(f"封面图流程失败：{cover_exc}")
@@ -1114,7 +1202,9 @@ def run_supplement_for_output_dir(
     if need_photoshop:
         try:
             only_kinds: set[str] | None
-            if "photoshop" in normalized_targets and not regenerated_kinds:
+            if force_photoshop_all:
+                only_kinds = None
+            elif "photoshop" in normalized_targets and not regenerated_kinds:
                 only_kinds = None
             else:
                 only_kinds = set(regenerated_kinds) if regenerated_kinds else None

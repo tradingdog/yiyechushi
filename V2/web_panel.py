@@ -57,7 +57,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.28"
+PANEL_VERSION = "v1.29"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -1515,6 +1515,7 @@ HTML_PAGE = """<!doctype html>
       selectedHistoryPath: "",
       galleryFilter: "all",
       galleryAllImages: [],
+      galleryNonPublishImages: [],
       galleryPublishImages: [],
       textAssets: null,
       activeTextCategory: "",
@@ -3135,14 +3136,26 @@ HTML_PAGE = """<!doctype html>
       thumbs.forEach((el, idx) => el.classList.toggle("active", idx === safe));
     }
 
+    function isUnderPublishDir(imagePath){
+      const normalized = String(imagePath || "").replaceAll("\\\\", "/").toLowerCase();
+      return normalized.includes("/publish/");
+    }
+
+    function rebuildGalleryNonPublishImages(){
+      state.galleryNonPublishImages = (state.galleryAllImages || []).filter((path) => !isUnderPublishDir(path));
+    }
+
     function setGallerySource(allImages, publishImages){
       state.galleryAllImages = (allImages || []).filter(Boolean);
       state.galleryPublishImages = (publishImages || []).filter(Boolean);
+      rebuildGalleryNonPublishImages();
       applyGalleryFilter(false);
     }
 
     function applyGalleryFilter(resetIndex=true){
-      const images = state.galleryFilter === "publish" ? state.galleryPublishImages : state.galleryAllImages;
+      const images = state.galleryFilter === "publish"
+        ? state.galleryPublishImages
+        : state.galleryNonPublishImages;
       $("filterPublishBtn").classList.toggle("active", state.galleryFilter === "publish");
       $("filterAllBtn").classList.toggle("active", state.galleryFilter === "all");
       renderGallery(images, resetIndex);
