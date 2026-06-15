@@ -57,7 +57,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.27"
+PANEL_VERSION = "v1.28"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -2685,7 +2685,7 @@ HTML_PAGE = """<!doctype html>
         `随后补生：细节图 ×${detailCount}、菜谱图 ×${recipeCount}、封面图 ×${coverCount}，并完成 PS 合成。`,
         "",
         "确定开始？"
-      ].join("\n");
+      ].join("\\n");
       if(!confirm(message)){ return; }
       await submitTask({
         action: "anchor_poster_regenerate",
