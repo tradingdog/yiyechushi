@@ -27,7 +27,7 @@ from custom_image_service import (
     init_custom_image_service,
     is_custom_image_path,
 )
-from mode2_flow import run_supplement_for_output_dir, run_v2_mode2
+from mode2_flow import run_anchor_poster_regenerate, run_supplement_for_output_dir, run_v2_mode2
 from publish_final_assets import resolve_publish_final_dir
 from idea_batch import run_idea_batch, DISH_POOL_DIR
 from v2_core import (
@@ -57,7 +57,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.25"
+PANEL_VERSION = "v1.27"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -855,7 +855,6 @@ HTML_PAGE = """<!doctype html>
       cursor:pointer;white-space:nowrap;
     }
     .custom-job-open:hover{border-color:#60a5fa;color:#eff6ff}
-    .custom-tile-open{display:none}
     .custom-preview-modal{position:fixed;inset:0;background:rgba(2,6,23,.78);display:flex;align-items:center;justify-content:center;z-index:90;padding:24px}
     .custom-preview-modal.hidden{display:none!important}
     .custom-preview-box{position:relative;max-width:min(92vw,980px);max-height:92vh}
@@ -974,6 +973,9 @@ HTML_PAGE = """<!doctype html>
     .gallery-tools{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
     .gallery-actions{display:flex;gap:8px}
     .gallery-actions button{width:auto;padding:7px 10px;border:1px solid #3a475f;border-radius:8px;background:#101a2a;color:#dbe7ff;cursor:pointer}
+    .gallery-actions button.primary-anchor{border-color:#2d6a4f;background:#14532d;color:#ecfdf5}
+    .gallery-actions button.primary-anchor:disabled{opacity:.45;cursor:not-allowed}
+    .anchor-poster-hint{font-size:11px;color:var(--sub);margin:0 0 6px;line-height:1.45}
     .gallery-index{font-size:12px;color:var(--sub)}
     .thumbs{
       display:flex;gap:8px;overflow-x:auto;overflow-y:hidden;padding:2px 0 8px;
@@ -1236,9 +1238,11 @@ HTML_PAGE = """<!doctype html>
                   <button id="nextImgBtn" type="button">下一张</button>
                   <button id="filterPublishBtn" class="gallery-filter" type="button">发布图</button>
                   <button id="filterAllBtn" class="gallery-filter active" type="button">非发布图</button>
+                  <button id="anchorPosterRegenBtn" class="primary-anchor" type="button" title="将当前图设为海报，存档旧 publish/final 后补生细节/菜谱/封面并 PS 合成">设为海报并补生</button>
                 </div>
                 <div id="galleryIndex" class="gallery-index">0 / 0</div>
               </div>
+              <div id="anchorPosterHint" class="anchor-poster-hint">在非发布图中选中候选海报后，可一键补生其余发布图；细节/菜谱/封面数量与画质沿用右侧「参数调节」。</div>
               <div id="thumbs" class="thumbs"></div>
             </div>
             <div class="result-stage">
@@ -2627,6 +2631,73 @@ HTML_PAGE = """<!doctype html>
       $("galleryIndex").textContent = `${current} / ${total}`;
       $("prevImgBtn").disabled = total < 2;
       $("nextImgBtn").disabled = total < 2;
+      updateAnchorPosterButtonState();
+    }
+
+    function updateAnchorPosterButtonState(){
+      const btn = $("anchorPosterRegenBtn");
+      const hint = $("anchorPosterHint");
+      if(!btn){ return; }
+      const hasDish = Boolean(state.selectedHistoryPath);
+      const hasImage = Boolean(state.currentImagePath);
+      const inAllView = state.galleryFilter !== "publish";
+      const enabled = hasDish && hasImage && inAllView && !state.submittingTask;
+      btn.disabled = !enabled;
+      if(!hasDish){
+        if(hint){ hint.textContent = "请先在左侧菜品池选中一道菜，再在非发布图中挑选候选海报。"; }
+        return;
+      }
+      if(!inAllView){
+        if(hint){ hint.textContent = "请切换到「非发布图」，选中候选海报后再点「设为海报并补生」。"; }
+        return;
+      }
+      if(!hasImage){
+        if(hint){ hint.textContent = "当前菜品暂无可选图片。"; }
+        return;
+      }
+      const fileName = 文件名(state.currentImagePath);
+      if(hint){
+        hint.textContent = `当前：${fileName}。将存档旧 publish/final 至 history/，并以该图补生细节/菜谱/封面（参数见右侧「参数调节」）。`;
+      }
+    }
+
+    async function submitAnchorPosterRegenerate(){
+      if(!state.selectedHistoryPath){
+        setStatus("请先在左侧菜品池选中一道菜。", "danger");
+        return;
+      }
+      if(!state.currentImagePath){
+        setStatus("请先在非发布图中选中一张候选海报。", "danger");
+        return;
+      }
+      if(state.galleryFilter === "publish"){
+        setStatus("请切换到「非发布图」再选择候选海报。", "warn");
+        return;
+      }
+      const fileName = 文件名(state.currentImagePath);
+      const detailCount = $("detailCount").value.trim() || "1";
+      const recipeCount = $("recipeCount").value.trim() || "1";
+      const coverCount = $("coverMode2Count").value.trim() || "1";
+      const message = [
+        `将使用当前图片作为海报锚点：${fileName}`,
+        "",
+        "执行前会把现有 publish/ 与 publish/final/ 移入本菜品 history/ 存档（可手动恢复）。",
+        `随后补生：细节图 ×${detailCount}、菜谱图 ×${recipeCount}、封面图 ×${coverCount}，并完成 PS 合成。`,
+        "",
+        "确定开始？"
+      ].join("\n");
+      if(!confirm(message)){ return; }
+      await submitTask({
+        action: "anchor_poster_regenerate",
+        target_output_dir: state.selectedHistoryPath,
+        anchor_poster_path: state.currentImagePath,
+        detail_quality: $("detailQuality").value.trim(),
+        detail_count: detailCount,
+        recipe_quality: $("recipeQuality").value.trim(),
+        recipe_count: recipeCount,
+        cover_mode2_quality: $("coverMode2Quality").value.trim(),
+        cover_mode2_count: coverCount
+      }, "锚点海报补生任务已提交。");
     }
 
     function openImageInNewTab(imagePath){
@@ -3075,6 +3146,7 @@ HTML_PAGE = """<!doctype html>
       $("filterPublishBtn").classList.toggle("active", state.galleryFilter === "publish");
       $("filterAllBtn").classList.toggle("active", state.galleryFilter === "all");
       renderGallery(images, resetIndex);
+      updateAnchorPosterButtonState();
     }
 
     function renderGallery(images, resetIndex=true){
@@ -4092,6 +4164,7 @@ HTML_PAGE = """<!doctype html>
       $("nextImgBtn").onclick = () => showGalleryImage(state.galleryIndex + 1);
       $("filterPublishBtn").onclick = () => { state.galleryFilter = "publish"; applyGalleryFilter(true); };
       $("filterAllBtn").onclick = () => { state.galleryFilter = "all"; applyGalleryFilter(true); };
+      $("anchorPosterRegenBtn").onclick = () => { submitAnchorPosterRegenerate(); };
       $("publishBtn").onclick = startPublish;
       $("loginModalConfirm").onclick = confirmPublishLogin;
       $("resultImg").ondblclick = () => openGalleryLightbox(state.galleryIndex);
@@ -4234,6 +4307,8 @@ def task_action_label(task: dict[str, Any]) -> str:
         if len(targets) > 2:
             short += "…"
         return f"补生·{short}"
+    if action == "anchor_poster_regenerate":
+        return "锚点海报补生"
     labels = {"auto": "自动", "file": "手动", "target": "指定", "idea": "生菜"}
     return labels.get(mode, "造菜")
 
@@ -4285,6 +4360,7 @@ def build_task_run_params(task: dict[str, Any]) -> dict[str, Any]:
         "cover_mode2_count": str(task.get("cover_mode2_count", "")).strip(),
         "supplement_targets": list(task.get("supplement_targets") or []),
         "target_output_dir": str(task.get("target_output_dir", "")).strip(),
+        "anchor_poster_path": str(task.get("anchor_poster_path", "")).strip(),
     }
 
 
@@ -4971,6 +5047,8 @@ def run_task_worker(task: dict[str, Any]) -> None:
         action_label = "生菜"
     elif action == "supplement":
         action_label = "补生"
+    elif action == "anchor_poster_regenerate":
+        action_label = "锚点海报补生"
     elif mode == "target":
         action_label = "指定"
     else:
@@ -5011,6 +5089,19 @@ def run_task_worker(task: dict[str, Any]) -> None:
                 result = run_supplement_for_output_dir(
                     target_output_dir,
                     targets=supplement_targets,
+                )
+            elif action == "anchor_poster_regenerate":
+                target_output_dir = str(task.get("target_output_dir", "")).strip()
+                anchor_poster_path = str(task.get("anchor_poster_path", "")).strip()
+                if not target_output_dir:
+                    raise ValueError("锚点海报补生需要选中菜品目录。")
+                if not anchor_poster_path:
+                    raise ValueError("锚点海报路径不能为空。")
+                resolve_output_file(anchor_poster_path)
+                dish_dir = resolve_output_path(target_output_dir)
+                result = run_anchor_poster_regenerate(
+                    dish_dir,
+                    anchor_poster_path=anchor_poster_path,
                 )
             else:
                 if mode == "file":
@@ -5389,7 +5480,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             return
 
         action = str(payload.get("action", "run")).strip().lower() or "run"
-        if action not in {"run", "idea_only", "supplement"}:
+        if action not in {"run", "idea_only", "supplement", "anchor_poster_regenerate"}:
             action = "run"
         mode = str(payload.get("mode", "")).strip().lower()
         dish_name = str(payload.get("dish_name", "")).strip()
@@ -5416,6 +5507,27 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             if not supplement_targets:
                 self._send_json({"error": "请至少勾选一项补生内容。"}, code=400)
                 return
+        if action == "anchor_poster_regenerate":
+            target_output_dir = str(payload.get("target_output_dir", "")).strip()
+            anchor_poster_path = str(payload.get("anchor_poster_path", "")).strip()
+            if not target_output_dir:
+                self._send_json({"error": "请先在菜品池选中一道菜。"}, code=400)
+                return
+            if not anchor_poster_path:
+                self._send_json({"error": "请先选中一张候选海报。"}, code=400)
+                return
+            try:
+                anchor_file = resolve_output_file(anchor_poster_path)
+                dish_dir = resolve_output_path(target_output_dir)
+                publish_dir = (dish_dir / "publish").resolve()
+                history_dir = (dish_dir / "history").resolve()
+                if publish_dir in anchor_file.parents or anchor_file.parent == publish_dir:
+                    raise ValueError("请选择 publish 文件夹外的候选海报。")
+                if history_dir in anchor_file.parents or anchor_file.parent == history_dir:
+                    raise ValueError("请勿选择 history 存档内的图片。")
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
+                return
         if action == "idea_only":
             try:
                 idea_count = int(idea_count_raw)
@@ -5437,7 +5549,8 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 "task_id": TASK_SEQ,
                 "action": action,
                 "mode": mode if mode in {"auto", "file", "target", "supplement", "idea"} else "",
-                "target_output_dir": target_output_dir if action in {"run", "supplement"} and mode in {"target", "supplement"} else "",
+                "target_output_dir": target_output_dir if action in {"run", "supplement", "anchor_poster_regenerate"} and (mode in {"target", "supplement"} or action == "anchor_poster_regenerate") else "",
+                "anchor_poster_path": str(payload.get("anchor_poster_path", "")).strip() if action == "anchor_poster_regenerate" else "",
                 "supplement_targets": [
                     str(item).strip()
                     for item in (payload.get("supplement_targets") or [])

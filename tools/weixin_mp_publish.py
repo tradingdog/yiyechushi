@@ -252,12 +252,101 @@ def cover_crop_confirm_button_locators(page: Page) -> tuple[Locator, ...]:
     )
 
 
-def forward_card_cover_locators(page: Page) -> tuple[Locator, ...]:
+def _cover_crop_dialog(page: Page) -> Locator:
+    return page.locator("div.weui-desktop-dialog:visible").last
+
+
+def forward_card_preview_card_locators(page: Page) -> tuple[Locator, ...]:
+    """3:4 裁剪弹窗内第二个预览卡片（转发卡片），非默认公众号列表第一张。"""
+    dialog = _cover_crop_dialog(page)
+    three_four = dialog.locator("div.cover-preview-con[edit-cover-type='3_4']")
     return (
-        page.get_by_text("3:4（转发卡片）", exact=False),
-        page.get_by_text("3:4(转发卡片)", exact=False),
-        page.locator("div, span, label, li").filter(has_text=re.compile(r"3:4.*转发卡片")),
+        three_four.locator("div.cover-preview-card").nth(1),
+        three_four.locator("div.cover-preview-card").last,
+        dialog.locator("div.cover-preview-con[edit-cover-type='3_4'] div.cover-preview-card").nth(1),
+        page.locator("div.cover-preview-con[edit-cover-type='3_4'] div.cover-preview-card").nth(1),
+        three_four.locator("img.card-cover-img").nth(1),
+        page.locator("div.cover-preview-con[edit-cover-type='3_4'] img.card-cover-img").nth(1),
     )
+
+
+def forward_card_cover_locators(page: Page) -> tuple[Locator, ...]:
+    return forward_card_preview_card_locators(page)
+
+
+def _forward_card_cover_selected_state(page: Page) -> dict:
+    return page.evaluate(
+        """
+        () => {
+          const con = document.querySelector('div.cover-preview-con[edit-cover-type="3_4"]');
+          if (!con) return { ok: false, reason: 'no_3_4_container' };
+          const cards = con.querySelectorAll('div.cover-preview-card');
+          if (cards.length < 2) return { ok: false, reason: 'card_count_' + cards.length };
+          const second = cards[1];
+          const cls = (second.className || '').toString();
+          const active = /\\bactive\\b|selected|current|checked/i.test(cls)
+            || second.getAttribute('aria-selected') === 'true';
+          if (active) return { ok: true, cls };
+          const inner = second.querySelector('.card-content, .card-cover-con');
+          const innerCls = inner ? (inner.className || '').toString() : '';
+          const innerActive = /\\bactive\\b|selected|current/i.test(innerCls);
+          return { ok: innerActive, cls, innerCls, reason: 'not_active_yet' };
+        }
+        """
+    )
+
+
+def _assert_forward_card_cover_selected(page: Page, *, timeout_ms: int = 3_000) -> None:
+    deadline = time.time() + timeout_ms / 1000
+    state: dict = {"ok": False, "reason": "timeout"}
+    while time.time() < deadline:
+        state = _forward_card_cover_selected_state(page)
+        if state.get("ok"):
+            print(f"已确认选中 3:4 转发卡片预览（class={state.get('cls')!r}）。")
+            return
+        page.wait_for_timeout(200)
+    print(f"WARN: 未能确认转发卡片已选中（state={state}），继续执行裁剪拖拽。")
+
+
+def _click_forward_card_preview(page: Page, card: Locator) -> None:
+    card.scroll_into_view_if_needed()
+    page.wait_for_timeout(200)
+    try:
+        card.click(timeout=3_000, force=True)
+        print("已点击：3:4转发卡片预览（第二个 cover-preview-card）。")
+        return
+    except Exception as exc1:
+        try:
+            card.evaluate("el => el.click()")
+            print("已通过 DOM 点击：3:4转发卡片预览（第二个 cover-preview-card）。")
+            return
+        except Exception as exc2:
+            box = card.bounding_box()
+            if box is None:
+                raise RuntimeError("无法点击 3:4 转发卡片预览：Playwright 与 DOM 点击均失败。") from exc2
+            prepare_weixin_chrome_page(page)
+            center_x = int(box["x"] + box["width"] / 2)
+            center_y = int(box["y"] + box["height"] / 2)
+            pyautogui.moveTo(center_x, center_y, duration=0.25)
+            pyautogui.click()
+            print(f"已通过屏幕坐标 ({center_x}, {center_y}) 点击 3:4 转发卡片预览。")
+
+
+def select_forward_card_cover_preview(page: Page, *, timeout_ms: int = 30_000) -> Locator:
+    card = wait_for_locator(
+        page,
+        forward_card_preview_card_locators(page),
+        description="3:4转发卡片预览",
+        timeout_ms=timeout_ms,
+    )
+    _click_forward_card_preview(page, card)
+    page.wait_for_timeout(300)
+    if not _forward_card_cover_selected_state(page).get("ok"):
+        print("转发卡片可能未选中，重试点击第二个预览卡片。")
+        _click_forward_card_preview(page, card)
+        page.wait_for_timeout(300)
+    _assert_forward_card_cover_selected(page)
+    return card
 
 
 def fill_contenteditable(page: Page, locators: Sequence[Locator], *, text: str, description: str, settings: WeixinPublishSettings) -> None:
@@ -627,7 +716,7 @@ def drag_cover_crop_up(page: Page, settings: WeixinPublishSettings) -> None:
 
 def adjust_weixin_cover_crop(page: Page, settings: WeixinPublishSettings) -> None:
     open_cover_crop_modal(page)
-    click_locator(page, forward_card_cover_locators(page), description="3:4转发卡片封面", timeout_ms=30_000)
+    select_forward_card_cover_preview(page)
     page.wait_for_timeout(settings.after_cover_editor_wait_ms)
     drag_cover_crop_up(page, settings)
     page.wait_for_timeout(500)

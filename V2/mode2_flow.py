@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -733,6 +735,127 @@ def retry_detail_stage_for_output_dir(run_output_dir: str | Path) -> dict[str, o
 VALID_SUPPLEMENT_TARGETS = frozenset({"poster", "detail", "recipe", "cover", "copy", "photoshop"})
 
 
+def _assert_path_under_dir(path: Path, root: Path) -> None:
+    resolved_root = root.resolve()
+    resolved_path = path.resolve()
+    if resolved_path != resolved_root and resolved_root not in resolved_path.parents:
+        raise ValueError(f"路径须在目录内：{resolved_root}")
+
+
+def validate_anchor_poster_path(anchor_poster_path: str | Path, run_output_dir: str | Path) -> Path:
+    run_dir = Path(run_output_dir).resolve()
+    anchor = Path(anchor_poster_path).resolve()
+    if not anchor.is_file():
+        raise FileNotFoundError(f"锚点海报不存在：{anchor}")
+    _assert_path_under_dir(anchor, run_dir)
+    publish_dir = (run_dir / "publish").resolve()
+    history_dir = (run_dir / "history").resolve()
+    if publish_dir in anchor.parents or anchor.parent == publish_dir:
+        raise ValueError("请选择 publish 文件夹外的候选海报（看图栏「非发布图」中的根目录候选图）。")
+    if history_dir in anchor.parents or anchor.parent == history_dir:
+        raise ValueError("请勿选择 history 存档目录内的图片。")
+    if anchor.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise ValueError("锚点海报须为 png/jpg/jpeg/webp 图片。")
+    return anchor
+
+
+def archive_publish_to_history(run_output_dir: Path, *, reason: str = "anchor_poster_regenerate") -> str:
+    """将 publish/ 与 publish/final/ 内现有文件移入 history/{timestamp}/ 存档。"""
+    publish_dir = run_output_dir / "publish"
+    final_dir = publish_dir / "final"
+    if not publish_dir.is_dir():
+        return ""
+
+    root_files = [path for path in publish_dir.iterdir() if path.is_file()]
+    final_files = [path for path in final_dir.iterdir() if path.is_file()] if final_dir.is_dir() else []
+    if not root_files and not final_files:
+        return ""
+
+    timestamp = get_timestamp()
+    archive_dir = run_output_dir / "history" / timestamp
+    archive_publish_dir = archive_dir / "publish"
+    archive_final_dir = archive_dir / "final"
+    archive_publish_dir.mkdir(parents=True, exist_ok=True)
+    archive_final_dir.mkdir(parents=True, exist_ok=True)
+
+    for path in root_files:
+        shutil.move(str(path), str(archive_publish_dir / path.name))
+    for path in final_files:
+        shutil.move(str(path), str(archive_final_dir / path.name))
+
+    meta = {
+        "archived_at": timestamp,
+        "reason": reason,
+        "archive_dir": str(archive_dir.resolve()),
+        "publish_file_count": len(root_files),
+        "final_file_count": len(final_files),
+    }
+    save_text_output(json.dumps(meta, ensure_ascii=False, indent=2), archive_dir / "_archive_meta.json")
+    publish_dir.mkdir(parents=True, exist_ok=True)
+    final_dir.mkdir(parents=True, exist_ok=True)
+    print(
+        f"已将原有 publish/final 存档至：{archive_dir}"
+        f"（publish {len(root_files)} 个，final {len(final_files)} 个）"
+    )
+    return str(archive_dir.resolve())
+
+
+def install_manual_poster_to_publish(anchor_poster_path: str | Path, publish_dir: Path) -> str:
+    source = Path(anchor_poster_path).resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"锚点海报不存在：{source}")
+
+    publish_dir.mkdir(parents=True, exist_ok=True)
+    for path in publish_dir.iterdir():
+        if path.is_file() and "海报" in path.stem:
+            path.unlink()
+
+    target_name = source.name if "海报" in source.stem else f"{source.stem}_海报{source.suffix}"
+    target = publish_dir / target_name
+    if target.exists():
+        target.unlink()
+    shutil.copy2(str(source), str(target))
+
+    selection_result = {
+        "auto_selected": False,
+        "manual_selected": True,
+        "winner_index": 1,
+        "winner_image_name": source.name,
+        "winner_reason": "用户在非发布图中手动指定为海报锚点。",
+        "anchor_source_path": str(source.resolve()),
+    }
+    save_text_output(
+        json.dumps(selection_result, ensure_ascii=False, indent=2),
+        publish_dir / "海报筛选结果.json",
+    )
+    print(f"已设手动海报锚点：{target.resolve()}（来源 {source.name}）")
+    return str(target.resolve())
+
+
+def run_anchor_poster_regenerate(
+    run_output_dir: str | Path,
+    *,
+    anchor_poster_path: str,
+) -> dict[str, object]:
+    """以用户指定的候选海报为锚点：存档旧 publish/final → 补生细节/菜谱/封面 → PS 合成。"""
+    run_output_dir = Path(run_output_dir).resolve()
+    anchor = validate_anchor_poster_path(anchor_poster_path, run_output_dir)
+
+    archive_dir = archive_publish_to_history(run_output_dir, reason="anchor_poster_regenerate")
+    publish_dir = run_output_dir / "publish"
+    poster_selected_image = install_manual_poster_to_publish(anchor, publish_dir)
+
+    supplement_result = run_supplement_for_output_dir(
+        run_output_dir,
+        targets=["detail", "recipe", "cover", "photoshop"],
+        force_photoshop_all=True,
+    )
+    supplement_result["workflow_mode"] = "anchor_poster_regenerate"
+    supplement_result["anchor_poster_path"] = str(anchor.resolve())
+    supplement_result["archive_dir"] = archive_dir
+    return supplement_result
+
+
 def resolve_output_dir_timestamp(run_output_dir: Path, dish_name: str, poster_path: str = "") -> str:
     if poster_path:
         return extract_timestamp_from_publish_name(poster_path)
@@ -752,6 +875,7 @@ def run_supplement_for_output_dir(
     run_output_dir: str | Path,
     *,
     targets: list[str],
+    force_photoshop_all: bool = False,
 ) -> dict[str, object]:
     """按用户勾选项补生指定图片、平台文案或 PS 合成。"""
     from v2_core import ensure_runtime_config_loaded
@@ -1003,6 +1127,7 @@ def run_supplement_for_output_dir(
                 recipe_source=recipe_selected_image,
                 cover_source=cover_selected_image,
                 only_kinds=only_kinds,
+                force_all=force_photoshop_all,
             )
         except Exception as ps_exc:
             errors.append(f"Photoshop 合成失败：{ps_exc}")

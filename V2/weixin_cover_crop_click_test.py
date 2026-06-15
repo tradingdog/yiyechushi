@@ -27,10 +27,11 @@ from tools.douyin_publish import DEFAULT_CDP_URL, DEFAULT_URL_KEYWORD
 from tools.win_foreground import activate_chrome_window_for_page
 from tools.weixin_mp_publish import (
     DEFAULT_URL_KEYWORD as WEIXIN_KEYWORD,
-    forward_card_cover_locators,
+    forward_card_preview_card_locators,
     is_tietu_editor_url,
     modify_cover_button_locators,
     open_cover_crop_modal,
+    select_forward_card_cover_preview,
 )
 
 
@@ -40,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--url-keyword", default=WEIXIN_KEYWORD)
     parser.add_argument("--probe-only", action="store_true", help="只探测 DOM，不点击")
     parser.add_argument("--try-click", action="store_true", help="探测后尝试打开裁剪弹窗")
+    parser.add_argument("--try-select-forward", action="store_true", help="打开弹窗后点击第二个 3:4 转发卡片")
     return parser.parse_args()
 
 
@@ -152,11 +154,22 @@ def wait_crop_icon_visible(page, timeout_ms: int = 5000) -> tuple[str, object]:
     raise RuntimeError("悬停后仍未看到裁剪图标。")
 
 
-def try_open_crop_modal(page) -> None:
+def probe_forward_cards(page) -> None:
+    cards = page.locator("div.cover-preview-con[edit-cover-type='3_4'] div.cover-preview-card")
+    probe_locator(page, cards, "cover_preview_card_3_4")
+    probe_locator(page, forward_card_preview_card_locators(page)[0], "forward_card_target_nth1")
+
+
+def try_open_crop_modal(page, *, select_forward: bool = False) -> None:
     open_cover_crop_modal(page)
-    probe_locator(page, forward_card_cover_locators(page)[0], "forward_card_after_click")
+    probe_forward_cards(page)
+    if select_forward:
+        select_forward_card_cover_preview(page)
+        probe_forward_cards(page)
+        print("SUCCESS: 已点击第二个 3:4 转发卡片预览。")
+        return
     matched = False
-    for locator in forward_card_cover_locators(page):
+    for locator in forward_card_preview_card_locators(page):
         try:
             if locator.count() and locator.first.is_visible():
                 matched = True
@@ -164,9 +177,9 @@ def try_open_crop_modal(page) -> None:
         except Exception:
             continue
     if matched:
-        print("SUCCESS: 裁剪弹窗已打开（检测到 3:4 转发卡片 选项）。")
+        print("SUCCESS: 裁剪弹窗已打开（检测到第二个 3:4 转发卡片预览）。")
     else:
-        print("WARN: 点击后未检测到 3:4 转发卡片，可能未进入裁剪弹窗。")
+        print("WARN: 点击后未检测到 3:4 转发卡片预览，可能未进入裁剪弹窗。")
         out = Path(ROOT_DIR / "tools" / "weixin_cover_crop_click_test_last.png")
         page.screenshot(path=str(out), full_page=True)
         print(f"已保存截图：{out}")
@@ -185,11 +198,11 @@ def main() -> None:
 
         if args.probe_only:
             return
-        if args.try_click:
-            try_open_crop_modal(page)
+        if args.try_click or args.try_select_forward:
+            try_open_crop_modal(page, select_forward=args.try_select_forward)
             return
 
-        print("\n提示：加 --try-click 尝试悬停+点击；加 --probe-only 仅探测 DOM。")
+        print("\n提示：加 --try-click 打开裁剪弹窗；加 --try-select-forward 再点第二个转发卡片；加 --probe-only 仅探测 DOM。")
 
 
 if __name__ == "__main__":
