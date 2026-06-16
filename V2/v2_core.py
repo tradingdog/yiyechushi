@@ -146,10 +146,22 @@ def is_tools_batch_n_error(exc: Exception) -> bool:
     return "tools[0].n" in message or "unknown parameter: 'tools[0].n'" in message
 
 
+SILKROAD_GPT_IMAGE2_MODELS = frozenset(
+    {
+        "gpt-image-2",
+        "gpt-image-2-1k",
+        "gpt-image-2-2k",
+        "gpt-image-2-4k",
+    }
+)
+
+
 def resolve_openai_image_model(model: str, base_url: str) -> str:
     normalized = (model or DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL
     gateway = (base_url or DEFAULT_OPENAI_BASE_URL).strip() or DEFAULT_OPENAI_BASE_URL
-    if is_silkroad_openai_gateway(gateway) and normalized.startswith("gpt-image-2") and normalized != DEFAULT_IMAGE_MODEL:
+    if is_silkroad_openai_gateway(gateway) and normalized.startswith("gpt-image-2"):
+        if normalized in SILKROAD_GPT_IMAGE2_MODELS:
+            return normalized
         return DEFAULT_IMAGE_MODEL
     return normalized
 
