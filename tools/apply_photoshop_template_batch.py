@@ -28,58 +28,10 @@ from image_generator import ensure_runtime_config_loaded
 
 DEFAULT_TEMPLATE_FILE = ROOT_DIR / "tools" / "photoshop_template" / "template.psd"
 DEFAULT_SMART_OBJECT_LAYER = "input_image"
-DEFAULT_TEMPLATE_INPUT_SIZE = "1024x1536"
 DEFAULT_JPEG_QUALITY = 12
 DEFAULT_JOB_TIMEOUT_SECONDS = 900
 SUPPORTED_INPUT_SUFFIXES = {".jpg", ".jpeg", ".png"}
 LOCAL_POLL_INTERVAL_SECONDS = 0.5
-
-
-def parse_template_input_size(size_text: str) -> tuple[int, int]:
-    normalized = (size_text or DEFAULT_TEMPLATE_INPUT_SIZE).strip().lower().replace("×", "x")
-    if "x" not in normalized:
-        raise RuntimeError("PHOTOSHOP_TEMPLATE_INPUT_SIZE 必须是 宽x高，例如 1024x1536。")
-    width_text, height_text = normalized.split("x", 1)
-    try:
-        width = int(width_text.strip())
-        height = int(height_text.strip())
-    except ValueError as exc:
-        raise RuntimeError("PHOTOSHOP_TEMPLATE_INPUT_SIZE 必须是 宽x高，例如 1024x1536。") from exc
-    if width <= 0 or height <= 0:
-        raise RuntimeError("PHOTOSHOP_TEMPLATE_INPUT_SIZE 的宽高必须大于 0。")
-    return width, height
-
-
-def resolve_template_input_size() -> tuple[int, int]:
-    ensure_runtime_config_loaded()
-    raw_value = os.getenv("PHOTOSHOP_TEMPLATE_INPUT_SIZE", DEFAULT_TEMPLATE_INPUT_SIZE).strip()
-    return parse_template_input_size(raw_value or DEFAULT_TEMPLATE_INPUT_SIZE)
-
-
-def prepare_image_for_template_input(source_file: Path, target_size: tuple[int, int]) -> tuple[Path, Path | None]:
-    """若输入图尺寸与 PSD 智能对象画布不一致，先缩放到目标尺寸再交给 Photoshop。"""
-    try:
-        from PIL import Image
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("未安装 Pillow，无法为 Photoshop 模板对齐图片尺寸。") from exc
-
-    with Image.open(source_file) as image:
-        current_size = image.size
-        if current_size == target_size:
-            return source_file, None
-
-        resized = image.convert("RGB").resize(target_size, Image.Resampling.LANCZOS)
-        temp_path = source_file.with_name(f"{source_file.stem}__ps_fit{source_file.suffix}")
-        save_kwargs: dict[str, Any] = {}
-        if temp_path.suffix.lower() in {".jpg", ".jpeg"}:
-            save_kwargs["quality"] = 95
-        resized.save(temp_path, **save_kwargs)
-        print(
-            f"  输入图 {current_size[0]}x{current_size[1]} 与 PSD 画布 {target_size[0]}x{target_size[1]} 不一致，"
-            f"已先缩放再合成。"
-        )
-        return temp_path, temp_path
-
 
 LOCAL_PHOTOSHOP_JSX_TEMPLATE = r'''
 app.displayDialogs = DialogModes.NO;
@@ -476,21 +428,15 @@ def process_single_image_local(image_file: Path, index: int, total: int, setting
     output_target: Path | None = None
     if settings.output_dir is not None:
         output_target = settings.output_dir / resolve_local_output_path(image_file).name
-    template_input_size = resolve_template_input_size()
-    prepared_input, temp_input = prepare_image_for_template_input(image_file, template_input_size)
-    try:
-        with tempfile.TemporaryDirectory(prefix="yiye_ps_render_") as temp_dir_text:
-            output_file = Path(temp_dir_text) / f"{image_file.stem}.jpg"
-            final_output_path = run_local_photoshop_job(
-                settings,
-                input_file=prepared_input,
-                output_file=output_file,
-                should_process_image=True,
-                output_target=output_target,
-            )
-    finally:
-        if temp_input is not None and temp_input.exists():
-            temp_input.unlink()
+    with tempfile.TemporaryDirectory(prefix="yiye_ps_render_") as temp_dir_text:
+        output_file = Path(temp_dir_text) / f"{image_file.stem}.jpg"
+        final_output_path = run_local_photoshop_job(
+            settings,
+            input_file=image_file,
+            output_file=output_file,
+            should_process_image=True,
+            output_target=output_target,
+        )
     if final_output_path is None:
         raise RuntimeError("本地 Photoshop 没有返回输出文件路径。")
     if settings.output_dir is not None:
