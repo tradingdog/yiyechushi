@@ -27,7 +27,12 @@ from custom_image_service import (
     init_custom_image_service,
     is_custom_image_path,
 )
-from mode2_flow import run_anchor_poster_regenerate, run_supplement_for_output_dir, run_v2_mode2
+from mode2_flow import (
+    run_anchor_poster_regenerate,
+    run_publish_image_replace,
+    run_supplement_for_output_dir,
+    run_v2_mode2,
+)
 from publish_final_assets import resolve_publish_final_dir
 from idea_batch import run_idea_batch, DISH_POOL_DIR
 from v2_core import (
@@ -57,7 +62,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.32"
+PANEL_VERSION = "v1.33"
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -975,6 +980,9 @@ HTML_PAGE = """<!doctype html>
     .gallery-actions button{width:auto;padding:7px 10px;border:1px solid #3a475f;border-radius:8px;background:#101a2a;color:#dbe7ff;cursor:pointer}
     .gallery-actions button.primary-anchor{border-color:#2d6a4f;background:#14532d;color:#ecfdf5}
     .gallery-actions button.primary-anchor:disabled{opacity:.45;cursor:not-allowed}
+    .gallery-actions button.replace-mode-active{border-color:#ca8a04;background:#422006;color:#fef9c3}
+    .gallery-actions button.hidden{display:none}
+    .thumb.selected{outline:2px solid #22c55e;outline-offset:1px}
     .anchor-poster-hint{font-size:11px;color:var(--sub);margin:0 0 6px;line-height:1.45}
     .gallery-index{font-size:12px;color:var(--sub)}
     .thumbs{
@@ -1238,11 +1246,13 @@ HTML_PAGE = """<!doctype html>
                   <button id="nextImgBtn" type="button">下一张</button>
                   <button id="filterPublishBtn" class="gallery-filter" type="button">发布图</button>
                   <button id="filterAllBtn" class="gallery-filter active" type="button">非发布图</button>
+                  <button id="publishReplaceBtn" class="gallery-filter" type="button" title="从非发布图中多选替换 publish/final 对应槽位">替换</button>
+                  <button id="publishReplaceExecBtn" class="primary-anchor hidden" type="button">执行替换</button>
                   <button id="anchorPosterRegenBtn" class="primary-anchor" type="button" title="将当前图设为海报，存档旧 publish/final 后补生细节/菜谱/封面并 PS 合成">设为海报并补生</button>
                 </div>
                 <div id="galleryIndex" class="gallery-index">0 / 0</div>
               </div>
-              <div id="anchorPosterHint" class="anchor-poster-hint">在非发布图中选中候选海报后，可一键补生其余发布图；细节/菜谱/封面数量与画质沿用右侧「参数调节」。</div>
+              <div id="anchorPosterHint" class="anchor-poster-hint">非发布图中可「替换」已选发布图（多选后执行），或选中海报后「设为海报并补生」其余组图。</div>
               <div id="thumbs" class="thumbs"></div>
             </div>
             <div class="result-stage">
@@ -1514,6 +1524,8 @@ HTML_PAGE = """<!doctype html>
       activeRightTab: "image",
       selectedHistoryPath: "",
       galleryFilter: "all",
+      galleryReplaceMode: false,
+      galleryReplaceSelected: [],
       galleryAllImages: [],
       galleryNonPublishImages: [],
       galleryPublishImages: [],
@@ -2635,31 +2647,135 @@ HTML_PAGE = """<!doctype html>
       updateAnchorPosterButtonState();
     }
 
-    function updateAnchorPosterButtonState(){
-      const btn = $("anchorPosterRegenBtn");
+    function inferPublishKindFromFileName(fileName){
+      const name = String(fileName || "").toLowerCase();
+      if(name.includes("封面") || name.includes("cover") || name.includes("fengmian")){ return "封面图"; }
+      if(name.includes("细节") || name.includes("detail") || name.includes("xijietu")){ return "细节图"; }
+      if(name.includes("菜谱") || name.includes("recipe") || name.includes("caipu")){ return "菜谱图"; }
+      if(name.includes("海报") || name.includes("poster")){ return "海报"; }
+      return "未知类型";
+    }
+
+    function refreshThumbSelectionClasses(){
+      const selected = new Set(state.galleryReplaceSelected || []);
+      Array.from($("thumbs").querySelectorAll(".thumb")).forEach((el, idx) => {
+        const path = state.galleryImages[idx];
+        el.classList.toggle("selected", selected.has(path));
+      });
+    }
+
+    function exitGalleryReplaceMode(){
+      state.galleryReplaceMode = false;
+      state.galleryReplaceSelected = [];
+      refreshThumbSelectionClasses();
+      updateGalleryActionHint();
+    }
+
+    function toggleGalleryReplaceSelection(imgPath){
+      const selected = new Set(state.galleryReplaceSelected || []);
+      if(selected.has(imgPath)){ selected.delete(imgPath); }
+      else { selected.add(imgPath); }
+      state.galleryReplaceSelected = Array.from(selected);
+      refreshThumbSelectionClasses();
+      updateGalleryActionHint();
+    }
+
+    function togglePublishReplaceMode(){
+      if(!state.selectedHistoryPath){
+        setStatus("请先在左侧菜品池选中一道菜。", "danger");
+        return;
+      }
+      if(state.galleryFilter === "publish"){
+        setStatus("请切换到「非发布图」再使用替换。", "warn");
+        return;
+      }
+      state.galleryReplaceMode = !state.galleryReplaceMode;
+      if(!state.galleryReplaceMode){
+        state.galleryReplaceSelected = [];
+        refreshThumbSelectionClasses();
+      }
+      updateGalleryActionHint();
+    }
+
+    function updateGalleryActionHint(){
+      const replaceBtn = $("publishReplaceBtn");
+      const execBtn = $("publishReplaceExecBtn");
+      const anchorBtn = $("anchorPosterRegenBtn");
       const hint = $("anchorPosterHint");
-      if(!btn){ return; }
       const hasDish = Boolean(state.selectedHistoryPath);
-      const hasImage = Boolean(state.currentImagePath);
       const inAllView = state.galleryFilter !== "publish";
-      const enabled = hasDish && hasImage && inAllView && !state.submittingTask;
-      btn.disabled = !enabled;
+      const selectedCount = (state.galleryReplaceSelected || []).length;
+
+      if(replaceBtn){
+        replaceBtn.classList.toggle("replace-mode-active", state.galleryReplaceMode);
+        replaceBtn.disabled = !hasDish || !inAllView || state.submittingTask;
+      }
+      if(execBtn){
+        execBtn.classList.toggle("hidden", !state.galleryReplaceMode);
+        execBtn.disabled = !state.galleryReplaceMode || selectedCount < 1 || !hasDish || state.submittingTask;
+      }
+      if(anchorBtn){
+        const hasImage = Boolean(state.currentImagePath);
+        const anchorEnabled = hasDish && hasImage && inAllView && !state.submittingTask && !state.galleryReplaceMode;
+        anchorBtn.disabled = !anchorEnabled;
+      }
+      if(!hint){ return; }
       if(!hasDish){
-        if(hint){ hint.textContent = "请先在左侧菜品池选中一道菜，再在非发布图中挑选候选海报。"; }
+        hint.textContent = "请先在左侧菜品池选中一道菜。";
         return;
       }
       if(!inAllView){
-        if(hint){ hint.textContent = "请切换到「非发布图」，选中候选海报后再点「设为海报并补生」。"; }
+        hint.textContent = "请切换到「非发布图」再使用替换或锚点补生。";
         return;
       }
-      if(!hasImage){
-        if(hint){ hint.textContent = "当前菜品暂无可选图片。"; }
+      if(state.galleryReplaceMode){
+        hint.textContent = selectedCount
+          ? `已选 ${selectedCount} 张：点击缩略图可增删选择，再点「执行替换」。`
+          : "替换模式：点击缩略图多选要换上的图（海报/细节/菜谱/封面），再点「执行替换」。";
         return;
       }
-      const fileName = 文件名(state.currentImagePath);
-      if(hint){
-        hint.textContent = `当前：${fileName}。将存档旧 publish/final 至 history/，并以该图补生细节/菜谱/封面（参数见右侧「参数调节」）。`;
+      const fileName = state.currentImagePath ? 文件名(state.currentImagePath) : "";
+      hint.textContent = fileName
+        ? `当前：${fileName}。可点「替换」多选换图，或选中海报后「设为海报并补生」。`
+        : "非发布图中可「替换」已选发布图，或选中海报后「设为海报并补生」。";
+    }
+
+    function updateAnchorPosterButtonState(){
+      updateGalleryActionHint();
+    }
+
+    async function submitPublishImageReplace(){
+      if(!state.selectedHistoryPath){
+        setStatus("请先在左侧菜品池选中一道菜。", "danger");
+        return;
       }
+      if(state.galleryFilter === "publish"){
+        setStatus("请切换到「非发布图」再执行替换。", "warn");
+        return;
+      }
+      const paths = (state.galleryReplaceSelected || []).filter(Boolean);
+      if(!paths.length){
+        setStatus("请至少选择一张要替换的图片。", "danger");
+        return;
+      }
+      const lines = paths.map((path) => {
+        const kind = inferPublishKindFromFileName(文件名(path));
+        return `- ${kind}：${文件名(path)}`;
+      });
+      const message = [
+        "将把以下非发布图复制到 publish/，并 PS 合成后更新 publish/final/ 对应槽位：",
+        "",
+        ...lines,
+        "",
+        "原 publish 同类型文件与 final 对应图会被替换。确定执行？"
+      ].join("\\n");
+      if(!confirm(message)){ return; }
+      await submitTask({
+        action: "publish_image_replace",
+        target_output_dir: state.selectedHistoryPath,
+        replacement_paths: paths,
+      }, "发布图替换任务已提交。");
+      exitGalleryReplaceMode();
     }
 
     async function submitAnchorPosterRegenerate(){
@@ -3153,13 +3269,16 @@ HTML_PAGE = """<!doctype html>
     }
 
     function applyGalleryFilter(resetIndex=true){
+      if(state.galleryFilter === "publish"){
+        exitGalleryReplaceMode();
+      }
       const images = state.galleryFilter === "publish"
         ? state.galleryPublishImages
         : state.galleryNonPublishImages;
       $("filterPublishBtn").classList.toggle("active", state.galleryFilter === "publish");
       $("filterAllBtn").classList.toggle("active", state.galleryFilter === "all");
       renderGallery(images, resetIndex);
-      updateAnchorPosterButtonState();
+      updateGalleryActionHint();
     }
 
     function renderGallery(images, resetIndex=true){
@@ -3173,11 +3292,18 @@ HTML_PAGE = """<!doctype html>
         btn.type = "button";
         btn.className = "thumb" + (idx === 0 ? " active" : "");
         btn.innerHTML = `<img src="${fileUrl(imgPath)}" alt="缩略图${idx+1}" />`;
-        btn.onclick = () => showGalleryImage(idx);
+        btn.onclick = () => {
+          if(state.galleryReplaceMode){
+            toggleGalleryReplaceSelection(imgPath);
+            return;
+          }
+          showGalleryImage(idx);
+        };
         btn.ondblclick = () => openGalleryLightbox(idx);
         box.appendChild(btn);
       });
       showGalleryImage(0);
+      refreshThumbSelectionClasses();
     }
 
     function renderResult(result){
@@ -4177,6 +4303,8 @@ HTML_PAGE = """<!doctype html>
       $("nextImgBtn").onclick = () => showGalleryImage(state.galleryIndex + 1);
       $("filterPublishBtn").onclick = () => { state.galleryFilter = "publish"; applyGalleryFilter(true); };
       $("filterAllBtn").onclick = () => { state.galleryFilter = "all"; applyGalleryFilter(true); };
+      $("publishReplaceBtn").onclick = togglePublishReplaceMode;
+      $("publishReplaceExecBtn").onclick = submitPublishImageReplace;
       $("anchorPosterRegenBtn").onclick = () => { submitAnchorPosterRegenerate(); };
       $("publishBtn").onclick = startPublish;
       $("loginModalConfirm").onclick = confirmPublishLogin;
@@ -4322,6 +4450,8 @@ def task_action_label(task: dict[str, Any]) -> str:
         return f"补生·{short}"
     if action == "anchor_poster_regenerate":
         return "锚点海报补生"
+    if action == "publish_image_replace":
+        return "发布图替换"
     labels = {"auto": "自动", "file": "手动", "target": "指定", "idea": "生菜"}
     return labels.get(mode, "造菜")
 
@@ -4374,6 +4504,7 @@ def build_task_run_params(task: dict[str, Any]) -> dict[str, Any]:
         "supplement_targets": list(task.get("supplement_targets") or []),
         "target_output_dir": str(task.get("target_output_dir", "")).strip(),
         "anchor_poster_path": str(task.get("anchor_poster_path", "")).strip(),
+        "replacement_paths": list(task.get("replacement_paths") or []),
     }
 
 
@@ -5062,6 +5193,8 @@ def run_task_worker(task: dict[str, Any]) -> None:
         action_label = "补生"
     elif action == "anchor_poster_regenerate":
         action_label = "锚点海报补生"
+    elif action == "publish_image_replace":
+        action_label = "发布图替换"
     elif mode == "target":
         action_label = "指定"
     else:
@@ -5115,6 +5248,24 @@ def run_task_worker(task: dict[str, Any]) -> None:
                 result = run_anchor_poster_regenerate(
                     dish_dir,
                     anchor_poster_path=anchor_poster_path,
+                )
+            elif action == "publish_image_replace":
+                target_output_dir = str(task.get("target_output_dir", "")).strip()
+                replacement_paths = [
+                    str(item).strip()
+                    for item in (task.get("replacement_paths") or [])
+                    if str(item).strip()
+                ]
+                if not target_output_dir:
+                    raise ValueError("发布图替换需要选中菜品目录。")
+                if not replacement_paths:
+                    raise ValueError("请至少选择一张要替换的图片。")
+                dish_dir = resolve_output_path(target_output_dir)
+                for path_text in replacement_paths:
+                    resolve_output_file(path_text)
+                result = run_publish_image_replace(
+                    dish_dir,
+                    replacement_paths=replacement_paths,
                 )
             else:
                 if mode == "file":
@@ -5493,7 +5644,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             return
 
         action = str(payload.get("action", "run")).strip().lower() or "run"
-        if action not in {"run", "idea_only", "supplement", "anchor_poster_regenerate"}:
+        if action not in {"run", "idea_only", "supplement", "anchor_poster_regenerate", "publish_image_replace"}:
             action = "run"
         mode = str(payload.get("mode", "")).strip().lower()
         dish_name = str(payload.get("dish_name", "")).strip()
@@ -5541,6 +5692,32 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": str(exc)}, code=400)
                 return
+        if action == "publish_image_replace":
+            target_output_dir = str(payload.get("target_output_dir", "")).strip()
+            replacement_paths = [
+                str(item).strip()
+                for item in (payload.get("replacement_paths") or [])
+                if str(item).strip()
+            ]
+            if not target_output_dir:
+                self._send_json({"error": "请先在菜品池选中一道菜。"}, code=400)
+                return
+            if not replacement_paths:
+                self._send_json({"error": "请至少选择一张要替换的图片。"}, code=400)
+                return
+            try:
+                dish_dir = resolve_output_path(target_output_dir)
+                publish_dir = (dish_dir / "publish").resolve()
+                history_dir = (dish_dir / "history").resolve()
+                for path_text in replacement_paths:
+                    candidate = resolve_output_file(path_text)
+                    if publish_dir in candidate.parents or candidate.parent == publish_dir:
+                        raise ValueError("请从「非发布图」中选择菜品目录或 history 外的候选图。")
+                    if history_dir in candidate.parents or candidate.parent == history_dir:
+                        raise ValueError("请勿选择 history 存档内的图片。")
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
+                return
         if action == "idea_only":
             try:
                 idea_count = int(idea_count_raw)
@@ -5562,8 +5739,13 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 "task_id": TASK_SEQ,
                 "action": action,
                 "mode": mode if mode in {"auto", "file", "target", "supplement", "idea"} else "",
-                "target_output_dir": target_output_dir if action in {"run", "supplement", "anchor_poster_regenerate"} and (mode in {"target", "supplement"} or action == "anchor_poster_regenerate") else "",
+                "target_output_dir": target_output_dir if action in {"run", "supplement", "anchor_poster_regenerate", "publish_image_replace"} and (mode in {"target", "supplement"} or action in {"anchor_poster_regenerate", "publish_image_replace"}) else "",
                 "anchor_poster_path": str(payload.get("anchor_poster_path", "")).strip() if action == "anchor_poster_regenerate" else "",
+                "replacement_paths": [
+                    str(item).strip()
+                    for item in (payload.get("replacement_paths") or [])
+                    if str(item).strip()
+                ] if action == "publish_image_replace" else [],
                 "supplement_targets": [
                     str(item).strip()
                     for item in (payload.get("supplement_targets") or [])

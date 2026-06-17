@@ -41,6 +41,8 @@ from v2_core import (
     write_dish_idea_file,
 )
 
+from publish_final_assets import PHOTOSHOP_SLOT_SPECS, find_existing_final_for_slot
+
 
 def resolve_auto_generate_enabled(mode: str | None) -> bool:
     if mode == "auto":
@@ -887,6 +889,185 @@ def run_anchor_poster_regenerate(
     supplement_result["anchor_poster_path"] = str(anchor.resolve())
     supplement_result["archive_dir"] = archive_dir
     return supplement_result
+
+
+PUBLISH_REPLACE_SELECTION_REPORTS: dict[str, str] = {
+    "poster": "海报筛选结果.json",
+    "detail": "细节图筛选结果.json",
+    "recipe": "菜谱图筛选结果.json",
+    "cover": "封面图筛选结果.json",
+}
+
+PUBLISH_REPLACE_KIND_KEYWORDS: dict[str, str] = {
+    "poster": "海报",
+    "detail": "细节图",
+    "recipe": "菜谱",
+    "cover": "封面",
+}
+
+
+def infer_publish_kind_from_filename(path: str | Path) -> str | None:
+    stem = Path(path).stem
+    stem_lower = stem.lower()
+    for kind_key, _sequence, _kind_label, keywords in PHOTOSHOP_SLOT_SPECS:
+        for keyword in keywords:
+            if keyword.lower() in stem_lower or keyword in stem:
+                return kind_key
+    for kind_key, keyword in PUBLISH_REPLACE_KIND_KEYWORDS.items():
+        if keyword in stem:
+            return kind_key
+    return None
+
+
+def validate_publish_replace_candidate_path(candidate_path: str | Path, run_output_dir: str | Path) -> Path:
+    run_dir = Path(run_output_dir).resolve()
+    candidate = Path(candidate_path).resolve()
+    if not candidate.is_file():
+        raise FileNotFoundError(f"替换图片不存在：{candidate}")
+    _assert_path_under_dir(candidate, run_dir)
+    publish_dir = (run_dir / "publish").resolve()
+    history_dir = (run_dir / "history").resolve()
+    if publish_dir in candidate.parents or candidate.parent == publish_dir:
+        raise ValueError("请从「非发布图」中选择菜品目录或 history 外的候选图。")
+    if history_dir in candidate.parents or candidate.parent == history_dir:
+        raise ValueError("请勿选择 history 存档目录内的图片。")
+    if candidate.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise ValueError("替换图片须为 png/jpg/jpeg/webp。")
+    kind = infer_publish_kind_from_filename(candidate)
+    if not kind:
+        raise ValueError(
+            f"无法识别图片类型：{candidate.name}（文件名须含 海报 / 细节图 / 菜谱 / 封面图 等关键词）。"
+        )
+    return candidate
+
+
+def copy_image_to_publish_slot(source_path: str | Path, publish_dir: Path, kind_key: str) -> str:
+    if kind_key not in PUBLISH_REPLACE_KIND_KEYWORDS:
+        raise ValueError(f"未知发布图类型：{kind_key}")
+
+    source = Path(source_path).resolve()
+    publish_dir.mkdir(parents=True, exist_ok=True)
+    kind_keyword = PUBLISH_REPLACE_KIND_KEYWORDS[kind_key]
+
+    for path in publish_dir.iterdir():
+        if path.is_file() and kind_keyword in path.stem and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+            path.unlink()
+
+    target = publish_dir / source.name
+    if kind_keyword not in source.stem:
+        target = publish_dir / f"{source.stem}_{kind_keyword}{source.suffix}"
+    if target.exists():
+        target.unlink()
+    shutil.copy2(str(source), str(target))
+
+    selection_result = {
+        "auto_selected": False,
+        "manual_selected": True,
+        "winner_index": 1,
+        "winner_image_name": source.name,
+        "winner_reason": "用户在非发布图中手动替换发布图。",
+        "replace_source_path": str(source.resolve()),
+        "replace_publish_path": str(target.resolve()),
+    }
+    report_name = PUBLISH_REPLACE_SELECTION_REPORTS[kind_key]
+    save_text_output(json.dumps(selection_result, ensure_ascii=False, indent=2), publish_dir / report_name)
+    print(f"已替换 publish/{kind_keyword}：{target.name}（来源 {source.name}）")
+    return str(target.resolve())
+
+
+def remove_final_slot_if_exists(publish_final_dir: Path, kind_key: str) -> None:
+    for slot_kind, sequence, _kind_label, keywords in PHOTOSHOP_SLOT_SPECS:
+        if slot_kind != kind_key:
+            continue
+        existing = find_existing_final_for_slot(publish_final_dir, sequence, keywords)
+        if existing is not None and existing.exists():
+            existing.unlink()
+            print(f"已删除旧 final 图：{existing.name}")
+        return
+
+
+def run_publish_image_replace(
+    run_output_dir: str | Path,
+    *,
+    replacement_paths: list[str],
+) -> dict[str, object]:
+    """将非发布图候选复制到 publish/，PS 合成并更新 publish/final/ 对应槽位。"""
+    run_output_dir = Path(run_output_dir).resolve()
+    raw_paths = [str(item).strip() for item in replacement_paths if str(item).strip()]
+    if not raw_paths:
+        raise ValueError("请至少选择一张要替换的图片。")
+
+    validated_paths: list[Path] = []
+    kind_by_path: dict[str, str] = {}
+    for path_text in raw_paths:
+        candidate = validate_publish_replace_candidate_path(path_text, run_output_dir)
+        resolved = str(candidate.resolve())
+        if resolved in kind_by_path:
+            continue
+        kind = infer_publish_kind_from_filename(candidate)
+        if not kind:
+            raise ValueError(f"无法识别图片类型：{candidate.name}")
+        if kind in kind_by_path.values():
+            duplicate_label = PUBLISH_REPLACE_KIND_KEYWORDS[kind]
+            raise ValueError(f"同类型发布图只能选一张（{duplicate_label}）。")
+        kind_by_path[resolved] = kind
+        validated_paths.append(candidate)
+
+    publish_dir = run_output_dir / "publish"
+    publish_final_dir = publish_dir / "final"
+    publish_dir.mkdir(parents=True, exist_ok=True)
+    publish_final_dir.mkdir(parents=True, exist_ok=True)
+
+    dish_payload = load_dish_idea_record_from_dir(run_output_dir)
+    dish_name = dish_payload["dish_name"]
+
+    replaced_publish_paths: dict[str, str] = {}
+    for candidate in validated_paths:
+        kind = kind_by_path[str(candidate.resolve())]
+        replaced_publish_paths[kind] = copy_image_to_publish_slot(candidate, publish_dir, kind)
+        remove_final_slot_if_exists(publish_final_dir, kind)
+
+    poster_selected_image = replaced_publish_paths.get("poster") or find_publish_image_by_kind(publish_dir, "海报")
+    detail_selected_image = replaced_publish_paths.get("detail") or find_publish_image_by_kind(publish_dir, "细节图")
+    recipe_selected_image = replaced_publish_paths.get("recipe") or find_publish_image_by_kind(publish_dir, "菜谱")
+    cover_selected_image = replaced_publish_paths.get("cover") or find_publish_image_by_kind(publish_dir, "封面")
+
+    timestamp = resolve_output_dir_timestamp(
+        run_output_dir,
+        dish_name,
+        poster_selected_image or next(iter(replaced_publish_paths.values()), ""),
+    )
+
+    only_kinds = set(replaced_publish_paths.keys())
+    photoshop_processed_files = rerun_photoshop_for_publish_dir(
+        publish_dir=publish_dir,
+        timestamp=timestamp,
+        dish_name=dish_name,
+        poster_source=poster_selected_image,
+        detail_source=detail_selected_image,
+        recipe_source=recipe_selected_image,
+        cover_source=cover_selected_image,
+        only_kinds=only_kinds,
+        force_all=True,
+    )
+
+    replaced_labels = [PUBLISH_REPLACE_KIND_KEYWORDS[kind] for kind in sorted(only_kinds)]
+    print(f"发布图手动替换完成：{', '.join(replaced_labels)}；PS 合成 {len(photoshop_processed_files)} 张。")
+
+    return {
+        "workflow_mode": "publish_image_replace",
+        "dish_name": dish_name,
+        "output_dir": str(run_output_dir),
+        "replaced_kinds": sorted(only_kinds),
+        "replaced_publish_paths": replaced_publish_paths,
+        "replacement_source_paths": [str(path.resolve()) for path in validated_paths],
+        "poster_selected_image": poster_selected_image,
+        "detail_selected_image": detail_selected_image,
+        "recipe_selected_image": recipe_selected_image,
+        "cover_selected_image": cover_selected_image,
+        "photoshop_processed_files": photoshop_processed_files,
+        "photoshop_error": "",
+    }
 
 
 def resolve_output_dir_timestamp(run_output_dir: Path, dish_name: str, poster_path: str = "") -> str:
