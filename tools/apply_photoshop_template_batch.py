@@ -221,7 +221,11 @@ def resolve_local_photoshop_settings(
     if settings.local_photoshop_exe.name.lower() != "photoshop.exe":
         raise RuntimeError("本地 Photoshop 模式要求传入 Photoshop.exe 的完整路径。")
     if not settings.template_file.exists() or not settings.template_file.is_file():
-        raise RuntimeError(f"PSD 模板不存在：{settings.template_file}")
+        raise RuntimeError(
+            f"PSD 模板不存在：{settings.template_file}\n"
+            f"请按 tools/photoshop_template/README.md 制作 template_宽x高.psd，"
+            f"智能对象层 input_image 画布须与生图尺寸一致。"
+        )
     if settings.template_file.suffix.lower() != ".psd":
         raise RuntimeError("PSD 模板文件必须是 .psd。")
     if settings.input_dir is not None and (not settings.input_dir.exists() or not settings.input_dir.is_dir()):

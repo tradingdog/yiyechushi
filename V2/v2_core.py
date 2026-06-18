@@ -47,6 +47,7 @@ BUBBLE_COPY_HISTORY_PROMPT_LIMIT = 80
 DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-pro-260215"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_SILKROAD_BASE_URL = "https://ai.silkroadai.io/v1"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_IMAGE_SIZE = "1024x1536"
 DEFAULT_IMAGE_QUALITY = "low"
@@ -135,6 +136,11 @@ def is_silkroad_openai_gateway(base_url: str) -> bool:
 def get_image_api_batch_n(requested: int) -> int:
     """丝路网关单次请求不支持 n>1（会报 Unknown parameter: tools[0].n），改为每次 n=1 由上层循环凑张数。"""
     batch_n = max(1, int(requested or 1))
+    from image_gen_profile import IMAGE_PROVIDER_SILKROAD, normalize_image_provider
+
+    provider = normalize_image_provider(os.getenv("IMAGE_API_PROVIDER", ""))
+    if provider == IMAGE_PROVIDER_SILKROAD:
+        return 1
     base_url = os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL).strip() or DEFAULT_OPENAI_BASE_URL
     if is_silkroad_openai_gateway(base_url):
         return 1
@@ -537,25 +543,57 @@ def build_doubao_client() -> OpenAI:
     )
 
 
-def format_openai_image_runtime_label() -> str:
+def resolve_image_api_credentials(provider: str | None = None) -> tuple[str, str, str]:
+    from image_gen_profile import IMAGE_PROVIDER_OFFICIAL, IMAGE_PROVIDER_SILKROAD, normalize_image_provider
+
     ensure_runtime_config_loaded()
     sync_v2_openai_image_settings()
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    base_url = os.getenv("OPENAI_BASE_URL", "").strip() or DEFAULT_OPENAI_BASE_URL
-    model = os.getenv("OPENAI_IMAGE_MODEL", DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL
-    key_hint = f"{api_key[:10]}..." if len(api_key) > 10 else "(未配置)"
-    return f"OpenAI 生图环境：base_url={base_url}，model={model}，key={key_hint}"
+    resolved_provider = normalize_image_provider(
+        provider or os.getenv("IMAGE_API_PROVIDER", IMAGE_PROVIDER_OFFICIAL)
+    )
+    if resolved_provider == IMAGE_PROVIDER_OFFICIAL:
+        api_key = os.getenv("OPENAIOFFICIAL_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("未找到 OPENAIOFFICIAL_API_KEY，请在根目录 .env 中配置。")
+        base_url = DEFAULT_OPENAI_BASE_URL
+        model = DEFAULT_IMAGE_MODEL
+        return api_key, base_url, model
 
-
-def build_openai_image_client() -> OpenAI:
-    ensure_runtime_config_loaded()
-    sync_v2_openai_image_settings()
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
-        raise RuntimeError("未找到 OPENAI_API_KEY，请在根目录 .env 中配置。")
+        raise RuntimeError("未找到 OPENAI_API_KEY（丝路），请在根目录 .env 或 config.env 中配置。")
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip() or DEFAULT_SILKROAD_BASE_URL
+    model = resolve_openai_image_model(
+        os.getenv("OPENAI_IMAGE_MODEL", DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL,
+        base_url,
+    )
+    return api_key, base_url, model
+
+
+def format_openai_image_runtime_label(provider: str | None = None) -> str:
+    from image_gen_profile import format_image_gen_controls_label, image_gen_controls_from_mapping
+
+    ensure_runtime_config_loaded()
+    api_key, base_url, model = resolve_image_api_credentials(provider)
+    key_hint = f"{api_key[:10]}..." if len(api_key) > 10 else "(未配置)"
+    controls = image_gen_controls_from_mapping({})
+    return (
+        f"OpenAI 生图环境：{format_image_gen_controls_label(controls)}；"
+        f"base_url={base_url}，model={model}，key={key_hint}"
+    )
+
+
+def build_openai_image_client(*, provider: str | None = None) -> OpenAI:
+    from image_gen_profile import IMAGE_PROVIDER_SILKROAD, normalize_image_provider
+
+    ensure_runtime_config_loaded()
+    sync_v2_openai_image_settings()
+    resolved_provider = normalize_image_provider(provider or os.getenv("IMAGE_API_PROVIDER", ""))
+    api_key, base_url, model = resolve_image_api_credentials(resolved_provider)
+    if normalize_image_provider(resolved_provider) == IMAGE_PROVIDER_SILKROAD:
+        os.environ["OPENAI_IMAGE_MODEL"] = model
     timeout = parse_float_env("OPENAI_IMAGE_REQUEST_TIMEOUT_SECONDS", 900.0)
-    base_url = os.getenv("OPENAI_BASE_URL", "").strip() or DEFAULT_OPENAI_BASE_URL
-    print(format_openai_image_runtime_label())
+    print(format_openai_image_runtime_label(resolved_provider))
     client_kwargs: dict[str, Any] = {
         "api_key": api_key,
         "timeout": timeout,
@@ -1625,6 +1663,10 @@ def get_mode2_group_settings(group: str) -> dict[str, Any]:
     image_count = parse_int_env(count_env, default_count) if raw_count else default_count
     base = get_image_settings()
     return {
+        "provider": base["provider"],
+        "aspect_ratio": base["aspect_ratio"],
+        "resolution_tier": base["resolution_tier"],
+        "template_file": base["template_file"],
         "model": base["model"],
         "size": base["size"],
         "quality": quality,
@@ -1739,17 +1781,20 @@ def render_prompt_fallback(template_text: str, dish_name: str, notes: str) -> st
 
 
 def get_image_settings() -> dict[str, Any]:
+    from image_gen_profile import image_gen_controls_from_mapping
+
     ensure_runtime_config_loaded()
     sync_v2_openai_image_settings()
-    base_url = os.getenv("OPENAI_BASE_URL", "").strip() or DEFAULT_OPENAI_BASE_URL
-    model = resolve_openai_image_model(
-        os.getenv("OPENAI_IMAGE_MODEL", DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL,
-        base_url,
-    )
+    controls = image_gen_controls_from_mapping({})
+    _, _, model = resolve_image_api_credentials(controls["provider"])
     return {
+        "provider": controls["provider"],
+        "aspect_ratio": controls["aspect_ratio"],
+        "resolution_tier": controls["resolution_tier"],
+        "template_file": controls["template_file"],
         "model": model,
-        "size": parse_image_size(os.getenv("OPENAI_IMAGE_SIZE", DEFAULT_IMAGE_SIZE).strip() or DEFAULT_IMAGE_SIZE),
-        "quality": os.getenv("OPENAI_IMAGE_QUALITY", DEFAULT_IMAGE_QUALITY).strip() or DEFAULT_IMAGE_QUALITY,
+        "size": parse_image_size(controls["size"]),
+        "quality": controls["quality"],
         "image_count": parse_int_env("OPENAI_IMAGE_COUNT", DEFAULT_IMAGE_COUNT),
     }
 

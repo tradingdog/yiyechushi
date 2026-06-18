@@ -1,29 +1,62 @@
 # Photoshop 模板目录
 
-把你的 PSD 模板放在这个目录下，默认文件名使用 template.psd。
+把你的 PSD 模板放在这个目录下。
 
-首版批量工具默认读取：
+## 命名规则
 
-1. PSD 模板路径：tools/photoshop_template/template.psd
-2. 承接输入图片的智能对象层名称：input_image
+程序按**生图尺寸**自动选择模板，文件名格式：
 
-请按下面方式准备模板：
+`template_{宽}x{高}.psd`
 
-1. 在 PSD 里放一层智能对象，名称改成 input_image。
-2. 把这层智能对象拖到你希望的最底层位置。工具不会再帮你改层级，而是直接替换这层的内容。
-3. 你想保留的混合模式、纹理层、光效层、文字层，都放在这个智能对象层上方。
-4. 如果你要“自然饱和度降低 10%”，请在模板里提前做一层自然饱和度调整层，并把数值设成 -10。首版工具会保留模板里的所有混合层与调整层，然后直接导出平面 JPG。
-5. 若你不想用默认图层名 input_image，可在 config.env 里改 PHOTOSHOP_TEMPLATE_SMART_OBJECT_LAYER，或运行脚本时传 --smart-layer。
+例如：
 
-推荐测试步骤：
+- `template_1024x1536.psd` — 2:3 竖版 1K（也可用默认 `template.psd` 代替）
+- `template_1376x2064.psd` — 2:3 竖版 2K
+- `template_2336x3504.psd` — 2:3 竖版 4K
 
-1. 先放好 template.psd。
-2. 若你已经在 config.env 里配好 PHOTOSHOP_LOCAL_EXE，请先关闭 Photoshop，再运行一次 dry-run：python tools/apply_photoshop_template_batch.py 你的图片目录 --dry-run
-3. 若你临时想覆盖 Photoshop 路径，再运行：python tools/apply_photoshop_template_batch.py 你的图片目录 --dry-run --local-photoshop-exe "D:\Program Files\Photoshop\App\Program Files\Adobe\Adobe Photoshop 2026\Photoshop.exe"
-4. 确认模板图层名无误后，再正式跑批量处理。
+## 智能对象要求
 
-说明：
+1. 在 PSD 里放一层智能对象，名称改成 **input_image**。
+2. **input_image 画布尺寸必须与生图尺寸完全一致**（宽×高像素）。
+3. 把这层智能对象拖到你希望的最底层位置。
+4. 混合模式、纹理层、光效层、文字层放在 input_image 上方。
 
-1. 主流程在 PHOTOSHOP_AUTO_COMPOSITE=1 时，也会自动调用同一套本地 Photoshop 合成逻辑。
-2. 当前机器实测可用的本地调用方式是把 JSX 文件路径直接传给 Photoshop.exe；不依赖 Photoshop.exe 的 -r 参数。
-3. 本地模式会逐张打开模板、替换 input_image、导出 JPG，再覆盖回原目录原图；若原图是 png，会转成同名 jpg 并删除原 png。
+## 需要制作的全部尺寸（8 种比例 × 3 档，去重后 24 个文件）
+
+| 文件名 | 比例 | 档位 | 画布尺寸 |
+| --- | --- | --- | --- |
+| template_672x1008.psd | 2:3 | 1K* | 672×1008 |
+| template_1024x1536.psd | 2:3 | 1K | 1024×1536（可用 template.psd） |
+| template_1376x2064.psd | 2:3 | 2K | 1376×2064 |
+| template_2336x3504.psd | 2:3 | 4K | 2336×3504 |
+| template_768x1024.psd | 3:4 | 1K | 768×1024 |
+| template_1536x2048.psd | 3:4 | 2K | 1536×2048 |
+| template_2448x3264.psd | 3:4 | 4K | 2448×3264 |
+| template_720x1280.psd | 9:16 | 1K | 720×1280 |
+| template_1152x2048.psd | 9:16 | 2K | 1152×2048 |
+| template_2160x3840.psd | 9:16 | 4K | 2160×3840 |
+| template_1024x1024.psd | 1:1 | 1K | 1024×1024 |
+| template_2048x2048.psd | 1:1 | 2K | 2048×2048 |
+| template_2880x2880.psd | 1:1 | 4K | 2880×2880 |
+| template_832x1040.psd | 4:5 | 1K | 832×1040 |
+| template_1664x2080.psd | 4:5 | 2K | 1664×2080 |
+| template_2560x3200.psd | 4:5 | 4K | 2560×3200 |
+| template_1008x672.psd | 3:2 | 1K | 1008×672 |
+| template_2064x1376.psd | 3:2 | 2K | 2064×1376 |
+| template_3504x2336.psd | 3:2 | 4K | 3504×2336 |
+| template_1280x720.psd | 16:9 | 1K | 1280×720 |
+| template_2048x1152.psd | 16:9 | 2K | 2048×1152 |
+| template_3840x2160.psd | 16:9 | 4K | 3840×2160 |
+| template_1024x768.psd | 4:3 | 1K | 1024×768 |
+| template_2048x1536.psd | 4:3 | 2K | 2048×1536 |
+| template_3264x2448.psd | 4:3 | 4K | 3264×2448 |
+
+\* 2:3 的 1K 默认使用 **1024×1536**（与项目历史一致），不必单独做 672×1008。
+
+建议优先制作常用的 **2:3** 三档：`template.psd`（1024×1536）、`template_1376x2064.psd`、`template_2336x3504.psd`。
+
+## 测试步骤
+
+1. 放好对应尺寸的 PSD。
+2. 运行 dry-run：`python tools/apply_photoshop_template_batch.py 你的图片目录 --dry-run`
+3. 确认模板图层名无误后，再正式跑批量处理。

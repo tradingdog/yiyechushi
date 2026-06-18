@@ -309,6 +309,21 @@ def handle_custom_image_generate(body: bytes, content_type: str) -> dict[str, An
     except ValueError:
         image_count = 1
 
+    image_gen_payload = {
+        key: str(fields.get(key, "")).strip()
+        for key in (
+            "image_provider",
+            "image_aspect_ratio",
+            "image_resolution_tier",
+            "image_quality",
+        )
+        if str(fields.get(key, "")).strip()
+    }
+    if image_gen_payload:
+        from image_gen_profile import apply_image_gen_controls
+
+        apply_image_gen_controls(image_gen_payload)
+
     reference_files: list[tuple[str, bytes]] = []
     for name, filename, content in parsed["files"]:
         if not content:

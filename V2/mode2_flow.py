@@ -664,9 +664,13 @@ def rerun_photoshop_for_publish_dir(
         f"本次待 Photoshop 合成 {len(sources_to_process)} 张"
         f"{'（仅新生成/变更图）' if only_kinds else ''} -> publish/final"
     )
+    template_file = os.getenv("PHOTOSHOP_TEMPLATE_FILE", "").strip()
+    if template_file:
+        print(f"当前 PSD 模板：{template_file}")
     processed_file_map = apply_photoshop_template_batch_to_files(
         sources_to_process,
         output_dir=publish_final_dir,
+        template_file=template_file or None,
     )
     return apply_final_image_sequence_names(
         publish_final_dir=publish_final_dir,

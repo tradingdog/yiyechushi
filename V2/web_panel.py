@@ -35,6 +35,16 @@ from mode2_flow import (
 )
 from publish_final_assets import resolve_publish_final_dir
 from idea_batch import run_idea_batch, DISH_POOL_DIR
+from image_gen_profile import (
+    apply_image_gen_controls,
+    image_gen_options_for_frontend,
+    resolve_image_size,
+)
+from image_gen_profile import (
+    apply_image_gen_controls,
+    image_gen_options_for_frontend,
+    resolve_image_size,
+)
 from v2_core import (
     IDEA_FILE,
     OUTPUT_DIR,
@@ -62,7 +72,13 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.33"
+PANEL_VERSION = "v1.34"
+PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
+    "image_provider": "official",
+    "image_aspect_ratio": "2:3",
+    "image_resolution_tier": "1k",
+    "image_quality": "high",
+}
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
@@ -723,7 +739,20 @@ HTML_PAGE = """<!doctype html>
     .chip{font-size:12px;background:#0b1220;border:1px solid #334155;padding:6px 10px;border-radius:999px;color:#dbe7ff}
     .version-tag{font-size:12px;color:#e2e8f0;background:#1e293b;border:1px solid #475569;border-radius:999px;padding:4px 10px}
     .offline-tag{font-size:12px;color:#fecaca;background:#450a0a;border:1px solid #7f1d1d;border-radius:999px;padding:4px 10px}
-    .top-actions{display:flex;gap:8px}
+    .top-image-controls{
+      display:flex;align-items:center;gap:8px;flex:1;justify-content:center;flex-wrap:wrap;min-width:0;
+    }
+    .top-ctrl-group{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+    .top-ctrl-label{font-size:11px;color:var(--sub);margin-right:2px;white-space:nowrap}
+    .top-image-controls select,
+    .top-image-controls button{
+      padding:6px 8px;border:1px solid #334155;border-radius:8px;background:#0b1220;color:#dbe7ff;font-size:12px;cursor:pointer;
+    }
+    .top-image-controls button.active{
+      border-color:#22c55e!important;background:linear-gradient(180deg,#064e3b,#022c22)!important;color:#dcfce7!important;
+    }
+    .top-size-hint{font-size:11px;color:#93c5fd;white-space:nowrap}
+    .top-actions{display:flex;gap:8px;flex-shrink:0}
     button{transition:background .15s ease,border-color .15s ease,box-shadow .15s ease,color .15s ease,transform .12s ease}
     button:hover{border-color:#60a5fa!important;box-shadow:0 0 0 2px rgba(96,165,250,.22)}
     button:active{transform:translateY(1px)}
@@ -1147,6 +1176,35 @@ HTML_PAGE = """<!doctype html>
         <span class="version-tag">__PANEL_VERSION__</span>
         <span id="panelOfflineTag" class="offline-tag hidden">面板已断开</span>
       </div>
+      <div class="top-image-controls">
+        <div class="top-ctrl-group">
+          <span class="top-ctrl-label">生图模型</span>
+          <button id="imgProviderOfficial" type="button" class="active">官方 GPT</button>
+          <button id="imgProviderSilkroad" type="button">丝路</button>
+        </div>
+        <select id="imageQuality" title="生图画质">
+          <option value="low">标准</option>
+          <option value="medium">中等</option>
+          <option value="high" selected>高清</option>
+          <option value="auto">自动</option>
+        </select>
+        <select id="imageResolutionTier" title="分辨率档位">
+          <option value="1k" selected>1K</option>
+          <option value="2k">2K</option>
+          <option value="4k">4K</option>
+        </select>
+        <select id="imageAspectRatio" title="画面比例">
+          <option value="2:3" selected>2:3 竖版</option>
+          <option value="3:4">3:4 竖版</option>
+          <option value="9:16">9:16 竖版</option>
+          <option value="1:1">1:1 方形</option>
+          <option value="4:5">4:5 竖版</option>
+          <option value="3:2">3:2 横版</option>
+          <option value="16:9">16:9 横版</option>
+          <option value="4:3">4:3 横版</option>
+        </select>
+        <span id="imageSizePreview" class="top-size-hint">1024×1536</span>
+      </div>
       <div class="top-actions">
         <button id="openOutputTopBtn" type="button">打开目录</button>
         <button id="copyOutputTopBtn" type="button">复制路径</button>
@@ -1429,7 +1487,7 @@ HTML_PAGE = """<!doctype html>
             </select>
             <button id="customGenerateBtn" class="custom-generate-btn" type="button">生成</button>
           </div>
-          <div id="customStatus" class="custom-status">丝路 API 生图，图片保存在 V2/custom_image_gen/images/</div>
+          <div id="customStatus" class="custom-status">顶栏选择生图模型；图片保存在 V2/custom_image_gen/images/</div>
         </div>
         <h4 class="sec-title" style="margin:6px 0 4px">历史记录</h4>
         <div id="customHistory" class="custom-history"></div>
@@ -1547,7 +1605,8 @@ HTML_PAGE = """<!doctype html>
       selectionSource: "pool",
       customRefs: [],
       customPolling: false,
-      customTilesSnapshot: ""
+      customTilesSnapshot: "",
+      imageSizeTable: {}
     };
     const $ = (id) => document.getElementById(id);
     const QUALITY_INDEX = { low: 0, medium: 1, high: 2, auto: 3 };
@@ -1561,6 +1620,188 @@ HTML_PAGE = """<!doctype html>
     const LAYOUT_STORAGE_KEY_V1 = "v2_panel_layout_v1";
     const HISTORY_SORT_STORAGE_KEY = "v2_history_sort_v1";
     const HISTORY_COLS_STORAGE_KEY = "v2_history_pool_cols_v1";
+    const IMAGE_GEN_PREFS_STORAGE_KEY = "v2_image_gen_prefs_v1";
+
+    function collectImageGenControls(){
+      const provider = $("imgProviderOfficial").classList.contains("active") ? "official" : "silkroad";
+      return {
+        image_provider: provider,
+        image_quality: $("imageQuality").value.trim() || "high",
+        image_resolution_tier: $("imageResolutionTier").value.trim() || "1k",
+        image_aspect_ratio: $("imageAspectRatio").value.trim() || "2:3"
+      };
+    }
+
+    function lookupImageSize(provider, aspectRatio, tier){
+      const table = state.imageSizeTable || {};
+      const ratioRow = table[aspectRatio] || {};
+      let size = ratioRow[tier] || ratioRow["1k"] || "1024x1536";
+      if(provider === "silkroad" && tier !== "1k"){
+        size = ratioRow["1k"] || size;
+      }
+      return size;
+    }
+
+    function updateImageSizePreview(){
+      const controls = collectImageGenControls();
+      const size = lookupImageSize(controls.image_provider, controls.image_aspect_ratio, controls.image_resolution_tier);
+      const preview = $("imageSizePreview");
+      if(preview){
+        preview.textContent = size.replace("x", "×");
+      }
+      const tierSelect = $("imageResolutionTier");
+      if(tierSelect){
+        Array.from(tierSelect.options).forEach((opt) => {
+          opt.disabled = controls.image_provider === "silkroad" && opt.value !== "1k";
+        });
+        if(controls.image_provider === "silkroad" && tierSelect.value !== "1k"){
+          tierSelect.value = "1k";
+        }
+      }
+    }
+
+    function setImageProvider(provider){
+      const official = provider !== "silkroad";
+      $("imgProviderOfficial").classList.toggle("active", official);
+      $("imgProviderSilkroad").classList.toggle("active", !official);
+      updateImageSizePreview();
+    }
+
+    function applyImageGenControlsToUi(prefs){
+      const data = prefs || {};
+      setImageProvider((data.image_provider || data.provider || "official") === "silkroad" ? "silkroad" : "official");
+      if($("imageQuality") && data.image_quality){ $("imageQuality").value = data.image_quality; }
+      if($("imageResolutionTier") && data.image_resolution_tier){ $("imageResolutionTier").value = data.image_resolution_tier; }
+      if($("imageAspectRatio") && data.image_aspect_ratio){ $("imageAspectRatio").value = data.image_aspect_ratio; }
+      updateImageSizePreview();
+    }
+
+    function loadImageGenPrefsFromStorage(){
+      try{
+        const raw = localStorage.getItem(IMAGE_GEN_PREFS_STORAGE_KEY);
+        if(!raw){ return null; }
+        return JSON.parse(raw);
+      }catch{
+        return null;
+      }
+    }
+
+    async function persistImageGenPrefs(){
+      const prefs = collectImageGenControls();
+      try{
+        localStorage.setItem(IMAGE_GEN_PREFS_STORAGE_KEY, JSON.stringify(prefs));
+      }catch{}
+      try{
+        await fetch("/api/image_gen_prefs", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(prefs)
+        });
+      }catch{}
+      updateImageSizePreview();
+    }
+
+    function bindImageGenControls(){
+      $("imgProviderOfficial").onclick = () => { setImageProvider("official"); persistImageGenPrefs(); };
+      $("imgProviderSilkroad").onclick = () => { setImageProvider("silkroad"); persistImageGenPrefs(); };
+      ["imageQuality", "imageResolutionTier", "imageAspectRatio"].forEach((id) => {
+        const el = $(id);
+        if(el){ el.onchange = () => persistImageGenPrefs(); }
+      });
+    }
+    const IMAGE_GEN_PREFS_STORAGE_KEY = "v2_image_gen_prefs_v1";
+
+    function collectImageGenControls(){
+      const provider = $("imgProviderOfficial").classList.contains("active") ? "official" : "silkroad";
+      return {
+        image_provider: provider,
+        image_quality: $("imageQuality").value.trim() || "high",
+        image_resolution_tier: $("imageResolutionTier").value.trim() || "1k",
+        image_aspect_ratio: $("imageAspectRatio").value.trim() || "2:3"
+      };
+    }
+
+    function lookupImageSize(provider, aspectRatio, tier){
+      const table = state.imageSizeTable || {};
+      const ratioRow = table[aspectRatio] || {};
+      let size = ratioRow[tier] || ratioRow["1k"] || "1024x1536";
+      if(provider === "silkroad" && tier !== "1k"){
+        size = ratioRow["1k"] || size;
+      }
+      return size;
+    }
+
+    function updateImageSizePreview(){
+      const controls = collectImageGenControls();
+      const size = lookupImageSize(controls.image_provider, controls.image_aspect_ratio, controls.image_resolution_tier);
+      const preview = $("imageSizePreview");
+      if(preview){
+        preview.textContent = size.replace("x", "×");
+      }
+      const tierSelect = $("imageResolutionTier");
+      if(tierSelect){
+        const silkroad = controls.image_provider === "silkroad";
+        for(const option of tierSelect.options){
+          if(option.value === "1k"){ option.disabled = false; continue; }
+          option.disabled = silkroad;
+        }
+        if(silkroad && tierSelect.value !== "1k"){
+          tierSelect.value = "1k";
+        }
+      }
+    }
+
+    function setImageProvider(provider){
+      const official = provider !== "silkroad";
+      $("imgProviderOfficial").classList.toggle("active", official);
+      $("imgProviderSilkroad").classList.toggle("active", !official);
+      updateImageSizePreview();
+    }
+
+    function applyImageGenPrefsToUi(prefs){
+      const data = prefs || {};
+      setImageProvider((data.image_provider || data.provider || "official") === "silkroad" ? "silkroad" : "official");
+      if($("imageQuality") && data.image_quality){ $("imageQuality").value = data.image_quality; }
+      if($("imageResolutionTier") && data.image_resolution_tier){ $("imageResolutionTier").value = data.image_resolution_tier; }
+      if($("imageAspectRatio") && data.image_aspect_ratio){ $("imageAspectRatio").value = data.image_aspect_ratio; }
+      updateImageSizePreview();
+    }
+
+    function loadImageGenPrefsFromStorage(){
+      try{
+        const raw = localStorage.getItem(IMAGE_GEN_PREFS_STORAGE_KEY);
+        if(!raw){ return null; }
+        return JSON.parse(raw);
+      }catch{
+        return null;
+      }
+    }
+
+    async function persistImageGenPrefs(){
+      const prefs = collectImageGenControls();
+      try{
+        localStorage.setItem(IMAGE_GEN_PREFS_STORAGE_KEY, JSON.stringify(prefs));
+      }catch{}
+      try{
+        await fetch("/api/image_gen_prefs", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(prefs)
+        });
+      }catch{}
+      updateImageSizePreview();
+    }
+
+    function bindImageGenControls(){
+      $("imgProviderOfficial").onclick = () => { setImageProvider("official"); persistImageGenPrefs(); };
+      $("imgProviderSilkroad").onclick = () => { setImageProvider("silkroad"); persistImageGenPrefs(); };
+      $("imageQuality").onchange = persistImageGenPrefs;
+      $("imageResolutionTier").onchange = persistImageGenPrefs;
+      $("imageAspectRatio").onchange = persistImageGenPrefs;
+      const saved = loadImageGenPrefsFromStorage();
+      if(saved){ applyImageGenPrefsToUi(saved); }
+      updateImageSizePreview();
+    }
 
     function 应用菜品池列数(mode){
       const grid = $("history");
@@ -2813,7 +3054,8 @@ HTML_PAGE = """<!doctype html>
         recipe_quality: $("recipeQuality").value.trim(),
         recipe_count: recipeCount,
         cover_mode2_quality: $("coverMode2Quality").value.trim(),
-        cover_mode2_count: coverCount
+        cover_mode2_count: coverCount,
+        ...collectImageGenControls()
       }, "锚点海报补生任务已提交。");
     }
 
@@ -3944,6 +4186,8 @@ HTML_PAGE = """<!doctype html>
       const fd = new FormData();
       fd.append("prompt", prompt);
       fd.append("count", String(count));
+      const imgControls = collectImageGenControls();
+      Object.entries(imgControls).forEach(([key, value]) => fd.append(key, value));
       state.customRefs.forEach((ref, index) => {
         fd.append(`ref_${index}`, ref.file, ref.name || `ref_${index}.png`);
       });
@@ -4065,6 +4309,12 @@ HTML_PAGE = """<!doctype html>
     async function loadState(showMsg=false){
       const res = await fetch("/api/state");
       const data = await res.json();
+      if(data.image_gen_options){
+        state.imageSizeTable = data.image_gen_options.size_table || {};
+        applyImageGenControlsToUi(data.image_gen_options.current || loadImageGenPrefsFromStorage() || {});
+      }else{
+        applyImageGenControlsToUi(loadImageGenPrefsFromStorage() || {});
+      }
       $("cuisineMode").value = data.config.AUTO_DISH_CUISINE_MODE || "1";
       $("posterCount").value = data.config.MODE2_POSTER_IMAGE_COUNT || data.config.OPENAI_IMAGE_COUNT;
       $("posterQuality").value = data.config.MODE2_POSTER_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
@@ -4141,7 +4391,8 @@ HTML_PAGE = """<!doctype html>
           model_temperature: $("temperature").value.trim(),
           dish_name: dishName,
           notes: "",
-          idea_count: String(count)
+          idea_count: String(count),
+          ...collectImageGenControls()
         }, `生菜任务已提交（共 ${count} 条）。`);
         return;
       }
@@ -4168,7 +4419,8 @@ HTML_PAGE = """<!doctype html>
           recipe_quality: $("recipeQuality").value.trim(),
           recipe_count: $("recipeCount").value.trim(),
           cover_mode2_quality: $("coverMode2Quality").value.trim(),
-          cover_mode2_count: $("coverMode2Count").value.trim()
+          cover_mode2_count: $("coverMode2Count").value.trim(),
+          ...collectImageGenControls()
         }, `补生任务已提交（${targets.length} 项）。`);
         return;
       }
@@ -4196,7 +4448,8 @@ HTML_PAGE = """<!doctype html>
         recipe_quality: $("recipeQuality").value.trim(),
         recipe_count: $("recipeCount").value.trim(),
         cover_mode2_quality: $("coverMode2Quality").value.trim(),
-        cover_mode2_count: $("coverMode2Count").value.trim()
+        cover_mode2_count: $("coverMode2Count").value.trim(),
+        ...collectImageGenControls()
       });
     }
 
@@ -4227,6 +4480,7 @@ HTML_PAGE = """<!doctype html>
     }
 
     function bindEvents(){
+      bindImageGenControls();
       $("modeAutoBtn").onclick = () => setMode("auto");
       $("modeFileBtn").onclick = () => setMode("file");
       $("modeTargetBtn").onclick = () => setMode("target");
@@ -5078,12 +5332,18 @@ def regenerate_images_from_output_dir(source_output_dir: Path) -> dict[str, Any]
 
 def current_config_snapshot() -> dict[str, str]:
     ensure_runtime_config_loaded()
+    controls = sync_panel_image_gen_prefs()
     return {
         "AUTO_GENERATE_DISH_IDEA": os.getenv("AUTO_GENERATE_DISH_IDEA", "0").strip() or "0",
         "AUTO_DISH_CUISINE_MODE": os.getenv("AUTO_DISH_CUISINE_MODE", "1").strip() or "1",
         "MODEL_TEMPERATURE": os.getenv("MODEL_TEMPERATURE", "0.3").strip() or "0.3",
+        "IMAGE_API_PROVIDER": controls["provider"],
+        "IMAGE_ASPECT_RATIO": controls["aspect_ratio"],
+        "IMAGE_RESOLUTION_TIER": controls["resolution_tier"],
+        "OPENAI_IMAGE_SIZE": controls["size"],
+        "PHOTOSHOP_TEMPLATE_FILE": controls["template_file"],
         "OPENAI_IMAGE_MODEL": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2").strip() or "gpt-image-2",
-        "OPENAI_IMAGE_QUALITY": os.getenv("OPENAI_IMAGE_QUALITY", "low").strip() or "low",
+        "OPENAI_IMAGE_QUALITY": controls["quality"],
         "OPENAI_IMAGE_COUNT": os.getenv("OPENAI_IMAGE_COUNT", "1").strip() or "1",
         "COVER_IMAGE_COUNT": str(get_cover_image_count()),
         "MODE2_POSTER_IMAGE_QUALITY": os.getenv("MODE2_POSTER_IMAGE_QUALITY", "").strip(),
@@ -5097,7 +5357,38 @@ def current_config_snapshot() -> dict[str, str]:
     }
 
 
+def sync_panel_image_gen_prefs(payload: dict[str, Any] | None = None) -> dict[str, str]:
+    global PANEL_IMAGE_GEN_PREFS
+    merged = {**PANEL_IMAGE_GEN_PREFS, **(payload or {})}
+    controls = apply_image_gen_controls(merged)
+    PANEL_IMAGE_GEN_PREFS = {
+        "image_provider": controls["provider"],
+        "image_aspect_ratio": controls["aspect_ratio"],
+        "image_resolution_tier": controls["resolution_tier"],
+        "image_quality": controls["quality"],
+    }
+    return controls
+
+
 def apply_runtime_overrides(payload: dict[str, Any]) -> None:
+    image_keys = (
+        "image_provider",
+        "image_aspect_ratio",
+        "image_resolution_tier",
+        "image_quality",
+    )
+    if any(str(payload.get(key, "")).strip() for key in image_keys):
+        sync_panel_image_gen_prefs(
+            {
+                "image_provider": str(payload.get("image_provider", "")).strip(),
+                "image_aspect_ratio": str(payload.get("image_aspect_ratio", "")).strip(),
+                "image_resolution_tier": str(payload.get("image_resolution_tier", "")).strip(),
+                "image_quality": str(payload.get("image_quality", "")).strip(),
+            }
+        )
+    else:
+        sync_panel_image_gen_prefs()
+
     mode = str(payload.get("mode", "")).strip().lower()
     if mode in {"auto", "file", "target"}:
         os.environ["AUTO_GENERATE_DISH_IDEA"] = "1" if mode == "auto" else "0"
@@ -5389,9 +5680,11 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True})
             return
         if parsed.path == "/api/state":
+            sync_panel_image_gen_prefs()
             self._send_json(
                 {
                     "config": current_config_snapshot(),
+                    "image_gen_options": image_gen_options_for_frontend(PANEL_IMAGE_GEN_PREFS),
                     "idea": read_idea_file(),
                     "history": list_history(limit=12, offset=0),
                     "history_revision": history_revision(),
@@ -5530,6 +5823,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             "/api/dish_tags/batch",
             "/api/publish_plan",
             "/api/text_assets_save",
+            "/api/image_gen_prefs",
             "/api/panel_shutdown",
             "/api/panel_restart",
         }:
@@ -5639,6 +5933,13 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                     raise ValueError("content 不能为空。")
                 content = str(payload.get("content", ""))
                 self._send_json(save_text_asset(raw_path, content))
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
+            return
+        if parsed.path == "/api/image_gen_prefs":
+            try:
+                controls = sync_panel_image_gen_prefs(payload)
+                self._send_json({"ok": True, "current": controls})
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": str(exc)}, code=400)
             return
@@ -5789,6 +6090,7 @@ def main() -> None:
     global PANEL_SERVER
     reexec_in_project_venv_if_needed()
     ensure_runtime_config_loaded()
+    sync_panel_image_gen_prefs()
     init_custom_image_service()
     server = ThreadingHTTPServer((HOST, PORT), V2PanelHandler)
     PANEL_SERVER = server
