@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable
 
@@ -805,9 +806,97 @@ def append_eating_action_guidance(system_prompt: str, placeholders: list[str]) -
     return f"{system_prompt}\n\n{EATING_ACTION_GUIDANCE}"
 
 
+def prepare_image_bytes_for_vision_api(image_path: Path) -> tuple[bytes, str]:
+    """压缩/缩放图片，满足多模态 API 输入限制。
+
+    - 豆包 image_url：单图 ≤10 MiB（本项目默认留 9 MiB 安全余量）
+    - OpenAI Vision：单图 ≤20 MiB，且会预处理为最长边 ≤2048、短边 ≤768
+    """
+    raw = image_path.read_bytes()
+    guessed_mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
+    max_bytes = parse_int_env("VISION_IMAGE_MAX_BYTES", 9 * 1024 * 1024)
+    max_long_side = parse_int_env("VISION_IMAGE_MAX_LONG_SIDE", 2048)
+    target_short_side = parse_int_env("VISION_IMAGE_TARGET_SHORT_SIDE", 768)
+
+    if (
+        len(raw) <= max_bytes
+        and guessed_mime in {"image/jpeg", "image/jpg"}
+        and image_path.stat().st_size <= max_bytes
+    ):
+        try:
+            from PIL import Image
+
+            with Image.open(image_path) as probe:
+                width, height = probe.size
+            if max(width, height) <= max_long_side and min(width, height) <= target_short_side:
+                return raw, "image/jpeg"
+        except Exception:
+            return raw, "image/jpeg"
+
+    try:
+        from PIL import Image
+    except ModuleNotFoundError as exc:
+        if len(raw) <= max_bytes:
+            return raw, guessed_mime
+        raise RuntimeError(
+            f"多模态参考图 {image_path.name} 为 {len(raw) / (1024 * 1024):.1f} MiB，"
+            "超过 API 限制且未安装 Pillow，无法压缩。"
+        ) from exc
+
+    with Image.open(image_path) as image:
+        original_size = image.size
+        canvas = image.convert("RGB")
+        width, height = canvas.size
+        scale = 1.0
+        long_side = max(width, height)
+        short_side = min(width, height)
+        if long_side > max_long_side:
+            scale = min(scale, max_long_side / long_side)
+        scaled_short = short_side * scale
+        if scaled_short > target_short_side:
+            scale = min(scale, target_short_side / short_side)
+        if scale < 1.0:
+            new_width = max(1, int(width * scale))
+            new_height = max(1, int(height * scale))
+            canvas = canvas.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+        quality = 88
+        compressed = raw
+        for attempt in range(8):
+            buffer = BytesIO()
+            canvas.save(buffer, format="JPEG", quality=quality, optimize=True)
+            compressed = buffer.getvalue()
+            if len(compressed) <= max_bytes:
+                if (
+                    attempt > 0
+                    or scale < 1.0
+                    or guessed_mime not in {"image/jpeg", "image/jpg"}
+                    or len(raw) > max_bytes
+                ):
+                    print(
+                        "多模态参考图已压缩："
+                        f"{image_path.name} {original_size[0]}x{original_size[1]} "
+                        f"({len(raw) / (1024 * 1024):.1f} MiB) -> "
+                        f"{canvas.size[0]}x{canvas.size[1]} JPEG "
+                        f"({len(compressed) / 1024:.0f} KB)"
+                    )
+                return compressed, "image/jpeg"
+            quality = max(45, quality - 10)
+            if attempt >= 3 and (canvas.width > 640 or canvas.height > 640):
+                canvas = canvas.resize(
+                    (max(1, canvas.width * 3 // 4), max(1, canvas.height * 3 // 4)),
+                    Image.Resampling.LANCZOS,
+                )
+
+    raise RuntimeError(
+        f"多模态参考图 {image_path.name} 压缩后仍为 {len(compressed) / (1024 * 1024):.1f} MiB，"
+        f"超过 {max_bytes / (1024 * 1024):.0f} MiB 限制。"
+    )
+
+
 def encode_image_as_data_url(image_path: Path) -> str:
-    mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
-    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    image_bytes, mime = prepare_image_bytes_for_vision_api(image_path)
+    encoded = base64.b64encode(image_bytes).decode("ascii")
     return f"data:{mime};base64,{encoded}"
 
 
