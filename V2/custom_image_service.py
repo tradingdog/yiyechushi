@@ -12,10 +12,12 @@ from typing import Any
 
 from v2_core import (
     build_openai_image_client,
+    clear_work_cancel,
     generate_images_by_prompt,
     generate_images_from_references,
     get_image_settings,
     get_timestamp,
+    raise_if_work_cancelled,
     save_generated_images,
     sync_v2_openai_image_settings,
 )
@@ -111,6 +113,15 @@ def _mark_slot_done(job_id: str, slot_index: int, image_path: str) -> None:
             return
 
 
+def cancel_custom_image_work() -> None:
+    global CUSTOM_IMAGE_RUNNING
+    from v2_core import request_work_cancel
+
+    request_work_cancel()
+    with CUSTOM_IMAGE_LOCK:
+        CUSTOM_IMAGE_RUNNING = False
+
+
 def custom_image_worker(
     *,
     job_id: str,
@@ -132,6 +143,7 @@ def custom_image_worker(
         max_attempts = 3
         attempt = 0
         while len(accumulated) < image_count and attempt < max_attempts:
+            raise_if_work_cancelled("自定义生图")
             attempt += 1
             remaining = image_count - len(accumulated)
             if ref_paths:
@@ -198,6 +210,7 @@ def start_custom_image_generation(*, prompt: str, image_count: int, reference_fi
             raise RuntimeError("已有自定义生图任务在执行，请等待完成后再试。")
         CUSTOM_IMAGE_RUNNING = True
         CUSTOM_IMAGE_ERROR = ""
+    clear_work_cancel()
 
     job_id = _new_job_id()
     ref_dir = CUSTOM_IMAGE_REFS_DIR / job_id

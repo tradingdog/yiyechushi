@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -128,6 +129,29 @@ def parse_env_file(env_file: Path) -> dict[str, str]:
 
 ROOT_CONFIG_FILE = ROOT_DIR.parent / "config.env"
 
+WORK_CANCEL_EVENT = threading.Event()
+
+
+def request_work_cancel() -> None:
+    WORK_CANCEL_EVENT.set()
+
+
+def clear_work_cancel() -> None:
+    WORK_CANCEL_EVENT.clear()
+
+
+def raise_if_work_cancelled(stage_label: str = "") -> None:
+    if WORK_CANCEL_EVENT.is_set():
+        prefix = f"{stage_label}：" if stage_label else ""
+        raise RuntimeError(f"{prefix}用户已请求停止后台任务。")
+
+
+def sleep_with_cancel(seconds: float, *, stage_label: str = "") -> None:
+    deadline = time.time() + max(0.0, seconds)
+    while time.time() < deadline:
+        raise_if_work_cancelled(stage_label)
+        time.sleep(min(0.35, deadline - time.time()))
+
 
 def is_silkroad_openai_gateway(base_url: str) -> bool:
     return "silkroadai.io" in base_url.strip().lower()
@@ -136,11 +160,17 @@ def is_silkroad_openai_gateway(base_url: str) -> bool:
 def get_image_api_batch_n(requested: int) -> int:
     """丝路网关单次请求不支持 n>1（会报 Unknown parameter: tools[0].n），改为每次 n=1 由上层循环凑张数。"""
     batch_n = max(1, int(requested or 1))
-    from image_gen_profile import IMAGE_PROVIDER_SILKROAD, normalize_image_provider
+    from image_gen_profile import (
+        IMAGE_PROVIDER_OFFICIAL,
+        IMAGE_PROVIDER_SILKROAD,
+        normalize_image_provider,
+    )
 
     provider = normalize_image_provider(os.getenv("IMAGE_API_PROVIDER", ""))
     if provider == IMAGE_PROVIDER_SILKROAD:
         return 1
+    if provider == IMAGE_PROVIDER_OFFICIAL:
+        return min(batch_n, 4)
     base_url = os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL).strip() or DEFAULT_OPENAI_BASE_URL
     if is_silkroad_openai_gateway(base_url):
         return 1
@@ -390,6 +420,7 @@ def execute_image_generation_with_retries(
     print(f"{stage_label}开始请求：{request_label}；目标 n={expected_count}；最多尝试 {max_attempts} 次")
 
     for attempt in range(1, max_attempts + 1):
+        raise_if_work_cancelled(stage_label)
         remaining = expected_count - len(accumulated)
         batch_n = get_image_api_batch_n(remaining)
         print(
@@ -398,7 +429,7 @@ def execute_image_generation_with_retries(
         )
         try:
             if batch_n < remaining:
-                print(f"{stage_label}网关限制单次 n={batch_n}（目标剩余 {remaining} 张，将分多次请求）…")
+                print(f"{stage_label}单次最多 n={batch_n}（目标剩余 {remaining} 张，将分多次请求）…")
             response = call_api(batch_n)
             batch_items = extract_image_items(response)
             if batch_items:
@@ -447,7 +478,7 @@ def execute_image_generation_with_retries(
                 f"{stage_label}命中可重试错误（{error_kind}），"
                 f"{delay:.0f}s 后准备第 {attempt + 1}/{max_attempts} 次…"
             )
-            time.sleep(delay)
+            sleep_with_cancel(delay, stage_label=stage_label)
 
     if accumulated:
         if len(accumulated) >= expected_count:
@@ -893,7 +924,7 @@ def generate_doubao_prompt_by_template(
                 break
             delay = api_retry_delay_seconds(attempt, error_kind=error_kind)
             print(f"豆包模板改写第 {attempt} 次失败（{error_kind}），{delay:.0f}s 后重试…")
-            time.sleep(delay)
+            sleep_with_cancel(delay)
     if response is None:
         raise RuntimeError(f"豆包模板改写失败：{last_error}")
 
@@ -990,7 +1021,7 @@ def generate_cankao_prompt_by_template(
             if is_retriable_text_api_error(exc) and attempt < max_retry:
                 delay = api_retry_delay_seconds(attempt, error_kind=error_kind)
                 print(f"豆包模板改写第 {attempt} 次失败（{error_kind}），{delay:.0f}s 后重试…")
-                time.sleep(delay)
+                sleep_with_cancel(delay)
                 continue
             break
 
@@ -1134,7 +1165,7 @@ def generate_cankao_prompt_with_images(
             if is_retriable_text_api_error(exc) and attempt < max_retry:
                 delay = api_retry_delay_seconds(attempt, error_kind=error_kind)
                 print(f"{stage_name}第 {attempt} 次失败（{error_kind}），{delay:.0f}s 后重试…")
-                time.sleep(delay)
+                sleep_with_cancel(delay)
                 continue
             break
 
@@ -1346,7 +1377,7 @@ def generate_poster_bubble_copy(
             if is_retriable_text_api_error(exc) and attempt < max_retry:
                 delay = api_retry_delay_seconds(attempt, error_kind=error_kind)
                 print(f"气泡文案第 {attempt} 次失败（{error_kind}），{delay:.0f}s 后重试…")
-                time.sleep(delay)
+                sleep_with_cancel(delay)
             continue
 
         raw_content = extract_chat_text_output(response).strip()

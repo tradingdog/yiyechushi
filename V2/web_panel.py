@@ -22,6 +22,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from custom_image_service import (
+    cancel_custom_image_work,
     custom_image_status_snapshot,
     handle_custom_image_generate,
     init_custom_image_service,
@@ -51,12 +52,15 @@ from v2_core import (
     archive_dish_folder,
     build_openai_image_client,
     build_run_output_dir,
+    clear_work_cancel,
     ensure_runtime_config_loaded,
     generate_images_by_prompt,
     get_cover_image_count,
     get_image_settings,
     get_timestamp,
     load_dish_idea_record_from_dir,
+    raise_if_work_cancelled,
+    request_work_cancel,
     save_generated_images,
     save_text_output,
 )
@@ -72,7 +76,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.37"
+PANEL_VERSION = "v1.38"
 PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
     "image_provider": "official",
     "image_aspect_ratio": "2:3",
@@ -126,7 +130,7 @@ LAST_ERROR = ""
 LAST_STARTED_AT = 0.0
 LAST_FINISHED_AT = 0.0
 RUN_LOG_LINES: list[str] = []
-MAX_LOG_LINES = 2000
+MAX_LOG_LINES = 8000
 TASK_QUEUE: list[dict[str, Any]] = []
 CURRENT_TASK: dict[str, Any] | None = None
 TASK_SEQ = 0
@@ -642,6 +646,27 @@ def force_stop_background_work() -> None:
         _kill_subprocess(proc)
 
 
+def stop_background_work(*, reason: str = "用户请求停止后台任务") -> dict[str, Any]:
+    with RUN_LOCK:
+        queue_len = len(TASK_QUEUE)
+        task_busy = RUNNING or queue_len > 0
+    with PUBLISH_LOCK:
+        publish_busy = PUBLISH_RUNNING
+    request_work_cancel()
+    cancel_custom_image_work()
+    force_stop_background_work()
+    append_run_log(
+        f"[{time.strftime('%H:%M:%S')}] {reason}："
+        f"已清空 {queue_len} 个排队任务，并请求中断当前脚本（面板保持运行）。"
+    )
+    return {
+        "ok": True,
+        "message": "后台任务停止请求已发送，进行中的脚本将在下一检查点中断。",
+        "was_busy": task_busy or publish_busy,
+        "cleared_queue": queue_len,
+    }
+
+
 def _spawn_panel_restart_script() -> None:
     bat_path = REPO_ROOT / "restart_v2_web_panel.bat"
     if bat_path.is_file():
@@ -660,6 +685,8 @@ def _spawn_panel_restart_script() -> None:
 
 
 def schedule_panel_shutdown(*, restart: bool = False) -> None:
+    request_work_cancel()
+    cancel_custom_image_work()
     force_stop_background_work()
     append_run_log(f"[{time.strftime('%H:%M:%S')}] 面板{'重启' if restart else '终止'}请求已收到。")
 
@@ -1143,7 +1170,7 @@ HTML_PAGE = """<!doctype html>
       position:fixed;left:10px;right:10px;bottom:10px;height:0;opacity:0;pointer-events:none;z-index:54;
       border:1px solid #334155;border-radius:12px;background:#111827;box-shadow:var(--shadow);overflow:hidden;transition:all .2s ease;
     }
-    .log-drawer.open{height:260px;opacity:1;pointer-events:auto;resize:vertical;min-height:180px;max-height:70vh}
+    .log-drawer.open{height:420px;opacity:1;pointer-events:auto;resize:vertical;min-height:280px;max-height:85vh}
     .log-head{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border-bottom:1px solid #334155}
     .log-head-title{font-size:13px;font-weight:700}
     .log-head-actions{display:flex;gap:8px}
@@ -1207,6 +1234,7 @@ HTML_PAGE = """<!doctype html>
         <button id="openOutputTopBtn" type="button" title="打开输出目录">目录</button>
         <button id="copyOutputTopBtn" type="button" title="复制输出路径">路径</button>
         <button id="refreshTopBtn" type="button" title="刷新菜品池">刷新</button>
+        <button id="stopWorkBtn" type="button" class="danger-btn" title="停止后台任务（不关闭面板）">停止</button>
         <button id="restartPanelBtn" type="button" title="重启面板">重启</button>
         <button id="shutdownPanelBtn" type="button" class="danger-btn" title="终止面板">终止</button>
       </div>
@@ -1524,8 +1552,10 @@ HTML_PAGE = """<!doctype html>
     <div class="log-head">
       <div class="log-head-title">实时日志</div>
       <div class="log-head-actions">
+        <button id="logCopyBtn" type="button">复制日志</button>
+        <button id="logReloadBtn" type="button">刷新全部</button>
         <button id="logFilterBtn" type="button">只看错误：关</button>
-        <button id="logClearBtn" type="button">清空日志</button>
+        <button id="logClearBtn" type="button">清空显示</button>
         <button id="logCloseBtn" type="button">收起</button>
       </div>
     </div>
@@ -2794,28 +2824,62 @@ HTML_PAGE = """<!doctype html>
       $("temperature").oninput = 同步参数滑块;
     }
 
+    function filterLogLines(lines){
+      if(!state.logOnlyErrors){ return lines; }
+      return (lines || []).filter((line) => {
+        const txt = String(line || "").toLowerCase();
+        return txt.includes("失败") || txt.includes("error") || txt.includes("traceback") || txt.includes("异常");
+      });
+    }
+
+    function renderLogPanel(lines, options = {}){
+      const panel = $("logPanel");
+      if(!panel){ return; }
+      const filtered = filterLogLines(lines || []);
+      const keepScroll = Boolean(options.keepScroll);
+      const atBottom = keepScroll && panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 24;
+      panel.textContent = filtered.length ? filtered.join("\\n") + "\\n" : "等待任务启动...\\n";
+      if(!keepScroll || atBottom){ panel.scrollTop = panel.scrollHeight; }
+    }
+
     function appendLogs(lines){
       if(!lines?.length){ return; }
       const panel = $("logPanel");
-      const atBottom = panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 20;
-      for(const line of lines){
-        if(state.logOnlyErrors){
-          const txt = String(line || "").toLowerCase();
-          if(!(txt.includes("失败") || txt.includes("error") || txt.includes("traceback") || txt.includes("异常"))){
-            continue;
-          }
-        }
+      const atBottom = panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 24;
+      const filtered = filterLogLines(lines);
+      if(!filtered.length){ return; }
+      for(const line of filtered){
         panel.textContent += line + "\\n";
       }
-      if(panel.textContent.length > 200000){
-        panel.textContent = panel.textContent.slice(panel.textContent.length - 150000);
+      if(panel.textContent.length > 500000){
+        panel.textContent = panel.textContent.slice(panel.textContent.length - 400000);
       }
       if(atBottom){ panel.scrollTop = panel.scrollHeight; }
+    }
+
+    async function reloadAllLogs(options = {}){
+      const silent = Boolean(options?.silent);
+      try{
+        const res = await fetch("/api/run_status?from=0");
+        const data = await res.json();
+        state.logNextIndex = data.next_index || 0;
+        renderLogPanel(data.logs || [], {keepScroll: false});
+        if(!silent){ setStatus(`已加载 ${state.logNextIndex} 行日志。`, "ok"); }
+      }catch(err){
+        if(!silent){ setStatus("加载日志失败：" + err.message, "warn"); }
+      }
+    }
+
+    async function copyLogPanel(){
+      const text = ($("logPanel")?.textContent || "").trim();
+      if(!text || text === "等待任务启动..."){ setStatus("当前没有可复制日志。", "warn"); return; }
+      await copyText(text, "日志已复制到剪贴板。");
     }
 
     function 切换日志抽屉(打开){
       $("logDrawer").classList.toggle("open", 打开);
       $("logToggleBtn").textContent = 打开 ? "收起日志" : "日志";
+      if(打开){ reloadAllLogs({silent: true}); }
     }
 
     function updateGalleryIndexLabel(){
@@ -3210,6 +3274,15 @@ HTML_PAGE = """<!doctype html>
       const actions = document.createElement("div");
       actions.className = "text-editor-actions";
       if(state.textEditorEditing){
+        const copyBtn = document.createElement("button");
+        copyBtn.id = "textCopyBtn";
+        copyBtn.type = "button";
+        copyBtn.textContent = "复制";
+        copyBtn.disabled = !activeFile;
+        copyBtn.onclick = () => {
+          const el = $("textEditor");
+          if(el){ copyText(el.value, "文案已复制到剪贴板。"); }
+        };
         const saveBtn = document.createElement("button");
         saveBtn.id = "textSaveBtn";
         saveBtn.type = "button";
@@ -3222,9 +3295,19 @@ HTML_PAGE = """<!doctype html>
         cancelBtn.type = "button";
         cancelBtn.textContent = "取消";
         cancelBtn.onclick = () => { cancelTextEditorEdit(); };
+        actions.appendChild(copyBtn);
         actions.appendChild(saveBtn);
         actions.appendChild(cancelBtn);
       }else{
+        const copyBtn = document.createElement("button");
+        copyBtn.id = "textCopyBtn";
+        copyBtn.type = "button";
+        copyBtn.textContent = "复制";
+        copyBtn.disabled = !activeFile;
+        copyBtn.onclick = () => {
+          const el = $("textEditor");
+          if(el){ copyText(el.value, "文案已复制到剪贴板。"); }
+        };
         const editBtn = document.createElement("button");
         editBtn.id = "textEditBtn";
         editBtn.type = "button";
@@ -3232,6 +3315,7 @@ HTML_PAGE = """<!doctype html>
         editBtn.textContent = "编辑";
         editBtn.disabled = !activeFile;
         editBtn.onclick = () => { enterTextEditorEdit(); };
+        actions.appendChild(copyBtn);
         actions.appendChild(editBtn);
       }
       bar.appendChild(hint);
@@ -4392,6 +4476,22 @@ HTML_PAGE = """<!doctype html>
       });
     }
 
+    async function stopBackgroundWork(){
+      if(!confirm("确定停止所有后台任务？\\n\\n将清空队列并中断进行中的生图、写文案、发布等脚本；面板本身保持运行。")){ return; }
+      try{
+        const res = await fetch("/api/work_stop", {method:"POST"});
+        const data = await res.json();
+        if(!res.ok){ throw new Error(data.error || "停止失败"); }
+        setStatus(data.message || "已请求停止后台任务。", "ok");
+        await fetchRunStatus({silent: true});
+        await fetchPublishStatus({silent: true});
+        await fetchCustomImageStatus({silent: true});
+        await reloadAllLogs({silent: true});
+      }catch(err){
+        setStatus("停止失败：" + err.message, "danger");
+      }
+    }
+
     async function copyText(text, okMessage){
       if(!text){ setStatus("当前没有可复制内容。", "warn"); return; }
       try{
@@ -4540,6 +4640,7 @@ HTML_PAGE = """<!doctype html>
       $("refreshTopBtn").onclick = () => loadState(true);
       $("restartPanelBtn").onclick = () => restartPanelProgram();
       $("shutdownPanelBtn").onclick = () => shutdownPanelProgram();
+      $("stopWorkBtn").onclick = () => stopBackgroundWork();
       $("taskBar").addEventListener("click", (event) => {
         const target = event.target;
         if(!(target instanceof HTMLElement)){ return; }
@@ -4557,10 +4658,13 @@ HTML_PAGE = """<!doctype html>
       $("loadMoreBtn").onclick = () => loadHistory(false);
       $("logToggleBtn").onclick = () => 切换日志抽屉(!$("logDrawer").classList.contains("open"));
       $("logCloseBtn").onclick = () => 切换日志抽屉(false);
-      $("logClearBtn").onclick = () => { $("logPanel").textContent = ""; };
-      $("logFilterBtn").onclick = () => {
+      $("logCopyBtn").onclick = () => copyLogPanel();
+      $("logReloadBtn").onclick = () => reloadAllLogs();
+      $("logClearBtn").onclick = () => { $("logPanel").textContent = "等待任务启动...\\n"; };
+      $("logFilterBtn").onclick = async () => {
         state.logOnlyErrors = !state.logOnlyErrors;
         $("logFilterBtn").textContent = `只看错误：${state.logOnlyErrors ? "开" : "关"}`;
+        await reloadAllLogs({silent: true});
       };
       $("customAddBtn")?.addEventListener("click", () => $("customFileInput")?.click());
       $("customFileInput")?.addEventListener("change", (event) => {
@@ -5442,9 +5546,11 @@ def run_task_worker(task: dict[str, Any]) -> None:
     )
     log_start_index = len(RUN_LOG_LINES)
     result: dict[str, Any] | None = None
+    clear_work_cancel()
     try:
         with redirect_stdout(stream), redirect_stderr(stream):
             apply_runtime_overrides(task)
+            raise_if_work_cancelled("任务")
             if action == "idea_only":
                 idea_count = int(str(task.get("idea_count", "1")).strip() or "1")
                 result = run_idea_batch(
@@ -5763,6 +5869,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             "/api/publish_plan",
             "/api/text_assets_save",
             "/api/image_gen_prefs",
+            "/api/work_stop",
             "/api/panel_shutdown",
             "/api/panel_restart",
         }:
@@ -5845,6 +5952,9 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True})
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": str(exc)}, code=400)
+            return
+        if parsed.path == "/api/work_stop":
+            self._send_json(stop_background_work())
             return
         if parsed.path == "/api/panel_shutdown":
             schedule_panel_shutdown(restart=False)
