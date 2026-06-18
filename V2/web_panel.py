@@ -72,7 +72,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.34"
+PANEL_VERSION = "v1.35"
 PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
     "image_provider": "official",
     "image_aspect_ratio": "2:3",
@@ -1708,99 +1708,6 @@ HTML_PAGE = """<!doctype html>
         const el = $(id);
         if(el){ el.onchange = () => persistImageGenPrefs(); }
       });
-    }
-    const IMAGE_GEN_PREFS_STORAGE_KEY = "v2_image_gen_prefs_v1";
-
-    function collectImageGenControls(){
-      const provider = $("imgProviderOfficial").classList.contains("active") ? "official" : "silkroad";
-      return {
-        image_provider: provider,
-        image_quality: $("imageQuality").value.trim() || "high",
-        image_resolution_tier: $("imageResolutionTier").value.trim() || "1k",
-        image_aspect_ratio: $("imageAspectRatio").value.trim() || "2:3"
-      };
-    }
-
-    function lookupImageSize(provider, aspectRatio, tier){
-      const table = state.imageSizeTable || {};
-      const ratioRow = table[aspectRatio] || {};
-      let size = ratioRow[tier] || ratioRow["1k"] || "1024x1536";
-      if(provider === "silkroad" && tier !== "1k"){
-        size = ratioRow["1k"] || size;
-      }
-      return size;
-    }
-
-    function updateImageSizePreview(){
-      const controls = collectImageGenControls();
-      const size = lookupImageSize(controls.image_provider, controls.image_aspect_ratio, controls.image_resolution_tier);
-      const preview = $("imageSizePreview");
-      if(preview){
-        preview.textContent = size.replace("x", "×");
-      }
-      const tierSelect = $("imageResolutionTier");
-      if(tierSelect){
-        const silkroad = controls.image_provider === "silkroad";
-        for(const option of tierSelect.options){
-          if(option.value === "1k"){ option.disabled = false; continue; }
-          option.disabled = silkroad;
-        }
-        if(silkroad && tierSelect.value !== "1k"){
-          tierSelect.value = "1k";
-        }
-      }
-    }
-
-    function setImageProvider(provider){
-      const official = provider !== "silkroad";
-      $("imgProviderOfficial").classList.toggle("active", official);
-      $("imgProviderSilkroad").classList.toggle("active", !official);
-      updateImageSizePreview();
-    }
-
-    function applyImageGenPrefsToUi(prefs){
-      const data = prefs || {};
-      setImageProvider((data.image_provider || data.provider || "official") === "silkroad" ? "silkroad" : "official");
-      if($("imageQuality") && data.image_quality){ $("imageQuality").value = data.image_quality; }
-      if($("imageResolutionTier") && data.image_resolution_tier){ $("imageResolutionTier").value = data.image_resolution_tier; }
-      if($("imageAspectRatio") && data.image_aspect_ratio){ $("imageAspectRatio").value = data.image_aspect_ratio; }
-      updateImageSizePreview();
-    }
-
-    function loadImageGenPrefsFromStorage(){
-      try{
-        const raw = localStorage.getItem(IMAGE_GEN_PREFS_STORAGE_KEY);
-        if(!raw){ return null; }
-        return JSON.parse(raw);
-      }catch{
-        return null;
-      }
-    }
-
-    async function persistImageGenPrefs(){
-      const prefs = collectImageGenControls();
-      try{
-        localStorage.setItem(IMAGE_GEN_PREFS_STORAGE_KEY, JSON.stringify(prefs));
-      }catch{}
-      try{
-        await fetch("/api/image_gen_prefs", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify(prefs)
-        });
-      }catch{}
-      updateImageSizePreview();
-    }
-
-    function bindImageGenControls(){
-      $("imgProviderOfficial").onclick = () => { setImageProvider("official"); persistImageGenPrefs(); };
-      $("imgProviderSilkroad").onclick = () => { setImageProvider("silkroad"); persistImageGenPrefs(); };
-      $("imageQuality").onchange = persistImageGenPrefs;
-      $("imageResolutionTier").onchange = persistImageGenPrefs;
-      $("imageAspectRatio").onchange = persistImageGenPrefs;
-      const saved = loadImageGenPrefsFromStorage();
-      if(saved){ applyImageGenPrefsToUi(saved); }
-      updateImageSizePreview();
     }
 
     function 应用菜品池列数(mode){
