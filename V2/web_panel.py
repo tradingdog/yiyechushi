@@ -72,7 +72,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.36"
+PANEL_VERSION = "v1.37"
 PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
     "image_provider": "official",
     "image_aspect_ratio": "2:3",
@@ -732,7 +732,7 @@ HTML_PAGE = """<!doctype html>
     .top{
       position:sticky;top:6px;z-index:30;display:flex;align-items:center;gap:8px;margin-bottom:6px;
       background:rgba(16,24,39,.92);border:1px solid var(--line);border-radius:10px;padding:5px 10px;box-shadow:var(--shadow);backdrop-filter:blur(4px);
-      flex-wrap:nowrap;overflow-x:auto;min-height:40px;
+      flex-wrap:nowrap;overflow:visible;min-height:40px;
     }
     .top-brand{display:flex;align-items:center;gap:6px;flex-shrink:0}
     .title{font-size:15px;font-weight:700;line-height:1;white-space:nowrap}
@@ -740,32 +740,19 @@ HTML_PAGE = """<!doctype html>
     .chip{font-size:12px;background:#0b1220;border:1px solid #334155;padding:6px 10px;border-radius:999px;color:#dbe7ff}
     .version-tag{font-size:11px;color:#e2e8f0;background:#1e293b;border:1px solid #475569;border-radius:999px;padding:2px 7px;line-height:1.4}
     .offline-tag{font-size:11px;color:#fecaca;background:#450a0a;border:1px solid #7f1d1d;border-radius:999px;padding:2px 7px;white-space:nowrap}
-    .top-toolbar{display:flex;align-items:center;gap:6px;flex:1;min-width:0;flex-wrap:nowrap}
+    .top-toolbar{display:flex;align-items:center;gap:6px;flex:1;min-width:0;flex-wrap:nowrap;overflow-x:auto;overflow-y:visible}
     .top-seg{display:inline-flex;align-items:center;gap:2px;flex-shrink:0}
-    .top-seg-btn,.top-drop-btn,.top-actions button{
+    .top-seg-btn,.top-actions button{
       padding:4px 8px;border:1px solid #334155;border-radius:6px;background:#0b1220;color:#dbe7ff;font-size:11px;cursor:pointer;white-space:nowrap;line-height:1.3;
     }
-    .top-seg-btn.active,.top-drop-btn.active{
+    .top-seg-btn.active{
       border-color:#22c55e!important;background:linear-gradient(180deg,#064e3b,#022c22)!important;color:#dcfce7!important;
+      box-shadow:0 0 0 2px rgba(34,197,94,.22)!important;
     }
-    .top-drop{position:relative;flex-shrink:0}
-    .top-drop-btn{min-width:52px;text-align:left;display:inline-flex;align-items:center;gap:2px}
-    .top-drop-label{pointer-events:none}
-    .top-drop-caret{opacity:.65;font-size:10px;pointer-events:none}
-    .top-drop-menu{
-      position:absolute;top:calc(100% + 4px);left:0;z-index:40;min-width:108px;max-height:240px;overflow:auto;
-      background:#0f172a;border:1px solid #334155;border-radius:8px;padding:4px;box-shadow:var(--shadow);display:none;
-    }
-    .top-drop.open .top-drop-menu{display:block}
-    .top-drop-item{
-      display:block;width:100%;text-align:left;padding:5px 8px;border:none;border-radius:6px;background:transparent;color:#dbe7ff;font-size:11px;cursor:pointer;
-    }
-    .top-drop-item:hover{background:#1e293b}
-    .top-drop-item.active{background:#064e3b;color:#dcfce7}
     .top-size-hint{font-size:10px;color:#64748b;white-space:nowrap;flex-shrink:0}
     .top-actions{display:flex;gap:4px;flex-shrink:0;margin-left:auto}
     .top-actions .danger-btn{border-color:#7f1d1d;color:#fecaca;background:#2b1313}
-    .top-toolbar .top-seg-btn:disabled,.top-drop-item:disabled{opacity:.35;cursor:not-allowed}
+    .top-toolbar .top-seg-btn:disabled{opacity:.35;cursor:not-allowed}
     button{transition:background .15s ease,border-color .15s ease,box-shadow .15s ease,color .15s ease,transform .12s ease}
     button:hover{border-color:#60a5fa!important;box-shadow:0 0 0 2px rgba(96,165,250,.22)}
     button:active{transform:translateY(1px)}
@@ -1193,36 +1180,26 @@ HTML_PAGE = """<!doctype html>
           <button id="imgProviderOfficial" type="button" class="top-seg-btn active" title="OpenAI 官方 gpt-image-2">官方</button>
           <button id="imgProviderSilkroad" type="button" class="top-seg-btn" title="丝路网关">丝路</button>
         </div>
-        <div class="top-drop" id="qualityDrop">
-          <button type="button" class="top-drop-btn" id="qualityDropBtn" title="生图画质">
-            <span class="top-drop-label">高清</span><span class="top-drop-caret">▾</span>
-          </button>
-          <div class="top-drop-menu" id="qualityDropMenu">
-            <button type="button" class="top-drop-item" data-value="low">标准</button>
-            <button type="button" class="top-drop-item" data-value="medium">中等</button>
-            <button type="button" class="top-drop-item active" data-value="high">高清</button>
-            <button type="button" class="top-drop-item" data-value="auto">自动</button>
-          </div>
+        <div class="top-seg" id="qualitySeg">
+          <button type="button" class="top-seg-btn" data-quality="low" title="标准画质">标</button>
+          <button type="button" class="top-seg-btn" data-quality="medium" title="中等画质">中</button>
+          <button type="button" class="top-seg-btn active" data-quality="high" title="高清画质">高</button>
+          <button type="button" class="top-seg-btn" data-quality="auto" title="自动画质">自动</button>
         </div>
         <div class="top-seg" id="tierSeg">
           <button type="button" class="top-seg-btn active" data-tier="1k" title="1K 分辨率">1K</button>
           <button type="button" class="top-seg-btn" data-tier="2k" title="2K 分辨率">2K</button>
           <button type="button" class="top-seg-btn" data-tier="4k" title="4K 分辨率">4K</button>
         </div>
-        <div class="top-drop" id="ratioDrop">
-          <button type="button" class="top-drop-btn" id="ratioDropBtn" title="画面比例">
-            <span class="top-drop-label">2:3</span><span class="top-drop-caret">▾</span>
-          </button>
-          <div class="top-drop-menu" id="ratioDropMenu">
-            <button type="button" class="top-drop-item active" data-value="2:3">2:3 竖版</button>
-            <button type="button" class="top-drop-item" data-value="3:4">3:4 竖版</button>
-            <button type="button" class="top-drop-item" data-value="9:16">9:16 竖版</button>
-            <button type="button" class="top-drop-item" data-value="1:1">1:1 方形</button>
-            <button type="button" class="top-drop-item" data-value="4:5">4:5 竖版</button>
-            <button type="button" class="top-drop-item" data-value="3:2">3:2 横版</button>
-            <button type="button" class="top-drop-item" data-value="16:9">16:9 横版</button>
-            <button type="button" class="top-drop-item" data-value="4:3">4:3 横版</button>
-          </div>
+        <div class="top-seg" id="ratioSeg">
+          <button type="button" class="top-seg-btn active" data-ratio="2:3" title="2:3 竖版">2:3</button>
+          <button type="button" class="top-seg-btn" data-ratio="3:4" title="3:4 竖版">3:4</button>
+          <button type="button" class="top-seg-btn" data-ratio="9:16" title="9:16 竖版">9:16</button>
+          <button type="button" class="top-seg-btn" data-ratio="1:1" title="1:1 方形">1:1</button>
+          <button type="button" class="top-seg-btn" data-ratio="4:5" title="4:5 竖版">4:5</button>
+          <button type="button" class="top-seg-btn" data-ratio="3:2" title="3:2 横版">3:2</button>
+          <button type="button" class="top-seg-btn" data-ratio="16:9" title="16:9 横版">16:9</button>
+          <button type="button" class="top-seg-btn" data-ratio="4:3" title="4:3 横版">4:3</button>
         </div>
         <span id="imageSizePreview" class="top-size-hint">1024×1536</span>
       </div>
@@ -1233,27 +1210,6 @@ HTML_PAGE = """<!doctype html>
         <button id="restartPanelBtn" type="button" title="重启面板">重启</button>
         <button id="shutdownPanelBtn" type="button" class="danger-btn" title="终止面板">终止</button>
       </div>
-      <select id="imageQuality" class="hidden" aria-hidden="true" tabindex="-1">
-        <option value="low">标准</option>
-        <option value="medium">中等</option>
-        <option value="high" selected>高清</option>
-        <option value="auto">自动</option>
-      </select>
-      <select id="imageResolutionTier" class="hidden" aria-hidden="true" tabindex="-1">
-        <option value="1k" selected>1K</option>
-        <option value="2k">2K</option>
-        <option value="4k">4K</option>
-      </select>
-      <select id="imageAspectRatio" class="hidden" aria-hidden="true" tabindex="-1">
-        <option value="2:3" selected>2:3 竖版</option>
-        <option value="3:4">3:4 竖版</option>
-        <option value="9:16">9:16 竖版</option>
-        <option value="1:1">1:1 方形</option>
-        <option value="4:5">4:5 竖版</option>
-        <option value="3:2">3:2 横版</option>
-        <option value="16:9">16:9 横版</option>
-        <option value="4:3">4:3 横版</option>
-      </select>
     </div>
 
     <div id="taskBar" class="task-bar hidden">
@@ -1663,51 +1619,25 @@ HTML_PAGE = """<!doctype html>
     const HISTORY_SORT_STORAGE_KEY = "v2_history_sort_v1";
     const HISTORY_COLS_STORAGE_KEY = "v2_history_pool_cols_v1";
     const IMAGE_GEN_PREFS_STORAGE_KEY = "v2_image_gen_prefs_v1";
-    const QUALITY_LABELS = {low:"标准", medium:"中等", high:"高清", auto:"自动"};
-    const RATIO_LABELS = {
-      "2:3":"2:3", "3:4":"3:4", "9:16":"9:16", "1:1":"1:1",
-      "4:5":"4:5", "3:2":"3:2", "16:9":"16:9", "4:3":"4:3"
-    };
 
-    function closeTopDropMenus(exceptId=null){
-      document.querySelectorAll(".top-drop.open").forEach((node) => {
-        if(exceptId && node.id === exceptId){ return; }
-        node.classList.remove("open");
+    function setSegGroupValue(groupId, attr, value){
+      document.querySelectorAll(`#${groupId} .top-seg-btn`).forEach((btn) => {
+        btn.classList.toggle("active", (btn.dataset[attr] || "") === value);
       });
     }
 
-    function setHiddenSelectValue(id, value){
-      const el = $(id);
-      if(!el){ return; }
-      el.value = value;
-    }
-
-    function setTopDropValue(dropId, value, labels){
-      const drop = $(dropId);
-      if(!drop){ return; }
-      const label = drop.querySelector(".top-drop-label");
-      drop.querySelectorAll(".top-drop-item").forEach((item) => {
-        item.classList.toggle("active", item.dataset.value === value);
-      });
-      if(label){ label.textContent = labels[value] || value; }
-    }
-
-    function setTierValue(tier){
-      const normalized = (tier || "1k").toLowerCase();
-      setHiddenSelectValue("imageResolutionTier", normalized);
-      document.querySelectorAll("#tierSeg .top-seg-btn").forEach((btn) => {
-        const active = btn.dataset.tier === normalized;
-        btn.classList.toggle("active", active);
-      });
+    function readSegGroupValue(groupId, attr, fallback){
+      const active = document.querySelector(`#${groupId} .top-seg-btn.active`);
+      return (active?.dataset[attr] || fallback || "").trim();
     }
 
     function collectImageGenControls(){
       const provider = $("imgProviderOfficial").classList.contains("active") ? "official" : "silkroad";
       return {
         image_provider: provider,
-        image_quality: ($("imageQuality")?.value || "high").trim(),
-        image_resolution_tier: ($("imageResolutionTier")?.value || "1k").trim(),
-        image_aspect_ratio: ($("imageAspectRatio")?.value || "2:3").trim()
+        image_quality: readSegGroupValue("qualitySeg", "quality", "high"),
+        image_resolution_tier: readSegGroupValue("tierSeg", "tier", "1k"),
+        image_aspect_ratio: readSegGroupValue("ratioSeg", "ratio", "2:3")
       };
     }
 
@@ -1746,16 +1676,17 @@ HTML_PAGE = """<!doctype html>
     }
 
     function setImageQuality(quality){
-      const value = quality || "high";
-      setHiddenSelectValue("imageQuality", value);
-      setTopDropValue("qualityDrop", value, QUALITY_LABELS);
+      setSegGroupValue("qualitySeg", "quality", quality || "high");
+      updateImageSizePreview();
+    }
+
+    function setTierValue(tier){
+      setSegGroupValue("tierSeg", "tier", (tier || "1k").toLowerCase());
       updateImageSizePreview();
     }
 
     function setImageAspectRatio(ratio){
-      const value = ratio || "2:3";
-      setHiddenSelectValue("imageAspectRatio", value);
-      setTopDropValue("ratioDrop", value, RATIO_LABELS);
+      setSegGroupValue("ratioSeg", "ratio", ratio || "2:3");
       updateImageSizePreview();
     }
 
@@ -1793,42 +1724,22 @@ HTML_PAGE = """<!doctype html>
       updateImageSizePreview();
     }
 
-    function bindTopDropMenu(dropId, onPick){
-      const drop = $(dropId);
-      if(!drop){ return; }
-      const btn = drop.querySelector(".top-drop-btn");
-      btn?.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const willOpen = !drop.classList.contains("open");
-        closeTopDropMenus();
-        if(willOpen){ drop.classList.add("open"); }
-      });
-      drop.querySelectorAll(".top-drop-item").forEach((item) => {
-        item.addEventListener("click", (event) => {
-          event.stopPropagation();
-          onPick(item.dataset.value || "");
-          drop.classList.remove("open");
+    function bindSegGroup(groupId, attr, onPick){
+      document.querySelectorAll(`#${groupId} .top-seg-btn`).forEach((btn) => {
+        btn.onclick = () => {
+          if(btn.disabled){ return; }
+          onPick(btn.dataset[attr] || "");
           persistImageGenPrefs();
-        });
+        };
       });
     }
 
     function bindImageGenControls(){
       $("imgProviderOfficial").onclick = () => { setImageProvider("official"); persistImageGenPrefs(); };
       $("imgProviderSilkroad").onclick = () => { setImageProvider("silkroad"); persistImageGenPrefs(); };
-      document.querySelectorAll("#tierSeg .top-seg-btn").forEach((btn) => {
-        btn.onclick = () => {
-          if(btn.disabled){ return; }
-          setTierValue(btn.dataset.tier || "1k");
-          persistImageGenPrefs();
-        };
-      });
-      bindTopDropMenu("qualityDrop", (value) => setImageQuality(value));
-      bindTopDropMenu("ratioDrop", (value) => setImageAspectRatio(value));
-      document.addEventListener("click", () => closeTopDropMenus());
-      document.addEventListener("keydown", (event) => {
-        if(event.key === "Escape"){ closeTopDropMenus(); }
-      });
+      bindSegGroup("qualitySeg", "quality", (value) => setImageQuality(value));
+      bindSegGroup("tierSeg", "tier", (value) => setTierValue(value));
+      bindSegGroup("ratioSeg", "ratio", (value) => setImageAspectRatio(value));
     }
 
     function 应用菜品池列数(mode){
