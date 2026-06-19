@@ -76,7 +76,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.39"
+PANEL_VERSION = "v1.40"
 PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
     "image_provider": "official",
     "image_aspect_ratio": "2:3",
@@ -903,6 +903,8 @@ HTML_PAGE = """<!doctype html>
       display:flex;align-items:center;justify-content:center;font-size:10px;color:#94a3b8;text-align:center;
       padding:4px;line-height:1.3;background:linear-gradient(135deg,#0f172a,#1e293b);
     }
+    .custom-job-thumb.pending.failed{background:rgba(127,29,29,.35);color:#fecaca;border-color:#7f1d1d}
+    .custom-job-error{font-size:11px;color:#fca5a5;line-height:1.4;margin-top:2px;word-break:break-word}
     .custom-job-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
     .custom-job-prompt{
       font-size:11px;line-height:1.45;color:#e2e8f0;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
@@ -1633,6 +1635,9 @@ HTML_PAGE = """<!doctype html>
       selectionSource: "pool",
       customRefs: [],
       customPolling: false,
+      customRunning: false,
+      customLogNextIndex: 0,
+      customJobsSnapshot: "",
       customTilesSnapshot: "",
       imageSizeTable: {}
     };
@@ -2289,6 +2294,11 @@ HTML_PAGE = """<!doctype html>
         const platform = state.publishSnapshot.platform || "发布中";
         ctx.textContent = `后台发布：${dish} → ${platform}`;
         ctx.className = "running-context publish";
+        return;
+      }
+      if(state.customRunning){
+        ctx.textContent = "后台自定义生图运行中…";
+        ctx.className = "running-context active";
         return;
       }
       ctx.textContent = "后台：空闲";
@@ -4045,12 +4055,17 @@ HTML_PAGE = """<!doctype html>
             job_id: jobId,
             prompt: tile.prompt || "",
             created_at: tile.created_at || "",
+            job_status: tile.job_status || "",
+            job_error: tile.job_error || "",
             tiles: [],
           };
           seen.set(jobId, group);
           groups.push(group);
         }
-        seen.get(jobId).tiles.push(tile);
+        const group = seen.get(jobId);
+        if(tile.job_status){ group.job_status = tile.job_status; }
+        if(tile.job_error){ group.job_error = tile.job_error; }
+        group.tiles.push(tile);
       });
       return groups;
     }
@@ -4069,6 +4084,8 @@ HTML_PAGE = """<!doctype html>
       groupCustomHistoryTiles(tiles).forEach((group) => {
         const doneTiles = group.tiles.filter((tile) => tile.status === "done" && tile.path);
         const pendingCount = group.tiles.filter((tile) => tile.status !== "done").length;
+        const jobFailed = group.job_status === "failed";
+        const jobRunning = group.job_status === "running";
         const card = document.createElement("div");
         card.className = "custom-job-card";
 
@@ -4096,8 +4113,8 @@ HTML_PAGE = """<!doctype html>
           });
         }else{
           const pending = document.createElement("div");
-          pending.className = "custom-job-thumb pending";
-          pending.textContent = pendingCount ? "生成中" : "等待中";
+          pending.className = "custom-job-thumb pending" + (jobFailed ? " failed" : "");
+          pending.textContent = jobFailed ? "失败" : (jobRunning || pendingCount ? "生成中" : "等待中");
           thumbsWrap.appendChild(pending);
         }
 
@@ -4112,7 +4129,8 @@ HTML_PAGE = """<!doctype html>
         const metaEl = document.createElement("div");
         metaEl.className = "custom-job-meta";
         const timeText = formatCustomJobTime(group.created_at);
-        const countText = doneTiles.length ? `${doneTiles.length} 张` : (pendingCount ? "生成中" : "0 张");
+        let countText = doneTiles.length ? `${doneTiles.length} 张` : (jobRunning || pendingCount ? "生成中" : "0 张");
+        if(jobFailed){ countText = "失败"; }
         metaEl.textContent = [timeText, countText].filter(Boolean).join(" · ");
 
         const actions = document.createElement("div");
@@ -4148,6 +4166,13 @@ HTML_PAGE = """<!doctype html>
 
         body.appendChild(promptEl);
         body.appendChild(metaEl);
+        if(jobFailed && group.job_error){
+          const errEl = document.createElement("div");
+          errEl.className = "custom-job-error";
+          errEl.textContent = group.job_error;
+          errEl.title = group.job_error;
+          body.appendChild(errEl);
+        }
         body.appendChild(actions);
         card.appendChild(thumbsWrap);
         card.appendChild(body);
@@ -4169,13 +4194,20 @@ HTML_PAGE = """<!doctype html>
     async function fetchCustomImageStatus(options = {}){
       const silent = Boolean(options?.silent);
       try{
-        const res = await fetch("/api/custom_image/status");
+        const res = await fetch(`/api/custom_image/status?from=${state.customLogNextIndex}`);
         const data = await res.json();
         if(!res.ok){ throw new Error(data.error || "读取自定义生图状态失败"); }
         if(data.images_dir){ state.customImagesDir = data.images_dir; }
-        const snapshot = JSON.stringify(data.tiles || []);
-        if(snapshot !== state.customTilesSnapshot){
-          state.customTilesSnapshot = snapshot;
+        state.customRunning = Boolean(data.running);
+        if(data.logs?.length){
+          appendLogs(data.logs.map((line) => "[自定义生图] " + line));
+          state.customLogNextIndex = data.log_next_index || state.customLogNextIndex;
+        }
+        const jobsSnapshot = JSON.stringify(data.jobs || []);
+        const tilesSnapshot = JSON.stringify(data.tiles || []);
+        if(jobsSnapshot !== state.customJobsSnapshot || tilesSnapshot !== state.customTilesSnapshot){
+          state.customJobsSnapshot = jobsSnapshot;
+          state.customTilesSnapshot = tilesSnapshot;
           renderCustomHistory(data.tiles || []);
         }
         const btn = $("customGenerateBtn");
@@ -4185,16 +4217,20 @@ HTML_PAGE = """<!doctype html>
         }
         if(data.running){
           state.customPolling = true;
-          if(!silent){ setCustomStatus("自定义生图进行中…"); }
-        }else if(state.customPolling){
+          if(!silent){ setCustomStatus("自定义生图进行中…（可在底部日志查看进度）"); }
+        }else{
+          const wasPolling = state.customPolling;
           state.customPolling = false;
           if(data.error){
             setCustomStatus("生图失败：" + data.error, "warn");
-          }else{
+          }else if(wasPolling){
             setCustomStatus("生图完成。图片保存在 V2/custom_image_gen/images/", "ok");
           }
         }
+        updateViewContextBar();
       }catch(err){
+        state.customRunning = false;
+        updateViewContextBar();
         if(!silent){ setCustomStatus("读取状态失败：" + err.message, "warn"); }
       }
     }
@@ -4214,7 +4250,10 @@ HTML_PAGE = """<!doctype html>
       state.customRefs.forEach((ref, index) => {
         fd.append(`ref_${index}`, ref.file, ref.name || `ref_${index}.png`);
       });
+      const btn = $("customGenerateBtn");
+      if(btn){ btn.disabled = true; btn.textContent = "生成中…"; }
       setCustomStatus("正在提交自定义生图任务…");
+      切换日志抽屉(true);
       try{
         const res = await fetch("/api/custom_image/generate", {method:"POST", body: fd});
         const data = await res.json();
@@ -4223,6 +4262,7 @@ HTML_PAGE = """<!doctype html>
         appendLogs([`[${new Date().toLocaleTimeString()}] 自定义生图已启动：${count} 张`]);
         await fetchCustomImageStatus();
       }catch(err){
+        if(btn){ btn.disabled = false; btn.textContent = "生成"; }
         setCustomStatus("启动失败：" + err.message, "warn");
       }
     }
@@ -5805,7 +5845,13 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             self._send_json(publish_status_snapshot(log_from=log_from))
             return
         if parsed.path == "/api/custom_image/status":
-            self._send_json(custom_image_status_snapshot())
+            query = parse_qs(parsed.query)
+            raw_from = (query.get("from", ["0"])[0] or "0").strip()
+            try:
+                log_from = max(0, int(raw_from))
+            except ValueError:
+                log_from = 0
+            self._send_json(custom_image_status_snapshot(log_from=log_from))
             return
         if parsed.path == "/api/dish_detail":
             query = parse_qs(parsed.query)

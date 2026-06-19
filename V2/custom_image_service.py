@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from contextlib import redirect_stderr, redirect_stdout
+
 from v2_core import (
     build_openai_image_client,
     clear_work_cancel,
@@ -32,9 +34,48 @@ CUSTOM_IMAGE_LOCK = threading.Lock()
 CUSTOM_IMAGE_RUNNING = False
 CUSTOM_IMAGE_ERROR = ""
 CUSTOM_IMAGE_JOBS: list[dict[str, Any]] = []
+CUSTOM_IMAGE_LOG_LINES: list[str] = []
+MAX_CUSTOM_IMAGE_LOG_LINES = 2000
 
 IMAGE_NAME_PATTERN = re.compile(r"^image_\d+$", re.IGNORECASE)
 REF_NAME_PATTERN = re.compile(r"^ref_\d+$", re.IGNORECASE)
+
+
+class CustomImageLogWriter:
+    def write(self, text: str) -> None:
+        if not text:
+            return
+        for line in str(text).splitlines():
+            cleaned = line.rstrip()
+            if cleaned:
+                append_custom_image_log(cleaned)
+
+    def flush(self) -> None:
+        return
+
+
+def append_custom_image_log(line: str) -> None:
+    text = str(line).rstrip()
+    if not text:
+        return
+    stamped = f"[{time.strftime('%H:%M:%S')}] {text}"
+    with CUSTOM_IMAGE_LOCK:
+        CUSTOM_IMAGE_LOG_LINES.append(stamped)
+        if len(CUSTOM_IMAGE_LOG_LINES) > MAX_CUSTOM_IMAGE_LOG_LINES:
+            del CUSTOM_IMAGE_LOG_LINES[: len(CUSTOM_IMAGE_LOG_LINES) - MAX_CUSTOM_IMAGE_LOG_LINES]
+
+
+def _recover_stale_running_jobs_locked() -> None:
+    changed = False
+    for job in CUSTOM_IMAGE_JOBS:
+        if job.get("status") != "running":
+            continue
+        job["status"] = "failed"
+        job["error"] = "面板重启或异常中断，任务已取消。"
+        job["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        changed = True
+    if changed:
+        save_custom_image_history(CUSTOM_IMAGE_JOBS)
 
 
 def ensure_custom_image_dirs() -> None:
@@ -69,9 +110,12 @@ def save_custom_image_history(jobs: list[dict[str, Any]]) -> None:
 
 
 def init_custom_image_service() -> None:
-    global CUSTOM_IMAGE_JOBS
+    global CUSTOM_IMAGE_JOBS, CUSTOM_IMAGE_RUNNING, CUSTOM_IMAGE_ERROR
     with CUSTOM_IMAGE_LOCK:
         CUSTOM_IMAGE_JOBS = load_custom_image_history()
+        CUSTOM_IMAGE_RUNNING = False
+        CUSTOM_IMAGE_ERROR = ""
+        _recover_stale_running_jobs_locked()
 
 
 def _new_job_id() -> str:
@@ -119,7 +163,15 @@ def cancel_custom_image_work() -> None:
 
     request_work_cancel()
     with CUSTOM_IMAGE_LOCK:
+        for job in CUSTOM_IMAGE_JOBS:
+            if job.get("status") != "running":
+                continue
+            job["status"] = "failed"
+            job["error"] = "用户已请求停止后台任务。"
+            job["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_custom_image_history(CUSTOM_IMAGE_JOBS)
         CUSTOM_IMAGE_RUNNING = False
+    append_custom_image_log("自定义生图：用户请求停止。")
 
 
 def custom_image_worker(
@@ -130,62 +182,74 @@ def custom_image_worker(
     reference_paths: list[str],
 ) -> None:
     global CUSTOM_IMAGE_RUNNING, CUSTOM_IMAGE_ERROR
+    stream = CustomImageLogWriter()
     try:
-        sync_v2_openai_image_settings()
-        client = build_openai_image_client()
-        settings = _build_settings(image_count)
-        timestamp = get_timestamp()
-        output_dir = CUSTOM_IMAGE_IMAGES_DIR / job_id
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        ref_paths = [str(path) for path in reference_paths if Path(path).exists()]
-        accumulated: list[dict[str, str]] = []
-        max_attempts = 3
-        attempt = 0
-        while len(accumulated) < image_count and attempt < max_attempts:
-            raise_if_work_cancelled("自定义生图")
-            attempt += 1
-            remaining = image_count - len(accumulated)
-            if ref_paths:
-                batch_items = generate_images_from_references(
-                    client=client,
-                    prompt_text=prompt,
-                    reference_paths=ref_paths,
-                    settings={**settings, "image_count": remaining},
-                )
-            else:
-                batch_items = generate_images_by_prompt(
-                    client=client,
-                    prompt_text=prompt,
-                    settings={**settings, "image_count": remaining},
-                )
-            if not batch_items:
-                continue
-            take_count = min(len(batch_items), remaining)
-            for offset in range(take_count):
-                slot_index = len(accumulated)
-                saved = save_generated_images(
-                    batch_items[offset : offset + 1],
-                    output_dir=output_dir,
-                    timestamp=timestamp,
-                    dish_name="custom",
-                    name_suffix=f"{slot_index + 1:02d}",
-                )
-                if saved:
-                    accumulated.append({"path": saved[0]})
-                    _mark_slot_done(job_id, slot_index, saved[0])
-
-        if len(accumulated) < image_count:
-            raise RuntimeError(f"仅生成 {len(accumulated)}/{image_count} 张图片。")
-
-        with CUSTOM_IMAGE_LOCK:
-            _update_job_locked(
-                job_id,
-                status="done",
-                finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        with redirect_stdout(stream), redirect_stderr(stream):
+            append_custom_image_log(f"自定义生图开始：job={job_id}，目标 {image_count} 张，参考图 {len(reference_paths)} 张。")
+            sync_v2_openai_image_settings()
+            client = build_openai_image_client()
+            settings = _build_settings(image_count)
+            append_custom_image_log(
+                f"生图参数：size={settings.get('size')}，quality={settings.get('quality')}，"
+                f"n={settings.get('image_count')}，model={settings.get('model')}"
             )
+            timestamp = get_timestamp()
+            output_dir = CUSTOM_IMAGE_IMAGES_DIR / job_id
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            ref_paths = [str(path) for path in reference_paths if Path(path).exists()]
+            accumulated: list[dict[str, str]] = []
+            max_attempts = 3
+            attempt = 0
+            while len(accumulated) < image_count and attempt < max_attempts:
+                raise_if_work_cancelled("自定义生图")
+                attempt += 1
+                remaining = image_count - len(accumulated)
+                append_custom_image_log(f"第 {attempt}/{max_attempts} 次请求，剩余 {remaining} 张…")
+                if ref_paths:
+                    batch_items = generate_images_from_references(
+                        client=client,
+                        prompt_text=prompt,
+                        reference_paths=ref_paths,
+                        settings={**settings, "image_count": remaining},
+                    )
+                else:
+                    batch_items = generate_images_by_prompt(
+                        client=client,
+                        prompt_text=prompt,
+                        settings={**settings, "image_count": remaining},
+                    )
+                if not batch_items:
+                    append_custom_image_log("本轮未返回有效图片，准备重试…")
+                    continue
+                take_count = min(len(batch_items), remaining)
+                for offset in range(take_count):
+                    slot_index = len(accumulated)
+                    saved = save_generated_images(
+                        batch_items[offset : offset + 1],
+                        output_dir=output_dir,
+                        timestamp=timestamp,
+                        dish_name="custom",
+                        name_suffix=f"{slot_index + 1:02d}",
+                    )
+                    if saved:
+                        accumulated.append({"path": saved[0]})
+                        _mark_slot_done(job_id, slot_index, saved[0])
+                        append_custom_image_log(f"已保存第 {slot_index + 1} 张：{saved[0]}")
+
+            if len(accumulated) < image_count:
+                raise RuntimeError(f"仅生成 {len(accumulated)}/{image_count} 张图片。")
+
+            with CUSTOM_IMAGE_LOCK:
+                _update_job_locked(
+                    job_id,
+                    status="done",
+                    finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                )
+            append_custom_image_log(f"自定义生图完成：共 {len(accumulated)} 张。")
     except Exception as exc:  # noqa: BLE001
         CUSTOM_IMAGE_ERROR = str(exc)
+        append_custom_image_log(f"自定义生图失败：{exc}")
         with CUSTOM_IMAGE_LOCK:
             _update_job_locked(
                 job_id,
@@ -248,14 +312,18 @@ def start_custom_image_generation(*, prompt: str, image_count: int, reference_fi
         daemon=True,
     )
     worker.start()
+    append_custom_image_log(f"自定义生图任务已入队：{job_id}（{count} 张）")
     return {"ok": True, "job_id": job_id}
 
 
-def custom_image_status_snapshot() -> dict[str, Any]:
+def custom_image_status_snapshot(*, log_from: int = 0) -> dict[str, Any]:
     with CUSTOM_IMAGE_LOCK:
         jobs = [dict(job) for job in CUSTOM_IMAGE_JOBS]
         running = CUSTOM_IMAGE_RUNNING
         error = CUSTOM_IMAGE_ERROR
+        total_logs = len(CUSTOM_IMAGE_LOG_LINES)
+        safe_from = max(0, min(int(log_from or 0), total_logs))
+        logs = CUSTOM_IMAGE_LOG_LINES[safe_from:]
     tiles: list[dict[str, Any]] = []
     for job in jobs:
         for slot_index, slot in enumerate(job.get("slots") or []):
@@ -268,6 +336,7 @@ def custom_image_status_snapshot() -> dict[str, Any]:
                     "prompt": job.get("prompt", ""),
                     "created_at": job.get("created_at", ""),
                     "job_status": job.get("status", ""),
+                    "job_error": job.get("error", ""),
                 }
             )
     current_job = next((job for job in jobs if job.get("status") == "running"), None)
@@ -278,6 +347,8 @@ def custom_image_status_snapshot() -> dict[str, Any]:
         "jobs": jobs,
         "tiles": tiles,
         "images_dir": str(CUSTOM_IMAGE_IMAGES_DIR.resolve()),
+        "logs": logs,
+        "log_next_index": total_logs,
     }
 
 
