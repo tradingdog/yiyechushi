@@ -626,12 +626,12 @@ def build_openai_image_client(*, provider: str | None = None) -> OpenAI:
         os.environ["OPENAI_IMAGE_MODEL"] = model
     timeout = parse_float_env("OPENAI_IMAGE_REQUEST_TIMEOUT_SECONDS", 900.0)
     print(format_openai_image_runtime_label(resolved_provider))
-    client_kwargs: dict[str, Any] = {
-        "api_key": api_key,
-        "timeout": timeout,
-        "base_url": base_url,
-    }
-    return OpenAI(**client_kwargs)
+    return OpenAI(
+        api_key=api_key,
+        timeout=timeout,
+        base_url=base_url,
+        http_client=build_httpx_client(timeout_seconds=timeout),
+    )
 
 
 def load_manual_dish_idea(idea_file: Path = IDEA_FILE) -> dict[str, str]:
@@ -806,91 +806,64 @@ def append_eating_action_guidance(system_prompt: str, placeholders: list[str]) -
     return f"{system_prompt}\n\n{EATING_ACTION_GUIDANCE}"
 
 
-def prepare_image_bytes_for_vision_api(image_path: Path) -> tuple[bytes, str]:
-    """压缩/缩放图片，满足多模态 API 输入限制。
-
-    - 豆包 image_url：单图 ≤10 MiB（本项目默认留 9 MiB 安全余量）
-    - OpenAI Vision：单图 ≤20 MiB，且会预处理为最长边 ≤2048、短边 ≤768
-    """
-    raw = image_path.read_bytes()
-    guessed_mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
-    max_bytes = parse_int_env("VISION_IMAGE_MAX_BYTES", 9 * 1024 * 1024)
-    max_long_side = parse_int_env("VISION_IMAGE_MAX_LONG_SIDE", 2048)
-    target_short_side = parse_int_env("VISION_IMAGE_TARGET_SHORT_SIDE", 768)
-
-    if (
-        len(raw) <= max_bytes
-        and guessed_mime in {"image/jpeg", "image/jpg"}
-        and image_path.stat().st_size <= max_bytes
-    ):
-        try:
-            from PIL import Image
-
-            with Image.open(image_path) as probe:
-                width, height = probe.size
-            if max(width, height) <= max_long_side and min(width, height) <= target_short_side:
-                return raw, "image/jpeg"
-        except Exception:
-            return raw, "image/jpeg"
-
+def _compress_image_to_byte_limit(
+    image_path: Path,
+    *,
+    max_bytes: int,
+    log_prefix: str,
+) -> tuple[bytes, str]:
+    """仅在超过体积上限时缩放并转 JPEG（保留尽可能大的尺寸）。"""
     try:
         from PIL import Image
     except ModuleNotFoundError as exc:
-        if len(raw) <= max_bytes:
-            return raw, guessed_mime
         raise RuntimeError(
-            f"多模态参考图 {image_path.name} 为 {len(raw) / (1024 * 1024):.1f} MiB，"
-            "超过 API 限制且未安装 Pillow，无法压缩。"
+            f"{log_prefix} {image_path.name} 超过 {max_bytes / (1024 * 1024):.0f} MiB 限制，"
+            "且未安装 Pillow，无法压缩。"
         ) from exc
 
+    raw = image_path.read_bytes()
     with Image.open(image_path) as image:
         original_size = image.size
         canvas = image.convert("RGB")
-        width, height = canvas.size
-        scale = 1.0
-        long_side = max(width, height)
-        short_side = min(width, height)
-        if long_side > max_long_side:
-            scale = min(scale, max_long_side / long_side)
-        scaled_short = short_side * scale
-        if scaled_short > target_short_side:
-            scale = min(scale, target_short_side / short_side)
-        if scale < 1.0:
-            new_width = max(1, int(width * scale))
-            new_height = max(1, int(height * scale))
-            canvas = canvas.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
-        quality = 88
-        compressed = raw
-        for attempt in range(8):
-            buffer = BytesIO()
-            canvas.save(buffer, format="JPEG", quality=quality, optimize=True)
-            compressed = buffer.getvalue()
-            if len(compressed) <= max_bytes:
-                if (
-                    attempt > 0
-                    or scale < 1.0
-                    or guessed_mime not in {"image/jpeg", "image/jpg"}
-                    or len(raw) > max_bytes
-                ):
+        for _ in range(10):
+            quality = 92
+            for _ in range(8):
+                buffer = BytesIO()
+                canvas.save(buffer, format="JPEG", quality=quality, optimize=True)
+                compressed = buffer.getvalue()
+                if len(compressed) <= max_bytes:
                     print(
-                        "多模态参考图已压缩："
+                        f"{log_prefix}已压缩："
                         f"{image_path.name} {original_size[0]}x{original_size[1]} "
                         f"({len(raw) / (1024 * 1024):.1f} MiB) -> "
                         f"{canvas.size[0]}x{canvas.size[1]} JPEG "
                         f"({len(compressed) / 1024:.0f} KB)"
                     )
-                return compressed, "image/jpeg"
-            quality = max(45, quality - 10)
-            if attempt >= 3 and (canvas.width > 640 or canvas.height > 640):
-                canvas = canvas.resize(
-                    (max(1, canvas.width * 3 // 4), max(1, canvas.height * 3 // 4)),
-                    Image.Resampling.LANCZOS,
-                )
+                    return compressed, "image/jpeg"
+                quality = max(50, quality - 8)
+            if canvas.width <= 320 and canvas.height <= 320:
+                break
+            canvas = canvas.resize(
+                (max(1, canvas.width * 3 // 4), max(1, canvas.height * 3 // 4)),
+                Image.Resampling.LANCZOS,
+            )
 
     raise RuntimeError(
-        f"多模态参考图 {image_path.name} 压缩后仍为 {len(compressed) / (1024 * 1024):.1f} MiB，"
-        f"超过 {max_bytes / (1024 * 1024):.0f} MiB 限制。"
+        f"{log_prefix} {image_path.name} 压缩后仍超过 {max_bytes / (1024 * 1024):.0f} MiB 限制。"
+    )
+
+
+def prepare_image_bytes_for_vision_api(image_path: Path) -> tuple[bytes, str]:
+    """多模态 image_url 用图：未超限则原样返回，仅豆包 10 MiB 等体积超限时才压缩。"""
+    raw = image_path.read_bytes()
+    guessed_mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
+    max_bytes = parse_int_env("VISION_IMAGE_MAX_BYTES", 9 * 1024 * 1024)
+    if len(raw) <= max_bytes:
+        return raw, guessed_mime
+    return _compress_image_to_byte_limit(
+        image_path,
+        max_bytes=max_bytes,
+        log_prefix="多模态参考图",
     )
 
 
@@ -1812,14 +1785,41 @@ def augment_prompt_with_reference_labels(prompt_text: str, reference_paths: list
     return f"{prompt_text.rstrip()}\n\n【参考图说明】{' '.join(labels)}"
 
 
+def prepare_reference_image_for_edit_api(image_path: Path) -> tuple[str, bytes, str]:
+    """images.edit 参考图默认原样上传（官方 multipart 单图上限 50 MiB）。"""
+    raw = image_path.read_bytes()
+    guessed_mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
+    max_bytes = parse_int_env("EDIT_REF_IMAGE_MAX_BYTES", 50 * 1024 * 1024)
+    if len(raw) <= max_bytes:
+        return image_path.name, raw, guessed_mime
+    compressed, mime = _compress_image_to_byte_limit(
+        image_path,
+        max_bytes=max_bytes,
+        log_prefix="参考图",
+    )
+    stem = image_path.stem or "ref"
+    return f"{stem}.jpg", compressed, mime
+
+
 def open_reference_image_uploads(reference_paths: list[Path]) -> tuple[list[Any], list[Any]]:
     uploads: list[Any] = []
     handles: list[Any] = []
+    max_bytes = parse_int_env("EDIT_REF_IMAGE_MAX_BYTES", 50 * 1024 * 1024)
     for path in reference_paths:
-        handle = open(path, "rb")
-        handles.append(handle)
-        mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        uploads.append((path.name, handle, mime_type))
+        if path.stat().st_size <= max_bytes:
+            handle = open(path, "rb")
+            handles.append(handle)
+            mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            uploads.append((path.name, handle, mime_type))
+            continue
+        filename, data, mime_type = prepare_reference_image_for_edit_api(path)
+        print(
+            f"参考图超限已压缩：{path.name} ({path.stat().st_size / (1024 * 1024):.1f} MiB) -> "
+            f"{filename} ({len(data) / 1024:.0f} KB)"
+        )
+        buffer = BytesIO(data)
+        handles.append(buffer)
+        uploads.append((filename, buffer, mime_type))
     return uploads, handles
 
 
