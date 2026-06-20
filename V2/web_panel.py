@@ -76,7 +76,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.41"
+PANEL_VERSION = "v1.42"
 PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
     "image_provider": "official",
     "image_aspect_ratio": "2:3",
@@ -380,11 +380,12 @@ def normalize_publish_plan_slots(raw_slots: Any) -> dict[str, dict[str, str]]:
         normalized_slots: dict[str, str] = {}
         for slot_key in PLAN_SLOT_KEYS:
             path_text = str(slot_map.get(slot_key, "")).strip()
-            if path_text:
-                try:
-                    normalized_slots[slot_key] = str(resolve_output_path(path_text).resolve())
-                except Exception:
-                    continue
+            if not path_text:
+                continue
+            try:
+                normalized_slots[slot_key] = str(resolve_output_path(path_text).resolve())
+            except Exception:
+                normalized_slots[slot_key] = path_text
         if normalized_slots:
             result[date_text] = normalized_slots
     return result
@@ -848,6 +849,7 @@ HTML_PAGE = """<!doctype html>
     .batch-edit-bar .danger-btn{border-color:#7f1d1d;color:#fecaca}
     .history-cover{position:relative;overflow:visible}
     .history-cover-media{width:100%;height:100%;overflow:hidden;border-radius:7px;background:#111827;display:flex;align-items:center;justify-content:center}
+    .history-cover-media img,.history-cover img{-webkit-user-drag:none;user-select:none;pointer-events:none}
     .history-tag-add{
       position:absolute;top:3px;right:3px;z-index:14;width:18px;height:18px;border-radius:999px;border:1px solid #475569;
       background:rgba(15,23,42,.9);color:#e2e8f0;font-size:13px;line-height:16px;padding:0;cursor:pointer;
@@ -1651,6 +1653,16 @@ HTML_PAGE = """<!doctype html>
     const PLAN_SLOT_LABELS = {morning:"早", noon:"中", evening:"晚"};
     const DRAG_DISH_MIME = "application/x-dish-path";
     const LAYOUT_STORAGE_KEY_V1 = "v2_panel_layout_v1";
+
+    function readDragDishPath(event){
+      const dt = event?.dataTransfer;
+      if(!dt){ return ""; }
+      const custom = dt.getData(DRAG_DISH_MIME);
+      if(custom){ return custom; }
+      const plain = dt.getData("text/plain");
+      if(plain && (/[\\\\/]/.test(plain) || plain.includes(":"))){ return plain; }
+      return "";
+    }
     const HISTORY_SORT_STORAGE_KEY = "v2_history_sort_v1";
     const HISTORY_COLS_STORAGE_KEY = "v2_history_pool_cols_v1";
     const IMAGE_GEN_PREFS_STORAGE_KEY = "v2_image_gen_prefs_v1";
@@ -1996,7 +2008,7 @@ HTML_PAGE = """<!doctype html>
       Object.values(state.publishPlan?.slots || {}).forEach((daySlots) => {
         PLAN_SLOT_KEYS.forEach((slot) => {
           const p = daySlots?.[slot];
-          if(p){ paths.add(p); }
+          if(p){ paths.add(normalizeHistoryPath(p)); }
         });
       });
       return paths;
@@ -2087,6 +2099,7 @@ HTML_PAGE = """<!doctype html>
       chip.appendChild(nameEl);
       chip.addEventListener("dragstart", (event) => {
         event.dataTransfer.setData(DRAG_DISH_MIME, path);
+        event.dataTransfer.setData("text/plain", path);
         event.dataTransfer.setData("application/x-plan-from-date", date);
         event.dataTransfer.setData("application/x-plan-from-slot", slot);
         event.dataTransfer.effectAllowed = "move";
@@ -2136,7 +2149,7 @@ HTML_PAGE = """<!doctype html>
       slotEl.addEventListener("drop", async (event) => {
         event.preventDefault();
         slotEl.classList.remove("drag-over");
-        const path = event.dataTransfer.getData(DRAG_DISH_MIME);
+        const path = readDragDishPath(event);
         if(!path){ return; }
         const fromDate = event.dataTransfer.getData("application/x-plan-from-date");
         const fromSlot = event.dataTransfer.getData("application/x-plan-from-slot");
@@ -2537,7 +2550,7 @@ HTML_PAGE = """<!doctype html>
       const inPlan = collectPlanAssignedPaths();
       let visible = 0;
       Array.from($("history").querySelectorAll(".history-item")).forEach((el) => {
-        const path = el.dataset.path || "";
+        const path = normalizeHistoryPath(el.dataset.path || "");
         const name = el.querySelector(".history-name")?.textContent?.trim().toLowerCase() || "";
         let tags = [];
         try{ tags = JSON.parse(el.dataset.mealTags || "[]"); }catch{}
@@ -3707,22 +3720,22 @@ HTML_PAGE = """<!doctype html>
     }
 
     function markSelectedDishUi(){
-      const path = state.selectedHistoryPath || "";
+      const path = normalizeHistoryPath(state.selectedHistoryPath || "");
       const source = state.selectionSource || "pool";
       Array.from($("history").querySelectorAll(".history-item")).forEach((el) => {
-        el.classList.toggle("active", source === "pool" && el.dataset.path === path);
+        el.classList.toggle("active", source === "pool" && normalizeHistoryPath(el.dataset.path) === path);
       });
       Array.from(document.querySelectorAll(".plan-slot-chip")).forEach((el) => {
-        el.classList.toggle("selected", source === "plan" && el.dataset.path === path);
+        el.classList.toggle("selected", source === "plan" && normalizeHistoryPath(el.dataset.path) === path);
       });
     }
 
     function reconcileSelectionSource(){
-      const path = state.selectedHistoryPath || "";
+      const path = normalizeHistoryPath(state.selectedHistoryPath || "");
       if(!path){ markSelectedDishUi(); return; }
       const inPlan = collectPlanAssignedPaths().has(path);
       const poolVisible = Array.from($("history").querySelectorAll(".history-item")).some((el) => (
-        el.dataset.path === path && el.style.display !== "none"
+        normalizeHistoryPath(el.dataset.path) === path && el.style.display !== "none"
       ));
       if(inPlan && !poolVisible){
         state.selectionSource = "plan";
@@ -3807,7 +3820,7 @@ HTML_PAGE = """<!doctype html>
       div.dataset.mealTags = JSON.stringify(mealTags);
       div.draggable = !state.batchEditMode;
       const cover = item.preview_image
-        ? `<img src="${fileUrl(item.preview_image)}" alt="${item.dish_name || item.name}" />`
+        ? `<img src="${fileUrl(item.preview_image)}" alt="${item.dish_name || item.name}" draggable="false" />`
         : `<div class="history-empty">暂无图片</div>`;
       const tagChecks = MEAL_TAG_KEYS.map((tag) => {
         const checked = mealTags.includes(tag) ? " checked" : "";
@@ -3840,8 +3853,9 @@ HTML_PAGE = """<!doctype html>
       `;
       div.addEventListener("dragstart", (event) => {
         if(state.batchEditMode){ event.preventDefault(); return; }
-        event.dataTransfer.setData(DRAG_DISH_MIME, item.path || "");
-        event.dataTransfer.setData("text/plain", item.dish_name || item.name || "");
+        const dishPath = item.path || "";
+        event.dataTransfer.setData(DRAG_DISH_MIME, dishPath);
+        event.dataTransfer.setData("text/plain", dishPath);
         event.dataTransfer.effectAllowed = "move";
       });
       const checkbox = div.querySelector(".history-check input");
