@@ -114,6 +114,7 @@ def build_test_settings(args: argparse.Namespace) -> KuaishouPublishSettings:
         windows_open_dialog_wait_ms=0,
         upload_step_screenshot=ROOT_DIR / "tools" / "kuaishou_publish_upload_step.png",
         debug_screenshot=ROOT_DIR / "tools" / "kuaishou_publish_last_error.png",
+        schedule_at=None,
         dry_run=False,
     )
 

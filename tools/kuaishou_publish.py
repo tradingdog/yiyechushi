@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import sys
+import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Sequence
 
@@ -36,6 +38,7 @@ from tools.douyin_publish import (  # noqa: E402
     click_locator,
     ensure_cdp_browser_available,
     find_optional_locator,
+    normalize_schedule_at,
     resolve_page_by_keyword,
     type_text_humanly,
     wait_for_locator,
@@ -103,6 +106,7 @@ class KuaishouPublishSettings:
     windows_open_dialog_wait_ms: int
     upload_step_screenshot: Path
     debug_screenshot: Path
+    schedule_at: str | None
     dry_run: bool
 
 
@@ -638,6 +642,139 @@ def select_publish_location(page: Page, settings: KuaishouPublishSettings) -> No
     print(f"已选择所在地区：{settings.publish_location}")
 
 
+def scheduled_publish_label_locators(page: Page) -> tuple:
+    return (
+        page.locator('label:has(input[type="radio"][value="2"])'),
+        page.locator("label").filter(has_text="定时发布"),
+        page.get_by_text("定时发布", exact=True).locator("xpath=ancestor-or-self::label[1]"),
+    )
+
+
+def scheduled_datetime_input_locators(page: Page) -> tuple:
+    return (
+        page.locator('input[placeholder="选择日期时间"]'),
+        page.get_by_placeholder("选择日期时间"),
+    )
+
+
+def ant_picker_dropdown_locator(page: Page) -> Locator:
+    return page.locator(".ant-picker-dropdown:not(.ant-picker-dropdown-hidden)").first
+
+
+def _parse_kuaishou_schedule_parts(schedule_at: str) -> tuple[int, int, int, int, int]:
+    parsed = datetime.strptime(schedule_at, "%Y-%m-%d %H:%M")
+    return parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute
+
+
+def _ant_picker_header_year_month(page: Page) -> tuple[int, int] | None:
+    dropdown = ant_picker_dropdown_locator(page)
+    if not dropdown.count():
+        return None
+    header_text = dropdown.locator(".ant-picker-header-view").first.inner_text()
+    match = re.search(r"(\d{4}).*?(\d{1,2})", header_text.replace("年", "-").replace("月", ""))
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _click_ant_picker_month_nav(page: Page, *, forward: bool) -> None:
+    dropdown = ant_picker_dropdown_locator(page)
+    button = dropdown.locator(".ant-picker-header-next-btn" if forward else ".ant-picker-header-prev-btn").first
+    if button.count():
+        button.click()
+        page.wait_for_timeout(250)
+
+
+def _select_ant_picker_day(page: Page, year: int, month: int, day: int) -> None:
+    dropdown = ant_picker_dropdown_locator(page)
+    for _ in range(24):
+        header = _ant_picker_header_year_month(page)
+        if header == (year, month):
+            break
+        if header is None:
+            break
+        current_year, current_month = header
+        _click_ant_picker_month_nav(page, forward=(year, month) > (current_year, current_month))
+
+    day_cells = dropdown.locator(".ant-picker-cell:not(.ant-picker-cell-disabled) .ant-picker-cell-inner")
+    for index in range(day_cells.count()):
+        cell = day_cells.nth(index)
+        if cell.inner_text().strip() == str(day):
+            cell.click()
+            page.wait_for_timeout(250)
+            return
+    raise RuntimeError(f"快手日期选择器里未找到可用日期：{year}-{month:02d}-{day:02d}")
+
+
+def _select_ant_picker_time_column(page: Page, column_index: int, target_text: str, *, description: str) -> None:
+    dropdown = ant_picker_dropdown_locator(page)
+    column = dropdown.locator(".ant-picker-time-panel-column").nth(column_index)
+    column.wait_for(state="visible", timeout=10_000)
+    items = column.locator("li")
+    item_count = items.count()
+    if item_count == 0:
+        raise RuntimeError(f"未找到快手 {description} 选项。")
+
+    target_index = None
+    padded = str(target_text).zfill(2)
+    for index in range(item_count):
+        item_text = items.nth(index).inner_text().strip()
+        if item_text in {padded, str(target_text)}:
+            target_index = index
+            break
+    if target_index is None:
+        raise RuntimeError(f"未找到快手 {description} 选项：{target_text}")
+
+    items.nth(target_index).scroll_into_view_if_needed()
+    items.nth(target_index).click()
+    page.wait_for_timeout(200)
+
+
+def confirm_ant_picker(page: Page) -> None:
+    dropdown = ant_picker_dropdown_locator(page)
+    confirm_button = dropdown.locator(".ant-picker-footer button.ant-btn-primary").first
+    confirm_button.wait_for(state="visible", timeout=10_000)
+    confirm_button.click(force=True)
+    page.wait_for_timeout(400)
+    if ant_picker_dropdown_locator(page).count():
+        datetime_input = find_optional_locator(page, scheduled_datetime_input_locators(page), timeout_ms=5_000)
+        if datetime_input is not None:
+            datetime_input.evaluate("element => element.blur()")
+            page.wait_for_timeout(300)
+
+
+def set_kuaishou_scheduled_publish_time(page: Page, schedule_at: str, settings: KuaishouPublishSettings) -> None:
+    year, month, day, hour, minute = _parse_kuaishou_schedule_parts(schedule_at)
+    click_locator(page, scheduled_publish_label_locators(page), description="快手定时发布选项", timeout_ms=30_000)
+    datetime_input = wait_for_locator(
+        page,
+        scheduled_datetime_input_locators(page),
+        description="快手定时发布日期时间输入框",
+        timeout_ms=15_000,
+    )
+    datetime_input.click()
+    page.wait_for_timeout(400)
+    wait_for_locator(page, (ant_picker_dropdown_locator(page),), description="快手日期时间选择弹层", timeout_ms=10_000)
+    _select_ant_picker_day(page, year, month, day)
+    _select_ant_picker_time_column(page, 0, str(hour), description="定时发布小时")
+    _select_ant_picker_time_column(page, 1, str(minute), description="定时发布分钟")
+    _select_ant_picker_time_column(page, 2, "00", description="定时发布秒")
+    confirm_ant_picker(page)
+
+    expected_prefix = f"{schedule_at}:00"
+    current_value = datetime_input.input_value().strip()
+    if not current_value.startswith(schedule_at):
+        raise RuntimeError(f"快手定时发布时间未生效，期望 {expected_prefix}，当前 {current_value or '空'}。")
+    if ant_picker_dropdown_locator(page).count():
+        raise RuntimeError("快手定时发布弹层仍未关闭，请检查确定按钮。")
+
+    scheduled_mode = page.locator('input[type="radio"][value="2"]').first
+    if scheduled_mode.count() and not scheduled_mode.is_checked():
+        raise RuntimeError("快手定时发布模式未保持选中状态。")
+
+    print(f"已设置快手定时发布时间：{current_value}")
+
+
 def to_cdp_settings(settings: KuaishouPublishSettings) -> PublishSettings:
     return PublishSettings(
         output_dir=settings.output_dir,
@@ -654,6 +791,7 @@ def to_cdp_settings(settings: KuaishouPublishSettings) -> PublishSettings:
         after_cover_confirm_wait_ms=0,
         after_declaration_open_wait_ms=0,
         auto_submit_publish=False,
+        schedule_at=settings.schedule_at,
         debug_screenshot=settings.debug_screenshot,
         dry_run=settings.dry_run,
     )
@@ -675,6 +813,8 @@ def run_kuaishou_publish(settings: KuaishouPublishSettings, assets: KuaishouPubl
             upload_cover_image(page, assets, settings)
             select_author_statement(page, settings)
             select_publish_location(page, settings)
+            if settings.schedule_at:
+                set_kuaishou_scheduled_publish_time(page, settings.schedule_at, settings)
         except Exception:
             settings.debug_screenshot.parent.mkdir(parents=True, exist_ok=True)
             try:

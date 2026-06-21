@@ -29,6 +29,7 @@ from tools.douyin_publish import (  # noqa: E402
     DEFAULT_TYPING_DELAY_MS,
     find_default_chrome_path,
     find_single_file,
+    normalize_schedule_at,
     read_utf8_text,
     resolve_path,
 )
@@ -100,6 +101,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--windows-open-dialog-wait-ms", type=int, default=DEFAULT_WINDOWS_OPEN_DIALOG_WAIT_MS)
     parser.add_argument("--upload-step-screenshot", default=str(DEFAULT_UPLOAD_STEP_SCREENSHOT))
     parser.add_argument("--debug-screenshot", default=str(DEFAULT_DEBUG_SCREENSHOT))
+    parser.add_argument(
+        "--schedule-at",
+        default="",
+        help="定时发布时间，格式 yyyy-MM-dd HH:mm；传入后会自动勾选「定时发布」并填写时间。",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -179,6 +185,7 @@ def resolve_settings(args: argparse.Namespace) -> KuaishouPublishSettings:
         windows_open_dialog_wait_ms=max(0, int(args.windows_open_dialog_wait_ms)),
         upload_step_screenshot=resolve_path(args.upload_step_screenshot),
         debug_screenshot=resolve_path(args.debug_screenshot),
+        schedule_at=normalize_schedule_at(getattr(args, "schedule_at", "")),
         dry_run=bool(args.dry_run),
     )
 
