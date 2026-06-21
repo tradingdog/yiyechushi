@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Literal, Sequence
 from urllib.error import URLError
@@ -85,6 +87,7 @@ class PublishSettings:
     after_cover_confirm_wait_ms: int
     after_declaration_open_wait_ms: int
     auto_submit_publish: bool
+    schedule_at: str | None
     debug_screenshot: Path
     dry_run: bool
 
@@ -192,6 +195,11 @@ def parse_args() -> argparse.Namespace:
         help="显式开启后，脚本才会自动点击最终发布按钮；默认保留给人工审核后手动发布。",
     )
     parser.add_argument(
+        "--schedule-at",
+        default="",
+        help="定时发布时间，格式 yyyy-MM-dd HH:mm；传入后会自动勾选「定时发布」并填写时间。",
+    )
+    parser.add_argument(
         "--debug-screenshot",
         default=str(DEFAULT_DEBUG_SCREENSHOT),
         help=f"运行失败时保存页面截图的位置，默认 {DEFAULT_DEBUG_SCREENSHOT}",
@@ -221,6 +229,22 @@ def find_default_chrome_path() -> Path | None:
     return None
 
 
+def normalize_schedule_at(value: object) -> str | None:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    normalized = raw_value.replace("T", " ")
+    match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})", normalized)
+    if not match:
+        raise RuntimeError("定时发布时间格式应为 yyyy-MM-dd HH:mm。")
+    year, month, day, hour, minute = (int(part) for part in match.groups())
+    try:
+        parsed = datetime(year, month, day, hour, minute)
+    except ValueError as exc:
+        raise RuntimeError(f"定时发布时间无效：{normalized}") from exc
+    return parsed.strftime("%Y-%m-%d %H:%M")
+
+
 def resolve_settings(args: argparse.Namespace) -> PublishSettings:
     ensure_runtime_config_loaded()
 
@@ -230,6 +254,8 @@ def resolve_settings(args: argparse.Namespace) -> PublishSettings:
 
     chrome_path_text = str(args.chrome_path or "").strip()
     chrome_path = resolve_path(chrome_path_text) if chrome_path_text else find_default_chrome_path()
+    schedule_at = normalize_schedule_at(getattr(args, "schedule_at", ""))
+    auto_submit_publish = bool(args.auto_submit_publish) or schedule_at is not None
 
     return PublishSettings(
         output_dir=output_dir,
@@ -245,7 +271,8 @@ def resolve_settings(args: argparse.Namespace) -> PublishSettings:
         after_open_cover_wait_ms=parse_non_negative_int(args.after_open_cover_wait_ms, field_name="after-open-cover-wait-ms", default=DEFAULT_AFTER_OPEN_COVER_WAIT_MS),
         after_cover_confirm_wait_ms=parse_non_negative_int(args.after_cover_confirm_wait_ms, field_name="after-cover-confirm-wait-ms", default=DEFAULT_AFTER_COVER_CONFIRM_WAIT_MS),
         after_declaration_open_wait_ms=parse_non_negative_int(args.after_declaration_open_wait_ms, field_name="after-declaration-open-wait-ms", default=DEFAULT_AFTER_DECLARATION_OPEN_WAIT_MS),
-        auto_submit_publish=bool(args.auto_submit_publish),
+        auto_submit_publish=auto_submit_publish,
+        schedule_at=schedule_at,
         debug_screenshot=resolve_path(args.debug_screenshot),
         dry_run=bool(args.dry_run),
     )
@@ -800,6 +827,176 @@ def publish_editor_resume_locators(page: Page) -> tuple[Locator, ...]:
     return declaration_select_locators(page) + title_input_locators(page)
 
 
+def scheduled_publish_label_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.locator('label:has(input[type="checkbox"][value="1"])'),
+        page.locator("label").filter(has_text="定时发布"),
+    )
+
+
+def scheduled_datetime_input_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.locator('input[placeholder="日期和时间"]'),
+        page.get_by_placeholder("日期和时间"),
+    )
+
+
+def datepicker_panel_locator(page: Page) -> Locator:
+    return page.locator(".semi-popover-wrapper-show .semi-datepicker").first
+
+
+def _parse_schedule_parts(schedule_at: str) -> tuple[int, int, int, int, int]:
+    parsed = datetime.strptime(schedule_at, "%Y-%m-%d %H:%M")
+    return parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute
+
+
+def _datepicker_header_month_year(page: Page) -> tuple[int, int] | None:
+    panel = datepicker_panel_locator(page)
+    if not panel.count():
+        return None
+    header_text = panel.locator(".semi-datepicker-navigation-month, .semi-datepicker-month-grid").first.inner_text()
+    match = re.search(r"(\d{4}).*?(\d{1,2})", header_text.replace("年", "-").replace("月", ""))
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _click_datepicker_month_nav(page: Page, *, forward: bool) -> None:
+    panel = datepicker_panel_locator(page)
+    buttons = panel.locator(".semi-datepicker-navigation-month button, .semi-datepicker-navigation button")
+    if buttons.count() >= 2:
+        buttons.nth(1 if forward else 0).click()
+        page.wait_for_timeout(250)
+        return
+    arrow = panel.locator(".semi-icon-chevron_right" if forward else ".semi-icon-chevron_left").first
+    if arrow.count():
+        arrow.click()
+        page.wait_for_timeout(250)
+
+
+def _select_datepicker_day(page: Page, year: int, month: int, day: int) -> None:
+    panel = datepicker_panel_locator(page)
+    for _ in range(24):
+        header = _datepicker_header_month_year(page)
+        if header == (year, month):
+            break
+        if header is None:
+            break
+        current_year, current_month = header
+        forward = (year, month) > (current_year, current_month)
+        _click_datepicker_month_nav(page, forward=forward)
+    day_cells = panel.locator(".semi-datepicker-day:not(.semi-datepicker-day-disabled)")
+    for index in range(day_cells.count()):
+        cell = day_cells.nth(index)
+        if cell.inner_text().strip() == str(day):
+            cell.click()
+            page.wait_for_timeout(250)
+            return
+    raise RuntimeError(f"日期选择器里未找到可用日期：{year}-{month:02d}-{day:02d}")
+
+
+def _select_scroll_list_value(page: Page, list_selector: str, target_text: str, *, description: str) -> None:
+    panel = page.locator(".semi-popover-wrapper-show")
+    wheel = panel.locator(list_selector).first
+    wheel.wait_for(state="visible", timeout=10_000)
+    items = wheel.locator("li")
+    item_count = items.count()
+    if item_count == 0:
+        raise RuntimeError(f"未找到 {description} 滚轮选项。")
+
+    selected_index = None
+    target_index = None
+    for index in range(item_count):
+        item = items.nth(index)
+        item_text = item.inner_text().strip()
+        item_class = item.get_attribute("class") or ""
+        if "semi-scrolllist-item-selected" in item_class:
+            selected_index = index
+        if item_text == target_text or item_text.startswith(target_text):
+            target_index = index
+
+    if target_index is None:
+        padded = target_text.zfill(2)
+        for index in range(item_count):
+            item_text = items.nth(index).inner_text().strip()
+            if item_text in {padded, f"{padded}时", f"{padded}分"}:
+                target_index = index
+                break
+
+    if target_index is None:
+        raise RuntimeError(f"未找到 {description} 选项：{target_text}")
+
+    outer = wheel.locator(".semi-scrolllist-list-outer").first
+    if selected_index is not None and outer.count():
+        scroll_delta = (target_index - selected_index) * 36
+        outer.evaluate("(element, delta) => { element.scrollTop += delta; }", scroll_delta)
+        page.wait_for_timeout(150)
+    items.nth(target_index).click()
+    page.wait_for_timeout(200)
+
+
+def dismiss_datetime_picker(page: Page) -> None:
+    if not page.locator(".semi-popover-wrapper-show").count():
+        return
+    datetime_input = find_optional_locator(page, scheduled_datetime_input_locators(page), timeout_ms=5_000)
+    if datetime_input is not None:
+        box = datetime_input.bounding_box()
+        if box:
+            page.mouse.click(box["x"] + box["width"] + 40, box["y"] + box["height"] / 2)
+            page.wait_for_timeout(400)
+    if page.locator(".semi-popover-wrapper-show").count():
+        title_input = find_optional_locator(page, title_input_locators(page), timeout_ms=5_000)
+        if title_input is not None:
+            box = title_input.bounding_box()
+            if box:
+                page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                page.wait_for_timeout(400)
+
+
+def set_scheduled_publish_time(page: Page, schedule_at: str, settings: PublishSettings) -> None:
+    year, month, day, hour, minute = _parse_schedule_parts(schedule_at)
+    click_locator(page, scheduled_publish_label_locators(page), description="定时发布选项", timeout_ms=30_000)
+    datetime_input = wait_for_locator(
+        page,
+        scheduled_datetime_input_locators(page),
+        description="定时发布日期时间输入框",
+        timeout_ms=15_000,
+    )
+    datetime_input.click()
+    page.wait_for_timeout(400)
+    wait_for_locator(page, (datepicker_panel_locator(page),), description="日期时间选择弹层", timeout_ms=10_000)
+    _select_datepicker_day(page, year, month, day)
+
+    switch_time = datepicker_panel_locator(page).locator(".semi-datepicker-switch-time").first
+    if switch_time.count():
+        switch_time.click()
+        page.wait_for_timeout(300)
+
+    _select_scroll_list_value(
+        page,
+        '[class*="list-hour"]',
+        str(hour).zfill(2),
+        description="定时发布小时",
+    )
+    _select_scroll_list_value(
+        page,
+        '[class*="list-minute"]',
+        str(minute).zfill(2),
+        description="定时发布分钟",
+    )
+    dismiss_datetime_picker(page)
+
+    current_value = datetime_input.input_value().strip()
+    if current_value != schedule_at:
+        raise RuntimeError(f"定时发布时间未生效，期望 {schedule_at}，当前 {current_value or '空'}。")
+
+    scheduled_mode = page.locator('input[type="checkbox"][value="1"]').first
+    if scheduled_mode.count() and not scheduled_mode.is_checked():
+        raise RuntimeError("定时发布模式未保持选中状态。")
+
+    print(f"已设置定时发布时间：{schedule_at}")
+
+
 def ensure_publish_editor_ready(page: Page) -> None:
     if find_optional_locator(page, title_input_locators(page), timeout_ms=2_000):
         print("当前已在抖音图文发布页。")
@@ -1017,6 +1214,8 @@ def run_publish(settings: PublishSettings, assets: PublishAssets) -> None:
                 select_publish_location(page, settings)
             except Exception as exc:
                 print(f"位置选择步骤跳过：{exc}")
+            if settings.schedule_at:
+                set_scheduled_publish_time(page, settings.schedule_at, settings)
             if settings.auto_submit_publish:
                 submit_final_publish(page)
             else:
@@ -1065,6 +1264,7 @@ def publish_output_dir(
             after_cover_confirm_wait_ms=DEFAULT_AFTER_COVER_CONFIRM_WAIT_MS,
             after_declaration_open_wait_ms=DEFAULT_AFTER_DECLARATION_OPEN_WAIT_MS,
             auto_submit_publish=auto_submit_publish,
+            schedule_at=None,
             debug_screenshot=str(DEFAULT_DEBUG_SCREENSHOT),
             dry_run=dry_run,
         )

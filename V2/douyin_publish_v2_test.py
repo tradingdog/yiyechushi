@@ -84,6 +84,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--after-cover-confirm-wait-ms", type=int, default=DEFAULT_AFTER_COVER_CONFIRM_WAIT_MS)
     parser.add_argument("--after-declaration-open-wait-ms", type=int, default=DEFAULT_AFTER_DECLARATION_OPEN_WAIT_MS)
     parser.add_argument("--auto-submit-publish", action="store_true", help="显式开启后才自动点击最终发布；默认停在人工发布前。")
+    parser.add_argument(
+        "--schedule-at",
+        default="",
+        help="定时发布时间，格式 yyyy-MM-dd HH:mm；传入后会自动勾选「定时发布」并填写时间。",
+    )
     parser.add_argument("--debug-screenshot", default=str(DEFAULT_DEBUG_SCREENSHOT))
     parser.add_argument("--dry-run", action="store_true", help="只校验 V2 文件与顺序，不连接 Chrome。")
     return parser.parse_args()

@@ -76,7 +76,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.42"
+PANEL_VERSION = "v1.44"
 PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
     "image_provider": "official",
     "image_aspect_ratio": "2:3",
@@ -496,19 +496,24 @@ def _wait_for_publish_login(line: str, platform_label: str) -> str | None:
     return None
 
 
-def run_single_platform_publish(platform_key: str, output_dir: Path) -> None:
+def run_single_platform_publish(platform_key: str, output_dir: Path, schedule_at: str | None = None) -> None:
     platform = PUBLISH_PLATFORMS[platform_key]
     script_path = ROOT_DIR / platform["script"]
     if not script_path.exists():
         raise FileNotFoundError(f"发布脚本不存在：{script_path}")
     append_publish_log(f"===== 开始发布：{platform['label']} =====")
+    if platform_key == "douyin" and schedule_at:
+        append_publish_log(f"抖音定时发布：{schedule_at}")
     publish_env = os.environ.copy()
     publish_env["PYTHONUNBUFFERED"] = "1"
     publish_env["PYTHONIOENCODING"] = "utf-8"
     publish_env["PYTHONUTF8"] = "1"
     python_exe = resolve_project_python()
+    cmd = [python_exe, str(script_path), str(output_dir)]
+    if platform_key == "douyin" and schedule_at:
+        cmd.extend(["--schedule-at", schedule_at])
     proc = subprocess.Popen(
-        [python_exe, str(script_path), str(output_dir)],
+        cmd,
         cwd=str(REPO_ROOT),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -537,7 +542,7 @@ def run_single_platform_publish(platform_key: str, output_dir: Path) -> None:
     append_publish_log(f"===== 完成发布：{platform['label']} =====")
 
 
-def publish_worker(output_dir_text: str, platform_keys: list[str]) -> None:
+def publish_worker(output_dir_text: str, platform_keys: list[str], schedule_at: str | None = None) -> None:
     global PUBLISH_RUNNING, PUBLISH_ERROR, PUBLISH_OUTPUT_DIR, PUBLISH_CURRENT_PLATFORM, PUBLISH_QUEUE
     try:
         output_dir = resolve_output_path(output_dir_text)
@@ -557,7 +562,8 @@ def publish_worker(output_dir_text: str, platform_keys: list[str]) -> None:
                     PUBLISH_QUEUE.remove(platform_key)
             platform_label = PUBLISH_PLATFORMS[platform_key]["label"]
             try:
-                run_single_platform_publish(platform_key, output_dir)
+                platform_schedule_at = schedule_at if platform_key == "douyin" else None
+                run_single_platform_publish(platform_key, output_dir, platform_schedule_at)
             except Exception as exc:  # noqa: BLE001
                 failed_platforms.append(platform_label)
                 append_publish_log(f"===== {platform_label} 发布失败，继续下一平台 =====")
@@ -589,10 +595,23 @@ def publish_worker(output_dir_text: str, platform_keys: list[str]) -> None:
             PUBLISH_QUEUE = []
 
 
-def start_publish_task(output_dir_text: str, platform_keys: list[str]) -> None:
+def normalize_publish_schedule_at(value: object) -> str | None:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    normalized = raw_value.replace("T", " ")
+    match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})", normalized)
+    if not match:
+        raise ValueError("定时发布时间格式应为 yyyy-MM-dd HH:mm。")
+    return f"{match.group(1)}-{match.group(2)}-{match.group(3)} {match.group(4)}:{match.group(5)}"
+
+
+def start_publish_task(output_dir_text: str, platform_keys: list[str], schedule_at: str | None = None) -> None:
     global PUBLISH_RUNNING, PUBLISH_ERROR, PUBLISH_LOG_LINES, PUBLISH_LOGIN_EVENT
     if not platform_keys:
         raise ValueError("请至少选择一个发布平台。")
+    if schedule_at and "douyin" not in platform_keys:
+        raise ValueError("定时发布需勾选抖音平台。")
     unknown = [key for key in platform_keys if key not in PUBLISH_PLATFORMS]
     if unknown:
         raise ValueError(f"未知平台：{', '.join(unknown)}")
@@ -603,7 +622,11 @@ def start_publish_task(output_dir_text: str, platform_keys: list[str]) -> None:
         PUBLISH_ERROR = ""
         PUBLISH_LOG_LINES = []
         PUBLISH_LOGIN_EVENT = threading.Event()
-    worker = threading.Thread(target=publish_worker, args=(output_dir_text, platform_keys), daemon=True)
+    worker = threading.Thread(
+        target=publish_worker,
+        args=(output_dir_text, platform_keys, schedule_at),
+        daemon=True,
+    )
     worker.start()
 
 
@@ -924,9 +947,15 @@ HTML_PAGE = """<!doctype html>
     .custom-preview-box{position:relative;max-width:min(92vw,980px);max-height:92vh}
     .custom-preview-box img{max-width:100%;max-height:92vh;border-radius:12px;box-shadow:var(--shadow);display:block;cursor:zoom-out}
     .custom-preview-close{position:absolute;top:-10px;right:-10px;width:34px;height:34px;border-radius:999px;border:1px solid #475569;background:#111827;color:#f8fafc;font-size:18px;cursor:pointer}
-    .publish-platform-list{display:flex;flex-direction:column;gap:5px;flex:1}
+    .publish-platform-list{display:flex;flex-direction:column;gap:5px;flex:1;min-height:0;overflow:auto}
     .publish-platform-item{display:flex;align-items:center;gap:6px;font-size:12px;color:#dbe7ff;border:1px solid #2f3b55;border-radius:8px;padding:6px 8px;background:#0f172a;cursor:pointer;white-space:nowrap}
     .publish-platform-item input{width:auto;margin:0;accent-color:#22c55e;flex:0 0 auto}
+    .publish-schedule{display:flex;flex-direction:column;gap:6px;flex:0 0 auto;border:1px solid #2f3b55;border-radius:8px;padding:8px;background:#0f172a}
+    .publish-schedule-toggle{display:flex;align-items:center;gap:6px;font-size:12px;color:#dbe7ff;cursor:pointer;margin:0}
+    .publish-schedule-toggle input{width:auto;margin:0;accent-color:#22c55e;flex:0 0 auto}
+    .publish-schedule-input{width:100%;padding:6px 8px;border:1px solid #334155;border-radius:8px;background:#0b1220;color:#e2e8f0;font-size:12px}
+    .publish-schedule-input:disabled{opacity:.45;cursor:not-allowed}
+    .publish-schedule-hint{font-size:10px;color:#94a3b8;line-height:1.4}
     .publish-status{min-height:48px;max-height:120px;overflow:auto;font-size:11px;color:var(--sub);white-space:pre-wrap;line-height:1.4;border:1px solid #2a364f;border-radius:8px;padding:6px;background:#0b1220}
     .btn-publish{width:100%;padding:10px 6px;border:1px solid #4b5563;border-radius:10px;background:linear-gradient(180deg,#14532d,#052e16);color:#dcfce7;font-size:13px;font-weight:700;cursor:pointer}
     .history-search{width:100%;margin:0 0 8px;padding:7px 10px;border:1px solid #334155;border-radius:8px;background:#0b1220;color:#e2e8f0;font-size:12px}
@@ -1495,6 +1524,14 @@ HTML_PAGE = """<!doctype html>
           <label class="publish-platform-item"><input type="checkbox" value="weixin_mp" checked />公众号</label>
           <label class="publish-platform-item"><input type="checkbox" value="weixin_channels" checked />视频号</label>
         </div>
+        <div id="publishSchedule" class="publish-schedule">
+          <label class="publish-schedule-toggle">
+            <input id="publishScheduleEnabled" type="checkbox" />
+            定时发布
+          </label>
+          <input id="publishScheduleAt" class="publish-schedule-input" type="datetime-local" disabled />
+          <div class="publish-schedule-hint">当前仅抖音支持定时发布；其它平台仍按立即发布流程执行。</div>
+        </div>
         <div id="publishStatus" class="publish-status">选中左侧菜品后，勾选平台并点击发布。</div>
         <button id="publishBtn" class="btn-publish" type="button">发布</button>
       </aside>
@@ -1938,7 +1975,8 @@ HTML_PAGE = """<!doctype html>
       });
       const data = await res.json();
       if(!res.ok){ throw new Error(data.error || "保存标签失败"); }
-      if(state.historyItemCache[path]){ state.historyItemCache[path].meal_tags = data.meal_tags || []; }
+      const cached = getHistoryCacheItem(path);
+      if(cached){ rememberHistoryCacheItem(path, {...cached, meal_tags: data.meal_tags || []}); }
       const card = Array.from($("history").querySelectorAll(".history-item")).find((el) => el.dataset.path === path);
       if(card){
         card.dataset.mealTags = JSON.stringify(data.meal_tags || []);
@@ -1968,7 +2006,7 @@ HTML_PAGE = """<!doctype html>
     }
 
     function getDishLabel(path){
-      const cached = state.historyItemCache[path];
+      const cached = getHistoryCacheItem(path);
       if(cached?.dish_name){ return cached.dish_name; }
       const base = String(path || "").split(/[\\\\/]/).pop() || "菜品";
       const parts = base.split("_");
@@ -1976,10 +2014,28 @@ HTML_PAGE = """<!doctype html>
     }
 
     function getDishPreviewImage(path){
-      const item = state.historyItemCache[path];
+      const item = getHistoryCacheItem(path);
       if(item?.preview_image){ return item.preview_image; }
       const images = item?.images || [];
       return images.length ? images[0] : "";
+    }
+
+    function rememberHistoryCacheItem(path, item){
+      const payload = {...(item || {}), path: item?.path || path};
+      const keys = new Set([path, payload.path].filter(Boolean));
+      keys.forEach((key) => {
+        state.historyItemCache[key] = payload;
+        const normalized = normalizeHistoryPath(key);
+        if(normalized){ state.historyItemCache[normalized] = payload; }
+      });
+    }
+
+    function getHistoryCacheItem(path){
+      if(!path){ return null; }
+      if(state.historyItemCache[path]){ return state.historyItemCache[path]; }
+      const normalized = normalizeHistoryPath(path);
+      if(normalized && state.historyItemCache[normalized]){ return state.historyItemCache[normalized]; }
+      return null;
     }
 
     async function hydratePublishPlanCache(){
@@ -1991,7 +2047,7 @@ HTML_PAGE = """<!doctype html>
           const res = await fetch(`/api/dish_detail?path=${encodeURIComponent(path)}`);
           const detail = await res.json();
           if(res.ok){
-            state.historyItemCache[path] = {...(state.historyItemCache[path] || {}), ...detail, path};
+            rememberHistoryCacheItem(path, {...(getHistoryCacheItem(path) || {}), ...detail, path: detail.output_dir || path});
           }
         }catch{}
       }));
@@ -2008,10 +2064,14 @@ HTML_PAGE = """<!doctype html>
       Object.values(state.publishPlan?.slots || {}).forEach((daySlots) => {
         PLAN_SLOT_KEYS.forEach((slot) => {
           const p = daySlots?.[slot];
-          if(p){ paths.add(normalizeHistoryPath(p)); }
+          if(p){ paths.add(p); }
         });
       });
       return paths;
+    }
+
+    function collectPlanAssignedPathsNormalized(){
+      return new Set([...collectPlanAssignedPaths()].map((path) => normalizeHistoryPath(path)).filter(Boolean));
     }
 
     function listPlanDateRange(){
@@ -2037,7 +2097,7 @@ HTML_PAGE = """<!doctype html>
       const data = await res.json();
       if(!res.ok){ throw new Error(data.error || "保存发布计划失败"); }
       state.publishPlan = data;
-      renderPublishPlan();
+      await renderPublishPlan();
       applyHistorySearchFilter();
       reconcileSelectionSource();
       return data;
@@ -2050,12 +2110,14 @@ HTML_PAGE = """<!doctype html>
     }
 
     function removePathFromPlanMemory(plan, path, exceptDate="", exceptSlot=""){
+      const target = normalizeHistoryPath(path);
       Object.keys(plan.slots || {}).forEach((date) => {
         PLAN_SLOT_KEYS.forEach((slot) => {
-          if(plan.slots[date][slot] === path){
-            if(date === exceptDate && slot === exceptSlot){ return; }
-            clearPlanSlotInMemory(plan, date, slot);
-          }
+          const slotPath = plan.slots[date][slot];
+          if(!slotPath){ return; }
+          if(normalizeHistoryPath(slotPath) !== target){ return; }
+          if(date === exceptDate && slot === exceptSlot){ return; }
+          clearPlanSlotInMemory(plan, date, slot);
         });
       });
     }
@@ -2118,14 +2180,14 @@ HTML_PAGE = """<!doctype html>
 
     async function openPlanDishLightbox(path){
       if(!path){ return; }
-      let item = state.historyItemCache[path];
+      let item = getHistoryCacheItem(path);
       if(!item?.images?.length){
         try{
           const res = await fetch(`/api/dish_detail?path=${encodeURIComponent(path)}`);
           const detail = await res.json();
           if(res.ok){
-            item = {...(item || {}), ...detail, path};
-            state.historyItemCache[path] = item;
+            item = {...(item || {}), ...detail, path: detail.output_dir || path};
+            rememberHistoryCacheItem(path, item);
           }
         }catch{}
       }
@@ -2170,7 +2232,8 @@ HTML_PAGE = """<!doctype html>
       await savePublishPlan(plan);
     }
 
-    function renderPublishPlan(){
+    async function renderPublishPlan(){
+      await hydratePublishPlanCache();
       const box = $("planList");
       if(!box){ return; }
       box.innerHTML = "";
@@ -2232,11 +2295,11 @@ HTML_PAGE = """<!doctype html>
       markSelectedDishUi();
     }
 
-    function initPublishPlanUi(){
+    async function initPublishPlanUi(){
       const plan = state.publishPlan || {};
       if($("planStartDate")){ $("planStartDate").value = plan.start || ""; }
       if($("planEndDate")){ $("planEndDate").value = plan.end || ""; }
-      renderPublishPlan();
+      await renderPublishPlan();
     }
 
     function bindHistoryPoolDropZone(){
@@ -2547,7 +2610,7 @@ HTML_PAGE = """<!doctype html>
     function applyHistorySearchFilter(){
       const q = (state.historySearchQuery || "").trim().toLowerCase();
       const mealFilter = state.historyMealFilter || "";
-      const inPlan = collectPlanAssignedPaths();
+      const inPlan = collectPlanAssignedPathsNormalized();
       let visible = 0;
       Array.from($("history").querySelectorAll(".history-item")).forEach((el) => {
         const path = normalizeHistoryPath(el.dataset.path || "");
@@ -2574,6 +2637,44 @@ HTML_PAGE = """<!doctype html>
       return Array.from($("publishPlatforms").querySelectorAll('input[type="checkbox"]:checked'))
         .map((el) => el.value)
         .filter(Boolean);
+    }
+
+    function formatPublishScheduleAt(value){
+      const text = String(value || "").trim();
+      if(!text){ return ""; }
+      const match = text.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
+      return match ? `${match[1]} ${match[2]}` : text.replace("T", " ");
+    }
+
+    function defaultPublishScheduleLocalValue(){
+      const dt = new Date();
+      dt.setDate(dt.getDate() + 1);
+      dt.setHours(7, 0, 0, 0);
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+    }
+
+    function syncPublishScheduleUi(){
+      const enabled = Boolean($("publishScheduleEnabled")?.checked);
+      const input = $("publishScheduleAt");
+      if(!input){ return; }
+      input.disabled = !enabled;
+      if(enabled && !input.value){
+        input.value = defaultPublishScheduleLocalValue();
+      }
+      const douyinSelected = getSelectedPublishPlatforms().includes("douyin");
+      const hint = document.querySelector(".publish-schedule-hint");
+      if(hint){
+        hint.textContent = enabled && !douyinSelected
+          ? "已开启定时发布，请同时勾选抖音；其它平台仍按立即发布执行。"
+          : "当前仅抖音支持定时发布；其它平台仍按立即发布流程执行。";
+      }
+    }
+
+    function bindPublishScheduleControls(){
+      $("publishScheduleEnabled")?.addEventListener("change", syncPublishScheduleUi);
+      $("publishPlatforms")?.addEventListener("change", syncPublishScheduleUi);
+      syncPublishScheduleUi();
     }
 
     function setPublishStatus(text, level=""){
@@ -2780,19 +2881,35 @@ HTML_PAGE = """<!doctype html>
         setPublishStatus("请至少勾选一个发布平台。", "warn");
         return;
       }
+      const scheduledPublish = Boolean($("publishScheduleEnabled")?.checked);
+      const scheduleAt = formatPublishScheduleAt($("publishScheduleAt")?.value);
+      if(scheduledPublish && !scheduleAt){
+        setPublishStatus("请填写定时发布时间。", "warn");
+        return;
+      }
+      if(scheduledPublish && !platforms.includes("douyin")){
+        setPublishStatus("定时发布需勾选抖音平台。", "warn");
+        return;
+      }
       state.publishLogIndex = 0;
       setPublishStatus("正在启动发布任务…");
       try{
         const res = await fetch("/api/publish_start", {
           method:"POST",
           headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({output_dir: outputPath, platforms})
+          body: JSON.stringify({
+            output_dir: outputPath,
+            platforms,
+            scheduled_publish: scheduledPublish,
+            schedule_at: scheduledPublish ? scheduleAt : ""
+          })
         });
         const data = await res.json();
         if(!res.ok){ throw new Error(data.error || "发布启动失败"); }
         state.publishPolling = true;
         startPublishStatusPolling();
-        appendLogs([`[${new Date().toLocaleTimeString()}] 发布任务已启动：${platforms.join("、")}`]);
+        const scheduleNote = scheduledPublish ? `（抖音定时 ${scheduleAt}）` : "";
+        appendLogs([`[${new Date().toLocaleTimeString()}] 发布任务已启动：${platforms.join("、")}${scheduleNote}`]);
         $("publishBtn").disabled = true;
         await fetchPublishStatus();
       }catch(err){
@@ -3715,7 +3832,7 @@ HTML_PAGE = """<!doctype html>
       setBatchEditMode(false);
       bumpSuppressHistoryAutoReload();
       list.forEach((path) => removeHistoryCardFromDom(path));
-      renderPublishPlan();
+      await renderPublishPlan();
       applyHistorySearchFilter();
     }
 
@@ -3733,7 +3850,7 @@ HTML_PAGE = """<!doctype html>
     function reconcileSelectionSource(){
       const path = normalizeHistoryPath(state.selectedHistoryPath || "");
       if(!path){ markSelectedDishUi(); return; }
-      const inPlan = collectPlanAssignedPaths().has(path);
+      const inPlan = collectPlanAssignedPathsNormalized().has(path);
       const poolVisible = Array.from($("history").querySelectorAll(".history-item")).some((el) => (
         normalizeHistoryPath(el.dataset.path) === path && el.style.display !== "none"
       ));
@@ -3747,14 +3864,14 @@ HTML_PAGE = """<!doctype html>
 
     async function selectDishByPath(path, source="pool"){
       if(!path){ return; }
-      let item = state.historyItemCache[path];
+      let item = getHistoryCacheItem(path);
       if(!item?.dish_name || !item?.images?.length){
         try{
           const res = await fetch(`/api/dish_detail?path=${encodeURIComponent(path)}`);
           const detail = await res.json();
           if(res.ok){
-            item = {...(item || {}), ...detail, path};
-            state.historyItemCache[path] = item;
+            item = {...(item || {}), ...detail, path: detail.output_dir || path};
+            rememberHistoryCacheItem(path, item);
           }
         }catch{}
       }
@@ -3812,7 +3929,7 @@ HTML_PAGE = """<!doctype html>
     }
 
     function createHistoryCard(item){
-      if(item?.path){ state.historyItemCache[item.path] = item; }
+      if(item?.path){ rememberHistoryCacheItem(item.path, item); }
       const mealTags = item.meal_tags || [];
       const div = document.createElement("div");
       div.className = "history-item draggable-pool";
@@ -3982,8 +4099,7 @@ HTML_PAGE = """<!doctype html>
         applyHistoryTaskBadges();
         applyHistorySearchFilter();
         if(collectPlanAssignedPaths().size){
-          await hydratePublishPlanCache();
-          renderPublishPlan();
+          await renderPublishPlan();
           reconcileSelectionSource();
         }
       }finally{
@@ -4416,7 +4532,7 @@ HTML_PAGE = """<!doctype html>
       if(data.publish_plan){ state.publishPlan = data.publish_plan; }
       if(data.custom_images_dir){ state.customImagesDir = data.custom_images_dir; }
       await loadHistory(true);
-      initPublishPlanUi();
+      await initPublishPlanUi();
       await fetchRunStatus();
       await fetchPublishStatus({silent: true});
       if(showMsg){ setStatus("页面状态已刷新。", "ok"); }
@@ -4654,6 +4770,7 @@ HTML_PAGE = """<!doctype html>
       $("publishReplaceExecBtn").onclick = submitPublishImageReplace;
       $("anchorPosterRegenBtn").onclick = () => { submitAnchorPosterRegenerate(); };
       $("publishBtn").onclick = startPublish;
+      bindPublishScheduleControls();
       $("loginModalConfirm").onclick = confirmPublishLogin;
       $("resultImg").ondblclick = () => openGalleryLightbox(state.galleryIndex);
       $("galleryLightboxClose")?.addEventListener("click", (event) => {
@@ -6028,8 +6145,12 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             try:
                 output_dir_text = str(payload.get("output_dir", "")).strip()
                 platform_keys = [str(item).strip() for item in (payload.get("platforms") or []) if str(item).strip()]
-                start_publish_task(output_dir_text, platform_keys)
-                self._send_json({"ok": True, "platforms": platform_keys})
+                scheduled_publish = bool(payload.get("scheduled_publish"))
+                schedule_at = normalize_publish_schedule_at(payload.get("schedule_at")) if scheduled_publish else None
+                if scheduled_publish and not schedule_at:
+                    raise ValueError("请填写定时发布时间。")
+                start_publish_task(output_dir_text, platform_keys, schedule_at)
+                self._send_json({"ok": True, "platforms": platform_keys, "schedule_at": schedule_at})
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": str(exc)}, code=400)
             return
