@@ -572,6 +572,84 @@ def pick_publish_copy_creative_angle() -> str:
     return random.choice(PUBLISH_COPY_CREATIVE_ANGLES)
 
 
+_COPY_WEEKDAY_LABELS: tuple[str, ...] = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def _resolve_season_label(month: int) -> str:
+    if month in {3, 4, 5}:
+        return "春季"
+    if month in {6, 7, 8}:
+        return "初夏/夏季"
+    if month in {9, 10, 11}:
+        return "秋季"
+    return "冬季"
+
+
+def _resolve_daypart_label(hour: int) -> str:
+    if 5 <= hour < 11:
+        return "早晨/上午"
+    if 11 <= hour < 14:
+        return "午间"
+    if 14 <= hour < 17:
+        return "下午"
+    if 17 <= hour < 21:
+        return "傍晚/晚餐"
+    return "夜间/夜宵"
+
+
+def build_copy_timely_context_block() -> str:
+    now = datetime.now()
+    month = now.month
+    weekday = _COPY_WEEKDAY_LABELS[now.weekday()]
+    daypart = _resolve_daypart_label(now.hour)
+    season = _resolve_season_label(month)
+    hints: list[str] = []
+    if month in {6, 7, 8}:
+        hints.extend(
+            [
+                "天热没胃口时需要开胃但不厚重的菜",
+                "冰饮冷饮吃多后，更想吃有咀嚼感的咸香热菜",
+                "周末居家小聚、阳台小酌",
+            ]
+        )
+    if month in {11, 12, 1, 2}:
+        hints.extend(["御寒暖胃", "砂锅炖菜", "年节家宴"])
+    if now.weekday() >= 5:
+        hints.append("周末加餐、来客、追剧夜宵")
+    else:
+        hints.append("工作日下班想快速解馋、替代外卖")
+    hint_text = "；".join(dict.fromkeys(hints))
+    return (
+        f"当下时间背景（自然融入，勿编造不存在的具体热搜名、新闻或榜单）：\n"
+        f"- 日期：{now.strftime('%Y年%m月%d日')} {weekday}，时段：{daypart}，时节：{season}\n"
+        f"- 可联想的生活场景：{hint_text}\n"
+        f"- timely_hook 须回答：这个时间点，用户为什么更想吃【本道菜】，而不是硬蹭无关热点。"
+    )
+
+
+def build_food_desire_framework_block() -> str:
+    return (
+        "人性食欲切入点（food_desire_angle 选 1–2 个最贴合本菜的，并在标题/描述里落地）：\n"
+        "- 即时解馋：嘴馋、饿急、想马上满足\n"
+        "- 好奇尝鲜：新搭配、反差做法、没试过\n"
+        "- 治愈抚慰：累了一天要热乎、浓香、软糯\n"
+        "- 社交分享：适合聚会、待客、能拍照发圈\n"
+        "- 怀旧家常：烟火气、下饭踏实、像家里做的\n"
+        "- 清爽平衡：怕腻、天热、想开胃不腻口\n"
+        "- 小酌佐餐：能边啃边聊、配酒不抢味\n"
+        "- 家宴带娃：安全不踩雷、大人小孩都能吃"
+    )
+
+
+def build_copy_three_pillars_block() -> str:
+    return (
+        "文案三要素（缺一不可，先想清楚再写标题/描述）：\n"
+        "1) 当下热点/时节：结合 timely_hook，把「此刻的生活场景」和本菜连起来；\n"
+        "2) 菜品特色 + 受众：结合 audience_analysis，写清谁会吃、在什么场景点开、本菜独特卖点；\n"
+        "3) 人性食欲：结合 food_desire_angle，触达用户想吃的底层冲动，再用具体感官细节落地。"
+    )
+
+
 def collect_dish_specific_markers(dish_payload: dict[str, str]) -> list[str]:
     markers: list[str] = []
     dish_name = str(dish_payload.get("dish_name", "")).strip()
@@ -1504,9 +1582,11 @@ def build_bubble_copy_prompt(
     return (
         f"{dish_line}上图是这道菜的海报，另有阿叶厨师角色参考。"
         f"写他在品尝这道菜时，气泡里最能勾起食欲的一句话——他是说话的人，不是菜。"
-        f"紧扣本菜的香气、口感、温度或惊喜瞬间，禁止「绝了」「太香了」等空话。"
+        f"须同时扣住：①当下时节/生活场景 ②本菜特色 ③人的食欲冲动（解馋/好奇/治愈等），用具体感官瞬间表达。"
+        f"禁止「绝了」「太香了」等空话。"
         f"{BUBBLE_COPY_MIN_CHARS}–{BUBBLE_COPY_MAX_CHARS} 个汉字，只输出这一句。"
-        f"{build_huasu_forbidden_prompt_block(max_items=28)}"
+        f"\n{build_copy_timely_context_block()}\n"
+        f"{build_huasu_forbidden_prompt_block(max_items=20)}"
         f"{history_block}{feedback_block}"
     )
 
@@ -2539,29 +2619,29 @@ def reject_cliche_bowl_title(title: str) -> str | None:
 
 V2_PUBLISH_PLATFORM_TASKS: dict[str, str] = {
     "douyin": (
-        f"先判断本菜在抖音的受众与点击动机，再写标题、描述和正好 5 个话题（不超过 5 个）。"
+        f"先完成三要素分析，再写抖音标题、描述和正好 5 个话题（不超过 5 个）。"
         f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}"
-        f"标题要有网感、像真人发图文会用的口语，让人想点进去；描述别写成菜谱说明书。"
+        f"标题要有网感、像真人发图文；描述从本菜感官 + 受众场景 + 食欲冲动写起，别写成菜谱步骤。"
     ),
     "xiaohongshu": (
-        f"先判断本菜在小红书的受众与种草点，再写标题、描述和 10 个话题。"
+        f"先完成三要素分析，再写小红书标题、描述和 10 个话题。"
         f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}"
-        f"标题可带一点小红书口吻（真实分享感），描述像笔记正文而非模板软文。"
+        f"标题像真实分享笔记；描述写清「我为什么在这个时节想吃它」。"
     ),
     "weixin_mp": (
-        f"先判断本菜在公众号的读者画像，再写标题、描述和正好 10 个话题（不超过 10 个）。"
+        f"先完成三要素分析，再写公众号标题、描述和正好 10 个话题（不超过 10 个）。"
         f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}"
-        f"标题可读性优先但仍要有吸引力，描述自然、有画面，避免公众号腔套话。"
+        f"标题可读、有吸引力；描述稳重但不空，突出本菜特色与食用场景。"
     ),
     "weixin_channels": (
-        f"先判断本菜在视频号的传播场景，再写标题、描述和正好 30 个话题（不超过 30 个）。"
+        f"先完成三要素分析，再写视频号标题、描述和正好 30 个话题（不超过 30 个）。"
         f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}"
-        f"标题适合图文信息流，描述短平快、有记忆点，别套万能美食模板。"
+        f"标题适合信息流；描述短平快，抓住时节 + 食欲点。"
     ),
     "kuaishou": (
-        f"先判断本菜在快手的受众与停留理由，再写标题、描述和 4 个话题。"
+        f"先完成三要素分析，再写快手标题、描述和 4 个话题。"
         f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}"
-        f"标题接地气、有网感，描述像老铁聊天而非教程腔。"
+        f"标题接地气；描述像跟朋友唠这道菜为什么此刻值得做。"
     ),
 }
 
@@ -2810,13 +2890,23 @@ def build_v2_publish_multimodal_prompt(
     )
     angle_line = creative_angle.strip() or pick_publish_copy_creative_angle()
     forbidden_block = build_huasu_forbidden_prompt_block(max_items=56)
+    pillars_block = build_copy_three_pillars_block()
+    timely_block = build_copy_timely_context_block()
+    desire_block = build_food_desire_framework_block()
     return f"""你是多平台美食图文运营。请结合附件里的「入选海报图」和下方菜品信息，为这道【全新菜品】写各平台发布文案。
 
+{pillars_block}
+
 写作流程（必须按顺序思考，不要跳步）：
-1) 只看本道菜的菜名、做法、海报视觉，单独分析：谁会点开、在什么场景会想做、他们的痛点/爽点是什么。
-2) 本次创意切入角度（标题与描述必须围绕此角度展开，不要写泛泛的「好吃」「简单」）：{angle_line}
-3) 基于受众分析，用当下中文互联网的口语/网络用语写标题和描述，让人一看就想点进去。
-4) 每个平台语气可不同，但都必须「针对本菜」写：多写这道菜的色泽、香气层次、咬下去的声响/质感、余味、搭配反差，禁止万能菜谱腔。
+1) 阅读「当下时间背景」，写出 timely_hook：此刻什么生活场景，让用户更想吃这道菜。
+2) 阅读菜品信息与海报，写出 audience_analysis：谁会吃、在什么场景点开、本菜独特卖点是什么。
+3) 从「人性食欲切入点」中选最贴合的，写出 food_desire_angle：触达哪种底层食欲冲动。
+4) 本次创意辅助角度（标题与描述须与之协调，但不能替代三要素）：{angle_line}
+5) 基于以上三点，用口语/网感写各平台标题与描述：多写色泽、香气、声响、质感、余味、搭配反差；禁止万能菜谱腔。
+
+{timely_block}
+
+{desire_block}
 
 {build_v2_publish_context_text(dish_payload)}
 
@@ -2824,17 +2914,18 @@ def build_v2_publish_multimodal_prompt(
 {platform_lines}
 
 通用要求：
-1) 标题、描述口语化、有网感；禁止菜谱说明书腔，禁止「先收藏」「原创融合」「想吃时照着做」等套话。
-2) 各平台标题禁止「几碗饭/连吃几碗/连炫几碗」类句式；勿用数量+碗作钩子，各平台标题句式要有变化。
-3) 五个平台的标题不得都用同一开头；至少 2 个平台换完全不同的钩子结构。
-4) 描述 2–4 句：从本菜感官细节、本次创意角度、做法反差或情绪切入，可自然提菜名，不要写成步骤清单；五个平台描述不要整段同义复述。
-5) topics 数组每项以 # 开头，不要菜品全名话题，不要 #阿叶造新菜（话题可复用通用标签，不受历史标题/描述限制）。
-6) 各平台 title 均必须不超过 20 个汉字（40 字符；汉字/表情/符号等非 ASCII 计 2、英文/数字计 1，表情也算字符），超出会被截断或判不合格。
-7) topics 数组长度必须与各平台要求完全一致：抖音 5、小红书 10、微信公众号 10、微信视频号 30、快手 4；不能合并公众号与视频号。
-8) 新写的标题、描述不得与上方历史列表重复或高度相似（仅改菜名、同义换词也算不合格）。
-9) 只输出 JSON，不要 Markdown，不要解释。必须先写 audience_analysis，再写各平台字段。格式如下：
+1) 标题、描述须能看出来源三要素（时节场景 + 本菜受众/特色 + 食欲冲动），不要只堆形容词。
+2) 各平台标题禁止「几碗饭/连吃几碗/连炫几碗」类句式；五个平台标题不得都用同一开头。
+3) 描述 2–4 句：从本菜感官细节切入，可自然提菜名，不要写成步骤清单；五个平台描述不要整段同义复述。
+4) topics 数组每项以 # 开头，不要菜品全名话题，不要 #阿叶造新菜（话题可复用通用标签，不受历史标题/描述限制）。
+5) 各平台 title 均必须不超过 20 个汉字（40 字符；汉字/表情/符号等非 ASCII 计 2、英文/数字计 1，表情也算字符），超出会被截断或判不合格。
+6) topics 数组长度必须与各平台要求完全一致：抖音 5、小红书 10、微信公众号 10、微信视频号 30、快手 4；不能合并公众号与视频号。
+7) 新写的标题、描述不得与上方历史列表重复或高度相似（仅改菜名、同义换词也算不合格）。
+8) 只输出 JSON，不要 Markdown，不要解释。必须先写 timely_hook、audience_analysis、food_desire_angle，再写各平台字段。格式如下：
 {{
-  "audience_analysis": "一句话：本菜具体受众是谁、在什么场景会点开、核心点击动机",
+  "timely_hook": "结合当下时节/时段/生活场景，说明为何此刻想吃这道菜",
+  "audience_analysis": "本菜具体受众、食用场景、核心点击动机与菜品特色",
+  "food_desire_angle": "触达的人性食欲（解馋/好奇/治愈/社交等）及如何写进文案",
   "douyin": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
   "xiaohongshu": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
   "weixin_mp": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
@@ -2881,8 +2972,8 @@ def audience_analysis_mentions_dish(analysis: str, dish_payload: dict[str, str])
 
 def parse_v2_publish_audience_analysis(raw_payload: dict[str, Any], dish_payload: dict[str, str]) -> str:
     analysis = str(raw_payload.get("audience_analysis", "")).strip()
-    if len(analysis) < 16:
-        raise ValueError("audience_analysis 过短或缺失，须具体说明本菜受众与点击动机。")
+    if len(analysis) < 20:
+        raise ValueError("audience_analysis 过短或缺失，须说明受众、场景、菜品特色与点击动机。")
     generic_markers = ("所有人群", "人人都爱", "任何人")
     if any(marker in analysis for marker in generic_markers):
         raise ValueError(f"audience_analysis 过于笼统，请写具体人群与场景：{analysis}")
@@ -2892,6 +2983,33 @@ def parse_v2_publish_audience_analysis(raw_payload: dict[str, Any], dish_payload
             f"audience_analysis 须提到本菜名或核心食材（如 {'/'.join(markers[:3])}）：{analysis}"
         )
     return analysis
+
+
+def parse_v2_publish_timely_hook(raw_payload: dict[str, Any]) -> str:
+    timely_hook = str(raw_payload.get("timely_hook", "")).strip()
+    if len(timely_hook) < 12:
+        raise ValueError("timely_hook 过短或缺失，须结合当下时节/时段说明为何此刻想吃这道菜。")
+    if re.search(r"(今日热搜|刚刚刷屏|热搜第一|爆款话题)", timely_hook):
+        raise ValueError(f"timely_hook 禁止编造具体热搜或新闻：{timely_hook}")
+    return timely_hook
+
+
+def parse_v2_publish_food_desire_angle(raw_payload: dict[str, Any]) -> str:
+    desire = str(raw_payload.get("food_desire_angle", "")).strip()
+    if len(desire) < 12:
+        raise ValueError("food_desire_angle 过短或缺失，须说明触达哪种人性食欲冲动。")
+    return desire
+
+
+def parse_v2_publish_strategy_fields(
+    raw_payload: dict[str, Any],
+    dish_payload: dict[str, str],
+) -> dict[str, str]:
+    return {
+        "timely_hook": parse_v2_publish_timely_hook(raw_payload),
+        "audience_analysis": parse_v2_publish_audience_analysis(raw_payload, dish_payload),
+        "food_desire_angle": parse_v2_publish_food_desire_angle(raw_payload),
+    }
 
 
 def validate_v2_publish_forbidden_phrases(platform_payload: dict[str, dict[str, Any]]) -> None:
@@ -3075,7 +3193,7 @@ def generate_v2_publish_copy_assets(
             if not raw_text:
                 raise ValueError("豆包未返回平台文案。")
             payload = extract_json_object_from_text(raw_text)
-            audience_analysis = parse_v2_publish_audience_analysis(payload, dish_payload)
+            strategy = parse_v2_publish_strategy_fields(payload, dish_payload)
             platform_payload = parse_v2_publish_platform_payload(payload)
             validate_v2_publish_forbidden_phrases(platform_payload)
             validate_v2_publish_copy_platform_diversity(
@@ -3095,8 +3213,10 @@ def generate_v2_publish_copy_assets(
             )
             saved["model"] = model
             saved["prompt_file"] = str(prompt_file)
-            saved["audience_analysis"] = audience_analysis
-            print(f"平台文案受众分析：{audience_analysis}")
+            saved.update(strategy)
+            print(f"平台文案时节切入：{strategy['timely_hook']}")
+            print(f"平台文案受众分析：{strategy['audience_analysis']}")
+            print(f"平台文案食欲角度：{strategy['food_desire_angle']}")
             print(f"图文标题已保存：{saved['title_file']}")
             print(f"图文描述正文已保存：{saved['description_body_file']}")
             for platform_key, platform_label, _count in V2_PUBLISH_PLATFORM_SPECS:
