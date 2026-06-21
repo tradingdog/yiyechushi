@@ -76,7 +76,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.45"
+PANEL_VERSION = "v1.49"
 PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
     "image_provider": "official",
     "image_aspect_ratio": "2:3",
@@ -117,7 +117,7 @@ PUBLISH_PLATFORMS: dict[str, dict[str, str]] = {
     "weixin_mp": {"label": "微信公众号", "script": "weixin_publish_v2_test.py"},
     "weixin_channels": {"label": "微信视频号", "script": "weixin_channels_publish_v2_test.py"},
 }
-SCHEDULE_PUBLISH_PLATFORMS = frozenset({"douyin", "kuaishou"})
+SCHEDULE_PUBLISH_PLATFORMS = frozenset({"douyin", "kuaishou", "weixin_channels"})
 LOGIN_WAIT_PATTERNS: tuple[tuple[str, str], ...] = (
     ("登录完成后请输入 y 继续", "y"),
     ("完成扫码登录后按回车继续", "enter"),
@@ -612,7 +612,7 @@ def start_publish_task(output_dir_text: str, platform_keys: list[str], schedule_
     if not platform_keys:
         raise ValueError("请至少选择一个发布平台。")
     if schedule_at and not any(key in SCHEDULE_PUBLISH_PLATFORMS for key in platform_keys):
-        raise ValueError("定时发布需勾选抖音或快手。")
+        raise ValueError("定时发布需勾选抖音、快手或视频号。")
     unknown = [key for key in platform_keys if key not in PUBLISH_PLATFORMS]
     if unknown:
         raise ValueError(f"未知平台：{', '.join(unknown)}")
@@ -1531,7 +1531,7 @@ HTML_PAGE = """<!doctype html>
             定时发布
           </label>
           <input id="publishScheduleAt" class="publish-schedule-input" type="datetime-local" disabled />
-          <div class="publish-schedule-hint">当前支持抖音、快手定时发布；其它平台仍按立即发布执行。</div>
+          <div class="publish-schedule-hint">当前支持抖音、快手、视频号定时发布；其它平台仍按立即发布执行。</div>
         </div>
         <div id="publishStatus" class="publish-status">选中左侧菜品后，勾选平台并点击发布。</div>
         <button id="publishBtn" class="btn-publish" type="button">发布</button>
@@ -2663,12 +2663,12 @@ HTML_PAGE = """<!doctype html>
       if(enabled && !input.value){
         input.value = defaultPublishScheduleLocalValue();
       }
-      const scheduleSupportedSelected = getSelectedPublishPlatforms().some((key) => ["douyin", "kuaishou"].includes(key));
+      const scheduleSupportedSelected = getSelectedPublishPlatforms().some((key) => ["douyin", "kuaishou", "weixin_channels"].includes(key));
       const hint = document.querySelector(".publish-schedule-hint");
       if(hint){
         hint.textContent = enabled && !scheduleSupportedSelected
-          ? "已开启定时发布，请同时勾选抖音或快手；其它平台仍按立即发布执行。"
-          : "当前支持抖音、快手定时发布；其它平台仍按立即发布执行。";
+          ? "已开启定时发布，请同时勾选抖音、快手或视频号；其它平台仍按立即发布执行。"
+          : "当前支持抖音、快手、视频号定时发布；其它平台仍按立即发布执行。";
       }
     }
 
@@ -2888,8 +2888,8 @@ HTML_PAGE = """<!doctype html>
         setPublishStatus("请填写定时发布时间。", "warn");
         return;
       }
-      if(scheduledPublish && !platforms.some((key) => ["douyin", "kuaishou"].includes(key))){
-        setPublishStatus("定时发布需勾选抖音或快手。", "warn");
+      if(scheduledPublish && !platforms.some((key) => ["douyin", "kuaishou", "weixin_channels"].includes(key))){
+        setPublishStatus("定时发布需勾选抖音、快手或视频号。", "warn");
         return;
       }
       state.publishLogIndex = 0;

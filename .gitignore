@@ -13,5 +13,6 @@ tools/cloudflared.exe
 V2/public_tunnel.log
 V2/public_tunnel_url.txt
 V2/bubble_copy_history.txt
+V2/publish_copy_history.txt
 V2/custom_image_gen/
 

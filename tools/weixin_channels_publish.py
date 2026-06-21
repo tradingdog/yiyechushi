@@ -37,6 +37,7 @@ from tools.douyin_publish import (  # noqa: E402
     click_locator_via_dom,
     ensure_cdp_browser_available,
     find_optional_locator,
+    normalize_schedule_at,
     resolve_page_by_keyword,
     type_text_humanly,
     wait_for_locator,
@@ -104,6 +105,7 @@ class WeixinChannelsPublishSettings:
     upload_step_screenshot: Path
     step_screenshot_dir: Path
     debug_screenshot: Path
+    schedule_at: str | None
     dry_run: bool
 
 
@@ -662,6 +664,193 @@ def fill_description_and_topics(
     save_flow_step_screenshot(page, settings, "07", "描述与话题输入后")
 
 
+def scroll_to_schedule_section(page: Page) -> None:
+    page.evaluate(
+        """() => {
+          document.querySelectorAll('*').forEach(el => {
+            if (el.scrollHeight > el.clientHeight + 100) el.scrollTop = el.scrollHeight;
+          });
+        }"""
+    )
+    page.wait_for_timeout(500)
+
+
+def scheduled_radio_locator(page: Page) -> Locator:
+    return page.locator('input.weui-desktop-form__radio[value="1"]').first
+
+
+def scheduled_label_locator(page: Page) -> Locator:
+    return page.locator("label.weui-desktop-form__check-label").filter(
+        has=page.locator('input.weui-desktop-form__radio[value="1"]')
+    ).first
+
+
+def schedule_datetime_input_locator(page: Page) -> Locator:
+    for candidate in (
+        page.locator("dl.weui-desktop-picker__date-time input.weui-desktop-form__input"),
+        page.locator("dl.weui-desktop-picker__date-time input"),
+    ):
+        if candidate.count():
+            return candidate.first
+    raise RuntimeError("未找到视频号定时发表时间输入框。")
+
+
+def schedule_picker_scope(page: Page) -> Locator:
+    return page.locator("dl.weui-desktop-picker__date-time, dl.weui-desktop-picker__focus").first
+
+
+def click_scheduled_publish_mode(page: Page) -> None:
+    label = scheduled_label_locator(page)
+    if label.count():
+        label.click()
+    else:
+        scheduled_radio_locator(page).click(force=True)
+    page.wait_for_timeout(400)
+
+
+def open_schedule_picker(page: Page) -> None:
+    dt_input = schedule_datetime_input_locator(page)
+    dt_input.click()
+    page.wait_for_timeout(500)
+    if page.locator(".weui-desktop-picker__panel_day").count():
+        return
+    for candidate in (
+        page.locator("dl.weui-desktop-picker__date-time .weui-desktop-icon__date"),
+        page.locator("dl.weui-desktop-picker__date-time dt"),
+    ):
+        if candidate.count():
+            candidate.first.click()
+            page.wait_for_timeout(500)
+            break
+    page.locator(".weui-desktop-picker__panel_day").first.wait_for(state="visible", timeout=10_000)
+
+
+def pick_schedule_day(page: Page, day: int) -> None:
+    day_panel = page.locator(".weui-desktop-picker__panel_day").first
+    day_panel.wait_for(state="visible", timeout=10_000)
+    day_text = str(day)
+    for selector in (
+        day_panel.locator("a").filter(has_text=day_text),
+        day_panel.locator("td").filter(has_text=day_text),
+    ):
+        for index in range(selector.count()):
+            cell = selector.nth(index)
+            if cell.inner_text().strip() != day_text:
+                continue
+            cell.click()
+            page.wait_for_timeout(300)
+            return
+    raise RuntimeError(f"视频号日期选择器里未找到 {day} 日。")
+
+
+def click_schedule_clock_icon(page: Page) -> None:
+    scope = schedule_picker_scope(page)
+    inner_time_input = scope.locator('input.weui-desktop-form__input[placeholder*="时间"]').first
+    if inner_time_input.count():
+        inner_time_input.click()
+        page.wait_for_timeout(300)
+    clock = scope.locator("i.weui-desktop-icon__time").first
+    clock.wait_for(state="visible", timeout=10_000)
+    clock.click(force=True)
+    page.wait_for_timeout(500)
+
+
+def pick_schedule_time_column(page: Page, panel_class_suffix: str, target: str, *, description: str) -> None:
+    scope = schedule_picker_scope(page)
+    panel = scope.locator(f".weui-desktop-picker__time__panel.weui-desktop-picker__time__{panel_class_suffix}").first
+    panel.wait_for(state="attached", timeout=10_000)
+    padded = str(int(target)).zfill(2)
+    items = panel.locator("li")
+    for index in range(items.count()):
+        item = items.nth(index)
+        text = item.inner_text().strip()
+        if text in {padded, str(int(target))}:
+            item.scroll_into_view_if_needed()
+            item.click(force=True)
+            page.wait_for_timeout(200)
+            return
+    raise RuntimeError(f"未找到视频号{description}选项：{target}。")
+
+
+def schedule_picker_open_locator(page: Page) -> Locator:
+    return page.locator(
+        ".weui-desktop-picker__panel_day:visible, .weui-desktop-picker__time__panel:visible"
+    )
+
+
+def is_schedule_picker_open(page: Page) -> bool:
+    return schedule_picker_open_locator(page).count() > 0
+
+
+def dismiss_schedule_picker(page: Page) -> None:
+    if not is_schedule_picker_open(page):
+        return
+
+    dt_input = schedule_datetime_input_locator(page)
+    box = dt_input.bounding_box()
+    if box:
+        page.mouse.click(box["x"] + box["width"] + 60, box["y"] + box["height"] / 2)
+        page.wait_for_timeout(400)
+
+    if is_schedule_picker_open(page):
+        for candidate in (
+            page.locator(".post-time-wrap .label").first,
+            page.locator(".post-time-wrap dt").first,
+            page.locator("div.form-item").filter(has=page.locator("div.label", has_text="发表时间")).first,
+        ):
+            if not candidate.count():
+                continue
+            label_box = candidate.bounding_box()
+            if label_box:
+                page.mouse.click(label_box["x"] + 8, label_box["y"] + label_box["height"] / 2)
+                page.wait_for_timeout(400)
+                break
+
+    if is_schedule_picker_open(page):
+        scope = schedule_picker_scope(page)
+        scope_box = scope.bounding_box()
+        if scope_box:
+            page.mouse.click(max(24, scope_box["x"] - 80), scope_box["y"] - 40)
+            page.wait_for_timeout(400)
+
+    if is_schedule_picker_open(page):
+        title_input = find_optional_locator(page, title_input_locators(page), timeout_ms=5_000)
+        if title_input is not None:
+            title_box = title_input.bounding_box()
+            if title_box:
+                page.mouse.click(title_box["x"] + title_box["width"] / 2, title_box["y"] + title_box["height"] / 2)
+                page.wait_for_timeout(400)
+
+    if is_schedule_picker_open(page):
+        raise RuntimeError("视频号定时发表弹层未能关闭，请检查空白确认点击逻辑。")
+
+
+def set_weixin_channels_scheduled_publish_time(
+    page: Page,
+    schedule_at: str,
+    settings: WeixinChannelsPublishSettings,
+) -> None:
+    day = int(schedule_at[8:10])
+    hour = str(int(schedule_at[11:13]))
+    minute = str(int(schedule_at[14:16]))
+    scroll_to_schedule_section(page)
+    click_scheduled_publish_mode(page)
+    open_schedule_picker(page)
+    pick_schedule_day(page, day)
+    click_schedule_clock_icon(page)
+    pick_schedule_time_column(page, "hour", hour, description="小时")
+    pick_schedule_time_column(page, "minute", minute, description="分钟")
+    dismiss_schedule_picker(page)
+
+    current_value = schedule_datetime_input_locator(page).input_value().strip()
+    if not current_value.startswith(schedule_at):
+        raise RuntimeError(f"视频号定时发表时间未生效，期望 {schedule_at}，当前 {current_value or '空'}。")
+    if not scheduled_radio_locator(page).is_checked():
+        raise RuntimeError("视频号定时发表模式未保持选中状态。")
+    print(f"已设置视频号定时发表时间：{current_value}")
+    save_flow_step_screenshot(page, settings, "08", "定时发表设置后")
+
+
 def to_cdp_settings(settings: WeixinChannelsPublishSettings) -> PublishSettings:
     return PublishSettings(
         output_dir=settings.output_dir,
@@ -678,6 +867,7 @@ def to_cdp_settings(settings: WeixinChannelsPublishSettings) -> PublishSettings:
         after_cover_confirm_wait_ms=0,
         after_declaration_open_wait_ms=0,
         auto_submit_publish=False,
+        schedule_at=settings.schedule_at,
         debug_screenshot=settings.debug_screenshot,
         dry_run=settings.dry_run,
     )
@@ -699,6 +889,8 @@ def run_weixin_channels_publish(
             upload_graphic_images(page, assets, settings)
             fill_title(page, assets, settings)
             fill_description_and_topics(page, assets, settings)
+            if settings.schedule_at:
+                set_weixin_channels_scheduled_publish_time(page, settings.schedule_at, settings)
         except Exception:
             settings.debug_screenshot.parent.mkdir(parents=True, exist_ok=True)
             try:

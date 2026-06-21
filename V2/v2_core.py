@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import difflib
 import json
+import random
 import mimetypes
 import os
 import re
@@ -9,6 +11,7 @@ import shutil
 import sys
 import threading
 import time
+from collections import Counter
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -37,6 +40,7 @@ HAIBAO_TEMPLATE_FILE = CANKAO_DIR / "haibao.txt"
 XIJIETU_TEMPLATE_FILE = CANKAO_DIR / "xijietu.txt"
 CAIPU_TEMPLATE_FILE = CANKAO_DIR / "caipu.txt"
 FENGMIAN_TEMPLATE_FILE = CANKAO_DIR / "fengmian.txt"
+HUASU_FORBIDDEN_FILE = CANKAO_DIR / "huasu.txt"
 CHARACTER_REFERENCE_FILE = CANKAO_DIR / "juese.png"
 OUTPUT_DIR = ROOT_DIR / "output"
 DISH_POOL_DIR = ROOT_DIR / "dish_pool"
@@ -45,6 +49,37 @@ FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
 BUBBLE_COPY_HISTORY_FILE = ROOT_DIR / "bubble_copy_history.txt"
 BUBBLE_COPY_FILE_SUFFIX = "_气泡文案.txt"
 BUBBLE_COPY_HISTORY_PROMPT_LIMIT = 80
+PUBLISH_COPY_HISTORY_FILE = ROOT_DIR / "publish_copy_history.txt"
+PUBLISH_COPY_HISTORY_TITLE_PROMPT_LIMIT = 120
+PUBLISH_COPY_HISTORY_DESC_PROMPT_LIMIT = 80
+PUBLISH_COPY_SIMILARITY_RATIO = 0.78
+PUBLISH_COPY_DESC_BODY_SUFFIX = "_图文描述正文.txt"
+PUBLISH_COPY_DEFAULT_TEMPERATURE = 0.85
+PUBLISH_COPY_CREATIVE_ANGLES: tuple[str, ...] = (
+    "打工人下班想解馋、又不想点外卖，需要快手的硬菜",
+    "周末家庭聚餐/来客，需要一道能撑场面、拍照也好看的菜",
+    "追剧、看球、小酌时需要能边啃边吃的佐酒菜",
+    "想给家常炸物换口味、吃腻普通蒜香排骨的人",
+    "喜欢咸鲜口、对「虾酱+肉类」组合好奇的南方胃",
+    "厨房新手想试新搭配、又怕翻车的谨慎型选手",
+    "夏天没胃口、需要咸香开胃、提振食欲的一盘",
+    "带娃家庭：大人小孩都能接受的非辣硬菜",
+)
+_HUASU_DISH_CATEGORY_TAIL = re.compile(
+    r"(菜|餐|料|食|小吃|甜品|火锅|烧烤|家常|快手|懒人|减脂|轻食|素食|日料|韩料|泰料|川菜|粤菜|湘菜|鲁菜|苏菜|浙菜|闽菜|徽菜|东北菜|西北菜|云南菜|贵州菜|广西菜|海南菜|新疆菜|西藏菜|内蒙古菜|宁夏菜|青海菜|甘肃菜|陕西菜|山西菜|河北菜|河南菜|山东菜|江苏菜|安徽菜|湖北菜|湖南菜|江西菜|福建菜|台湾菜|香港菜|澳门菜)天花板$"
+)
+_FORBIDDEN_COPY_REGEX: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"好吃到"), "好吃到…夸张套话"),
+    (re.compile(r"香到流"), "香到流口水类套话"),
+    (re.compile(r"香到停"), "香到停不下来类套话"),
+    (re.compile(r"香到邻"), "香到邻居…类套话"),
+    (re.compile(r"香到舔"), "香到舔手指类套话"),
+    (re.compile(r"一口(入魂|沦陷)"), "一口入魂/沦陷"),
+    (re.compile(r"谁懂啊"), "谁懂啊"),
+    (re.compile(r"天花板"), "天花板"),
+    (re.compile(r"绝绝子|yyds", re.I), "绝绝子/yyds"),
+)
+_HUASU_FORBIDDEN_PHRASES_CACHE: tuple[str, ...] | None = None
 
 DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-pro-260215"
@@ -521,6 +556,97 @@ def get_text_temperature() -> float:
         return float(raw_value)
     except ValueError as exc:
         raise RuntimeError("MODEL_TEMPERATURE 必须是数字。") from exc
+
+
+def get_publish_copy_temperature() -> float:
+    raw_value = os.getenv("PUBLISH_COPY_TEMPERATURE", "").strip()
+    if raw_value:
+        try:
+            return float(raw_value)
+        except ValueError as exc:
+            raise RuntimeError("PUBLISH_COPY_TEMPERATURE 必须是数字。") from exc
+    return PUBLISH_COPY_DEFAULT_TEMPERATURE
+
+
+def pick_publish_copy_creative_angle() -> str:
+    return random.choice(PUBLISH_COPY_CREATIVE_ANGLES)
+
+
+def collect_dish_specific_markers(dish_payload: dict[str, str]) -> list[str]:
+    markers: list[str] = []
+    dish_name = str(dish_payload.get("dish_name", "")).strip()
+    if len(dish_name) >= 2:
+        markers.append(dish_name)
+    notes = str(dish_payload.get("notes", "")).strip()
+    for token in re.findall(r"[\u4e00-\u9fff]{2,}", f"{dish_name}{notes}"):
+        if token not in markers:
+            markers.append(token)
+    return markers[:8]
+
+
+def load_huasu_forbidden_phrases() -> tuple[str, ...]:
+    global _HUASU_FORBIDDEN_PHRASES_CACHE
+    if _HUASU_FORBIDDEN_PHRASES_CACHE is not None:
+        return _HUASU_FORBIDDEN_PHRASES_CACHE
+    if not HUASU_FORBIDDEN_FILE.exists():
+        _HUASU_FORBIDDEN_PHRASES_CACHE = ()
+        return _HUASU_FORBIDDEN_PHRASES_CACHE
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw_line in HUASU_FORBIDDEN_FILE.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("##"):
+            continue
+        if "不重样" in line:
+            continue
+        if len(line) > 24:
+            continue
+        if _HUASU_DISH_CATEGORY_TAIL.search(line):
+            continue
+        key = line.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(line)
+    _HUASU_FORBIDDEN_PHRASES_CACHE = tuple(ordered)
+    return _HUASU_FORBIDDEN_PHRASES_CACHE
+
+
+def find_forbidden_copy_phrase_hit(text: str) -> str | None:
+    body = str(text or "").strip()
+    if not body:
+        return None
+    for phrase in load_huasu_forbidden_phrases():
+        if phrase in body:
+            return phrase
+    for pattern, label in _FORBIDDEN_COPY_REGEX:
+        if pattern.search(body):
+            return label
+    return None
+
+
+def reject_forbidden_copy_phrase(text: str, *, label: str) -> str | None:
+    hit = find_forbidden_copy_phrase_hit(text)
+    if hit:
+        return f"{label}含禁用套话「{hit}」，请改为本道菜的具体感官、场景或动作描写。"
+    return None
+
+
+def build_huasu_forbidden_prompt_block(*, max_items: int = 48) -> str:
+    phrases = load_huasu_forbidden_phrases()
+    if not phrases:
+        return ""
+    shown = phrases[:max_items]
+    scope = f"（共 {len(phrases)} 条，以下列 {len(shown)} 条）" if len(phrases) > len(shown) else f"（共 {len(phrases)} 条）"
+    lines = "\n".join(f"- {phrase}" for phrase in shown)
+    return (
+        f"\n禁用套话清单{scope}：下列及同类变体一律不得出现；"
+        f"请写本道菜的视觉、香气、口感、温度、吃法反差等具体感受，禁止万能美食营销话术：\n"
+        f"{lines}\n"
+        f"另禁：好吃到…、香到…、一口入魂、天花板、绝绝子、yyds 等同类表达。\n"
+    )
 
 
 def parse_image_size(size_text: str) -> str:
@@ -1348,6 +1474,9 @@ def validate_bubble_copy_text(text: str) -> str:
         raise ValueError(
             f"气泡文案须 {BUBBLE_COPY_MIN_CHARS}–{BUBBLE_COPY_MAX_CHARS} 个汉字，当前 {char_count} 个。"
         )
+    forbidden_error = reject_forbidden_copy_phrase(normalized, label="气泡文案")
+    if forbidden_error:
+        raise ValueError(forbidden_error)
     return normalized
 
 
@@ -1375,7 +1504,9 @@ def build_bubble_copy_prompt(
     return (
         f"{dish_line}上图是这道菜的海报，另有阿叶厨师角色参考。"
         f"写他在品尝这道菜时，气泡里最能勾起食欲的一句话——他是说话的人，不是菜。"
+        f"紧扣本菜的香气、口感、温度或惊喜瞬间，禁止「绝了」「太香了」等空话。"
         f"{BUBBLE_COPY_MIN_CHARS}–{BUBBLE_COPY_MAX_CHARS} 个汉字，只输出这一句。"
+        f"{build_huasu_forbidden_prompt_block(max_items=28)}"
         f"{history_block}{feedback_block}"
     )
 
@@ -2408,26 +2539,244 @@ def reject_cliche_bowl_title(title: str) -> str | None:
 
 V2_PUBLISH_PLATFORM_TASKS: dict[str, str] = {
     "douyin": (
-        f"为这个新菜写抖音的标题、描述和正好 5 个话题（不超过 5 个）。{_TITLE_LIMIT_HINT}"
-        f"{_TITLE_CLICHE_FORBIDDEN_HINT}要有钩子，符合抖音爆款思路。"
+        f"先判断本菜在抖音的受众与点击动机，再写标题、描述和正好 5 个话题（不超过 5 个）。"
+        f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}"
+        f"标题要有网感、像真人发图文会用的口语，让人想点进去；描述别写成菜谱说明书。"
     ),
     "xiaohongshu": (
-        f"为这个新菜写小红书的标题、描述和 10 个话题。{_TITLE_LIMIT_HINT}"
-        f"{_TITLE_CLICHE_FORBIDDEN_HINT}要有钩子，符合小红书图文用户的爆款思路。"
+        f"先判断本菜在小红书的受众与种草点，再写标题、描述和 10 个话题。"
+        f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}"
+        f"标题可带一点小红书口吻（真实分享感），描述像笔记正文而非模板软文。"
     ),
     "weixin_mp": (
-        f"为这个新菜写微信公众号的标题、描述和正好 10 个话题（不超过 10 个）。"
-        f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}要有钩子，符合公众号图文用户的阅读习惯。"
+        f"先判断本菜在公众号的读者画像，再写标题、描述和正好 10 个话题（不超过 10 个）。"
+        f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}"
+        f"标题可读性优先但仍要有吸引力，描述自然、有画面，避免公众号腔套话。"
     ),
     "weixin_channels": (
-        f"为这个新菜写微信视频号的标题、描述和正好 30 个话题（不超过 30 个）。"
-        f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}要有钩子，符合视频号图文传播特点。"
+        f"先判断本菜在视频号的传播场景，再写标题、描述和正好 30 个话题（不超过 30 个）。"
+        f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}"
+        f"标题适合图文信息流，描述短平快、有记忆点，别套万能美食模板。"
     ),
     "kuaishou": (
-        f"为这个新菜写快手的标题、描述和 4 个话题。{_TITLE_LIMIT_HINT}"
-        f"{_TITLE_CLICHE_FORBIDDEN_HINT}要有钩子，符合快手爆款思路。"
+        f"先判断本菜在快手的受众与停留理由，再写标题、描述和 4 个话题。"
+        f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}"
+        f"标题接地气、有网感，描述像老铁聊天而非教程腔。"
     ),
 }
+
+PUBLISH_COPY_TITLE_SUFFIXES: tuple[str, ...] = (
+    "_图文标题.txt",
+    "_抖音标题.txt",
+    "_小红书标题.txt",
+    "_微信公众号标题.txt",
+    "_微信视频号标题.txt",
+    "_快手标题.txt",
+)
+
+
+def publish_copy_desc_platform_suffixes() -> tuple[str, ...]:
+    return tuple(f"_{label}图文描述.txt" for _key, label, _count in V2_PUBLISH_PLATFORM_SPECS)
+
+
+def normalize_publish_copy_compare_text(raw_text: str) -> str:
+    text = str(raw_text or "").strip()
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[，。！？!?.、；;：:\"\"''「」『』（）()【】\\[\\]…—-]", "", text)
+    return text.strip()
+
+
+def iter_publish_copy_source_files() -> list[Path]:
+    files: list[Path] = []
+    for root in (DISH_POOL_DIR, DISH_ARCHIVE_DIR, OUTPUT_DIR):
+        if not root.exists():
+            continue
+        for path in root.rglob("*.txt"):
+            if not path.is_file():
+                continue
+            name = path.name
+            if any(name.endswith(suffix) for suffix in PUBLISH_COPY_TITLE_SUFFIXES):
+                files.append(path)
+                continue
+            if name.endswith(PUBLISH_COPY_DESC_BODY_SUFFIX) or any(
+                name.endswith(suffix) for suffix in publish_copy_desc_platform_suffixes()
+            ):
+                files.append(path)
+    return sorted(files, key=lambda item: item.stat().st_mtime)
+
+
+def read_publish_copy_description_from_file(path: Path) -> str:
+    content = path.read_text(encoding="utf-8").strip()
+    if path.name.endswith(PUBLISH_COPY_DESC_BODY_SUFFIX):
+        return content
+    return content.splitlines()[0].strip() if content else ""
+
+
+def collect_publish_copy_exclude_from_output_dir(output_dir: Path) -> tuple[set[str], set[str]]:
+    exclude_titles: set[str] = set()
+    exclude_descs: set[str] = set()
+    if not output_dir.exists():
+        return exclude_titles, exclude_descs
+    for path in output_dir.glob("*.txt"):
+        name = path.name
+        try:
+            if any(name.endswith(suffix) for suffix in PUBLISH_COPY_TITLE_SUFFIXES):
+                normalized = normalize_publish_copy_compare_text(path.read_text(encoding="utf-8"))
+                if normalized:
+                    exclude_titles.add(normalized)
+            elif name.endswith(PUBLISH_COPY_DESC_BODY_SUFFIX) or any(
+                name.endswith(suffix) for suffix in publish_copy_desc_platform_suffixes()
+            ):
+                normalized = normalize_publish_copy_compare_text(read_publish_copy_description_from_file(path))
+                if normalized:
+                    exclude_descs.add(normalized)
+        except OSError:
+            continue
+    return exclude_titles, exclude_descs
+
+
+def sync_publish_copy_history_file(
+    *,
+    exclude_titles: set[str] | None = None,
+    exclude_descs: set[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """扫描全库平台标题/描述正文（不含话题），去重后写入 publish_copy_history.txt。"""
+    exclude_titles = exclude_titles or set()
+    exclude_descs = exclude_descs or set()
+    ordered_titles: list[str] = []
+    ordered_descs: list[str] = []
+    seen_titles: set[str] = set()
+    seen_descs: set[str] = set()
+    title_source_count = 0
+    desc_source_count = 0
+
+    def add_title(raw_text: str) -> None:
+        normalized = normalize_publish_copy_compare_text(raw_text)
+        if not normalized or normalized in exclude_titles or normalized in seen_titles:
+            return
+        seen_titles.add(normalized)
+        ordered_titles.append(raw_text.strip())
+
+    def add_desc(raw_text: str) -> None:
+        normalized = normalize_publish_copy_compare_text(raw_text)
+        if not normalized or normalized in exclude_descs or normalized in seen_descs:
+            return
+        seen_descs.add(normalized)
+        ordered_descs.append(raw_text.strip())
+
+    for path in iter_publish_copy_source_files():
+        try:
+            name = path.name
+            if any(name.endswith(suffix) for suffix in PUBLISH_COPY_TITLE_SUFFIXES):
+                content = path.read_text(encoding="utf-8").strip()
+                if not content:
+                    continue
+                title_source_count += 1
+                add_title(content)
+                continue
+            content = read_publish_copy_description_from_file(path)
+            if not content:
+                continue
+            desc_source_count += 1
+            add_desc(content)
+        except OSError:
+            continue
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    header_lines = [
+        "# 历史平台文案标题与描述正文（自动汇总；话题不在此列）",
+        f"# 标题来源文件数：{title_source_count}，去重条目：{len(ordered_titles)}",
+        f"# 描述来源文件数：{desc_source_count}，去重条目：{len(ordered_descs)}",
+        f"# 更新：{timestamp}",
+        "",
+        "## titles",
+    ]
+    body_lines = header_lines + [f"- {text}" for text in ordered_titles]
+    body_lines.extend(["", "## descriptions"])
+    body_lines.extend(f"- {text}" for text in ordered_descs)
+    PUBLISH_COPY_HISTORY_FILE.write_text("\n".join(body_lines) + "\n", encoding="utf-8")
+    print(
+        f"平台文案历史已同步：标题 {len(ordered_titles)} 条、描述 {len(ordered_descs)} 条 -> "
+        f"{PUBLISH_COPY_HISTORY_FILE}"
+    )
+    return ordered_titles, ordered_descs
+
+
+def is_publish_copy_text_similar(candidate: str, history_text: str) -> bool:
+    left = normalize_publish_copy_compare_text(candidate)
+    right = normalize_publish_copy_compare_text(history_text)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    min_len = min(len(left), len(right))
+    if min_len >= 8 and (left in right or right in left):
+        return True
+    return difflib.SequenceMatcher(None, left, right).ratio() >= PUBLISH_COPY_SIMILARITY_RATIO
+
+
+def find_publish_copy_history_conflict(
+    text: str,
+    history_texts: list[str],
+    *,
+    label: str,
+) -> str | None:
+    body = str(text or "").strip()
+    if not body:
+        return None
+    for history_text in history_texts:
+        if is_publish_copy_text_similar(body, history_text):
+            return f"{label}与历史过于相似，请重写：{body}"
+    return None
+
+
+def validate_v2_publish_copy_not_in_history(
+    platform_payload: dict[str, dict[str, Any]],
+    history_titles: list[str],
+    history_descriptions: list[str],
+) -> None:
+    for platform_key, platform_label, _count in V2_PUBLISH_PLATFORM_SPECS:
+        block = platform_payload[platform_key]
+        title_error = find_publish_copy_history_conflict(
+            str(block.get("title", "")),
+            history_titles,
+            label=f"{platform_label}标题",
+        )
+        if title_error:
+            raise ValueError(title_error)
+        desc_error = find_publish_copy_history_conflict(
+            str(block.get("description", "")),
+            history_descriptions,
+            label=f"{platform_label}描述",
+        )
+        if desc_error:
+            raise ValueError(desc_error)
+
+
+def build_publish_copy_history_prompt_block(
+    history_titles: list[str],
+    history_descriptions: list[str],
+) -> str:
+    blocks: list[str] = []
+    if history_titles:
+        total = len(history_titles)
+        shown = history_titles[-PUBLISH_COPY_HISTORY_TITLE_PROMPT_LIMIT:]
+        scope = f"共 {total} 条" if total <= len(shown) else f"共 {total} 条，以下列最近 {len(shown)} 条"
+        lines = "\n".join(f"- {text}" for text in shown)
+        blocks.append(
+            f"历史标题（{scope}，均已使用过；禁止重复、禁止只改几个字或同义改写，禁止套用相同句式骨架）：\n{lines}"
+        )
+    if history_descriptions:
+        total = len(history_descriptions)
+        shown = history_descriptions[-PUBLISH_COPY_HISTORY_DESC_PROMPT_LIMIT:]
+        scope = f"共 {total} 条" if total <= len(shown) else f"共 {total} 条，以下列最近 {len(shown)} 条"
+        lines = "\n".join(f"- {text}" for text in shown)
+        blocks.append(
+            f"历史描述正文（{scope}，均已使用过；禁止重复、禁止只换菜名或同义改写；话题标签不在此列）：\n{lines}"
+        )
+    if not blocks:
+        return ""
+    return "\n\n".join(blocks) + "\n\n"
 
 
 def build_v2_publish_context_text(dish_payload: dict[str, str]) -> str:
@@ -2445,26 +2794,47 @@ def build_v2_publish_context_text(dish_payload: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-def build_v2_publish_multimodal_prompt(dish_payload: dict[str, str]) -> str:
+def build_v2_publish_multimodal_prompt(
+    dish_payload: dict[str, str],
+    *,
+    history_titles: list[str] | None = None,
+    history_descriptions: list[str] | None = None,
+    creative_angle: str = "",
+) -> str:
     platform_lines = "\n".join(
         f"- {label}：{V2_PUBLISH_PLATFORM_TASKS[key]}" for key, label, _count in V2_PUBLISH_PLATFORM_SPECS
     )
-    return f"""你是多平台美食图文运营。请结合附件里的「入选海报图」和下方菜品信息，为同一道菜写各平台发布文案。
+    history_block = build_publish_copy_history_prompt_block(
+        history_titles or [],
+        history_descriptions or [],
+    )
+    angle_line = creative_angle.strip() or pick_publish_copy_creative_angle()
+    forbidden_block = build_huasu_forbidden_prompt_block(max_items=56)
+    return f"""你是多平台美食图文运营。请结合附件里的「入选海报图」和下方菜品信息，为这道【全新菜品】写各平台发布文案。
+
+写作流程（必须按顺序思考，不要跳步）：
+1) 只看本道菜的菜名、做法、海报视觉，单独分析：谁会点开、在什么场景会想做、他们的痛点/爽点是什么。
+2) 本次创意切入角度（标题与描述必须围绕此角度展开，不要写泛泛的「好吃」「简单」）：{angle_line}
+3) 基于受众分析，用当下中文互联网的口语/网络用语写标题和描述，让人一看就想点进去。
+4) 每个平台语气可不同，但都必须「针对本菜」写：多写这道菜的色泽、香气层次、咬下去的声响/质感、余味、搭配反差，禁止万能菜谱腔。
 
 {build_v2_publish_context_text(dish_payload)}
 
-各平台写作要求：
+{history_block}{forbidden_block}各平台写作要求：
 {platform_lines}
 
 通用要求：
-1) 标题、描述都要口语化、有食欲、有画面感，禁止套话（如“先收藏”“原创融合”“想吃时照着做”）。
-2) 各平台标题禁止「几碗饭/连吃几碗/连炫几碗」类句式（如「三碗饭」「连炫三碗」「连吃三碗」）；勿用数量+碗作钩子，句式要有变化。
-3) 描述 2–4 句，写口感、场景、做法亮点，可自然提菜名，但不要写成说明书。
-4) topics 数组每项以 # 开头，不要菜品全名话题，不要 #阿叶造新菜。
-5) 各平台 title 均必须不超过 20 个汉字（40 字符；汉字/表情/符号等非 ASCII 计 2、英文/数字计 1，表情也算字符），超出会被截断或判不合格。
-6) topics 数组长度必须与各平台要求完全一致：抖音 5、小红书 10、微信公众号 10、微信视频号 30、快手 4；不能合并公众号与视频号。
-7) 只输出 JSON，不要 Markdown，不要解释。格式如下：
+1) 标题、描述口语化、有网感；禁止菜谱说明书腔，禁止「先收藏」「原创融合」「想吃时照着做」等套话。
+2) 各平台标题禁止「几碗饭/连吃几碗/连炫几碗」类句式；勿用数量+碗作钩子，各平台标题句式要有变化。
+3) 五个平台的标题不得都用同一开头；至少 2 个平台换完全不同的钩子结构。
+4) 描述 2–4 句：从本菜感官细节、本次创意角度、做法反差或情绪切入，可自然提菜名，不要写成步骤清单；五个平台描述不要整段同义复述。
+5) topics 数组每项以 # 开头，不要菜品全名话题，不要 #阿叶造新菜（话题可复用通用标签，不受历史标题/描述限制）。
+6) 各平台 title 均必须不超过 20 个汉字（40 字符；汉字/表情/符号等非 ASCII 计 2、英文/数字计 1，表情也算字符），超出会被截断或判不合格。
+7) topics 数组长度必须与各平台要求完全一致：抖音 5、小红书 10、微信公众号 10、微信视频号 30、快手 4；不能合并公众号与视频号。
+8) 新写的标题、描述不得与上方历史列表重复或高度相似（仅改菜名、同义换词也算不合格）。
+9) 只输出 JSON，不要 Markdown，不要解释。必须先写 audience_analysis，再写各平台字段。格式如下：
 {{
+  "audience_analysis": "一句话：本菜具体受众是谁、在什么场景会点开、核心点击动机",
   "douyin": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
   "xiaohongshu": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
   "weixin_mp": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
@@ -2491,6 +2861,77 @@ def normalize_v2_publish_topics(raw_topics: Any, expected_count: int) -> list[st
     if len(tags) != expected_count:
         raise ValueError(f"话题数量必须为 {expected_count} 个，实际 {len(tags)} 个。")
     return tags
+
+
+def audience_analysis_mentions_dish(analysis: str, dish_payload: dict[str, str]) -> bool:
+    dish_name = str(dish_payload.get("dish_name", "")).strip()
+    notes = str(dish_payload.get("notes", "")).strip()
+    if dish_name and dish_name in analysis:
+        return True
+    if len(dish_name) >= 2:
+        for size in (3, 2):
+            for index in range(len(dish_name) - size + 1):
+                if dish_name[index : index + size] in analysis:
+                    return True
+    for keyword in re.findall(r"[\u4e00-\u9fff]{2,}", f"{dish_name}{notes}"):
+        if keyword in analysis:
+            return True
+    return False
+
+
+def parse_v2_publish_audience_analysis(raw_payload: dict[str, Any], dish_payload: dict[str, str]) -> str:
+    analysis = str(raw_payload.get("audience_analysis", "")).strip()
+    if len(analysis) < 16:
+        raise ValueError("audience_analysis 过短或缺失，须具体说明本菜受众与点击动机。")
+    generic_markers = ("所有人群", "人人都爱", "任何人")
+    if any(marker in analysis for marker in generic_markers):
+        raise ValueError(f"audience_analysis 过于笼统，请写具体人群与场景：{analysis}")
+    if not audience_analysis_mentions_dish(analysis, dish_payload):
+        markers = collect_dish_specific_markers(dish_payload)
+        raise ValueError(
+            f"audience_analysis 须提到本菜名或核心食材（如 {'/'.join(markers[:3])}）：{analysis}"
+        )
+    return analysis
+
+
+def validate_v2_publish_forbidden_phrases(platform_payload: dict[str, dict[str, Any]]) -> None:
+    for platform_key, platform_label, _count in V2_PUBLISH_PLATFORM_SPECS:
+        block = platform_payload[platform_key]
+        for field, field_label in (("title", "标题"), ("description", "描述")):
+            error = reject_forbidden_copy_phrase(
+                str(block.get(field, "")),
+                label=f"{platform_label}{field_label}",
+            )
+            if error:
+                raise ValueError(error)
+
+
+def validate_v2_publish_copy_platform_diversity(
+    platform_payload: dict[str, dict[str, Any]],
+    *,
+    dish_name: str,
+) -> None:
+    titles = [str(block.get("title", "")).strip() for block in platform_payload.values()]
+    descriptions = [str(block.get("description", "")).strip() for block in platform_payload.values()]
+
+    openings = [title[:4] for title in titles if len(title) >= 4]
+    if openings:
+        most_common_count = max(Counter(openings).values())
+        if most_common_count >= 3:
+            raise ValueError("五个平台标题开头过于雷同，请换不同钩子结构。")
+
+    if dish_name:
+        dish_prefix_count = sum(1 for title in titles if title.startswith(dish_name))
+        if dish_prefix_count >= 4:
+            raise ValueError("各平台标题不要都用菜名开头，至少两个平台换钩子结构。")
+
+    desc_pairs = 0
+    for index in range(len(descriptions)):
+        for other in range(index + 1, len(descriptions)):
+            if is_publish_copy_text_similar(descriptions[index], descriptions[other]):
+                desc_pairs += 1
+    if desc_pairs >= 4:
+        raise ValueError("五个平台描述正文过于相似，请按各平台受众分别重写。")
 
 
 def parse_v2_publish_platform_payload(raw_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -2595,11 +3036,24 @@ def generate_v2_publish_copy_assets(
         raise FileNotFoundError(f"参考海报图不存在：{poster_image_path}")
 
     model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
-    temperature = get_text_temperature()
-    prompt_text = build_v2_publish_multimodal_prompt(dish_payload)
+    temperature = get_publish_copy_temperature()
+    creative_angle = pick_publish_copy_creative_angle()
+    exclude_titles, exclude_descs = collect_publish_copy_exclude_from_output_dir(output_dir)
+    history_titles, history_descriptions = sync_publish_copy_history_file(
+        exclude_titles=exclude_titles,
+        exclude_descs=exclude_descs,
+    )
+    prompt_text = build_v2_publish_multimodal_prompt(
+        dish_payload,
+        history_titles=history_titles,
+        history_descriptions=history_descriptions,
+        creative_angle=creative_angle,
+    )
     prompt_file = output_dir / f"{dish_name}_平台文案生成prompt.txt"
     save_text_output(prompt_text, prompt_file)
-    print(f"平台文案提示词已保存：{prompt_file}")
+    print(
+        f"平台文案提示词已保存：{prompt_file}（temperature={temperature}，创意角度={creative_angle}）"
+    )
 
     user_content: list[dict[str, Any]] = [
         {"type": "text", "text": prompt_text},
@@ -2621,7 +3075,18 @@ def generate_v2_publish_copy_assets(
             if not raw_text:
                 raise ValueError("豆包未返回平台文案。")
             payload = extract_json_object_from_text(raw_text)
+            audience_analysis = parse_v2_publish_audience_analysis(payload, dish_payload)
             platform_payload = parse_v2_publish_platform_payload(payload)
+            validate_v2_publish_forbidden_phrases(platform_payload)
+            validate_v2_publish_copy_platform_diversity(
+                platform_payload,
+                dish_name=str(dish_payload.get("dish_name", "")).strip(),
+            )
+            validate_v2_publish_copy_not_in_history(
+                platform_payload,
+                history_titles,
+                history_descriptions,
+            )
             saved = save_v2_publish_copy_files(
                 output_dir=output_dir,
                 timestamp=timestamp,
@@ -2630,6 +3095,8 @@ def generate_v2_publish_copy_assets(
             )
             saved["model"] = model
             saved["prompt_file"] = str(prompt_file)
+            saved["audience_analysis"] = audience_analysis
+            print(f"平台文案受众分析：{audience_analysis}")
             print(f"图文标题已保存：{saved['title_file']}")
             print(f"图文描述正文已保存：{saved['description_body_file']}")
             for platform_key, platform_label, _count in V2_PUBLISH_PLATFORM_SPECS:
@@ -2638,6 +3105,14 @@ def generate_v2_publish_copy_assets(
             return saved
         except (ValueError, json.JSONDecodeError) as exc:
             last_error = str(exc)
+            creative_angle = pick_publish_copy_creative_angle()
+            prompt_text = build_v2_publish_multimodal_prompt(
+                dish_payload,
+                history_titles=history_titles,
+                history_descriptions=history_descriptions,
+                creative_angle=creative_angle,
+            )
+            save_text_output(prompt_text, prompt_file)
             user_content[0] = {
                 "type": "text",
                 "text": prompt_text + f"\n\n上次输出不合格：{last_error}\n请严格按 JSON 格式重写。",
