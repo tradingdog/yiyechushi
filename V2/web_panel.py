@@ -76,7 +76,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.50"
+PANEL_VERSION = "v1.51"
 PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
     "image_provider": "official",
     "image_aspect_ratio": "2:3",
@@ -102,6 +102,7 @@ SILENT_HTTP_LOG_PATHS = {
     "/api/run_status",
     "/api/publish_status",
     "/api/custom_image/status",
+    "/api/log_content",
     "/api/file",
 }
 REPO_ROOT = ROOT_DIR.parent
@@ -138,6 +139,10 @@ TASK_SEQ = 0
 RUN_META_FILE_NAME = "_run_meta.json"
 RUN_LOG_FILE_NAME = "_run_log.txt"
 PUBLISH_LOG_FILE_NAME = "_publish_log.txt"
+LOG_SOURCE_LIVE = "__live__"
+LOG_LIST_LIMIT = 150
+LOG_TAIL_DEFAULT = 500
+LOG_TAIL_MAX = 3000
 
 PUBLISH_LOCK = threading.Lock()
 PUBLISH_RUNNING = False
@@ -1204,13 +1209,19 @@ HTML_PAGE = """<!doctype html>
       position:fixed;left:10px;right:10px;bottom:10px;height:0;opacity:0;pointer-events:none;z-index:54;
       border:1px solid #334155;border-radius:12px;background:#111827;box-shadow:var(--shadow);overflow:hidden;transition:all .2s ease;
     }
-    .log-drawer.open{height:420px;opacity:1;pointer-events:auto;resize:vertical;min-height:280px;max-height:85vh}
-    .log-head{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border-bottom:1px solid #334155}
-    .log-head-title{font-size:13px;font-weight:700}
-    .log-head-actions{display:flex;gap:8px}
+    .log-drawer.open{height:420px;opacity:1;pointer-events:auto;resize:vertical;min-height:280px;max-height:85vh;display:flex;flex-direction:column}
+    .log-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid #334155;flex-wrap:wrap}
+    .log-head-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+    .log-head-title{font-size:13px;font-weight:700;white-space:nowrap}
+    .log-select{
+      min-width:180px;max-width:min(420px,42vw);padding:5px 8px;border:1px solid #475569;border-radius:8px;
+      background:#0b1220;color:#dbe7ff;font-size:12px;
+    }
+    .log-lines-select{min-width:96px;max-width:120px}
+    .log-head-actions{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
     .log-head-actions button{width:auto;padding:6px 9px;border:1px solid #475569;border-radius:8px;background:#0b1220;color:#dbe7ff;cursor:pointer;font-size:12px}
     .log-panel{
-      height:calc(100% - 44px);margin:0;padding:10px;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.45;
+      flex:1;min-height:0;margin:0;padding:10px;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.45;
       white-space:pre-wrap;word-break:break-word;color:#d1d9e9;
     }
     @media(max-width:1200px){
@@ -1592,7 +1603,18 @@ HTML_PAGE = """<!doctype html>
   <button id="logToggleBtn" class="log-toggle" type="button">日志</button>
   <div id="logDrawer" class="log-drawer">
     <div class="log-head">
-      <div class="log-head-title">实时日志</div>
+      <div class="log-head-left">
+        <div class="log-head-title">实时日志</div>
+        <select id="logFileSelect" class="log-select" title="选择日志文件"></select>
+        <select id="logLinesSelect" class="log-select log-lines-select" title="显示行数">
+          <option value="500" selected>500 行</option>
+          <option value="1000">1000 行</option>
+          <option value="1500">1500 行</option>
+          <option value="2000">2000 行</option>
+          <option value="2500">2500 行</option>
+          <option value="3000">3000 行</option>
+        </select>
+      </div>
       <div class="log-head-actions">
         <button id="logCopyBtn" type="button">复制日志</button>
         <button id="logReloadBtn" type="button">刷新全部</button>
@@ -1613,6 +1635,11 @@ HTML_PAGE = """<!doctype html>
       currentOutputPath: "",
       currentResult: null,
       logNextIndex: 0,
+      logSource: "",
+      logLiveId: "__live__",
+      logTailLines: 500,
+      logViewIsLive: false,
+      logDrawerOpen: false,
       pollTimer: null,
       autoRefreshTimer: null,
       logOnlyErrors: false,
@@ -2973,10 +3000,16 @@ HTML_PAGE = """<!doctype html>
       });
     }
 
+    function trimLogPanelToTail(lines){
+      const tail = Math.max(1, Number(state.logTailLines || 500));
+      if(!Array.isArray(lines) || lines.length <= tail){ return lines || []; }
+      return lines.slice(lines.length - tail);
+    }
+
     function renderLogPanel(lines, options = {}){
       const panel = $("logPanel");
       if(!panel){ return; }
-      const filtered = filterLogLines(lines || []);
+      const filtered = filterLogLines(trimLogPanelToTail(lines || []));
       const keepScroll = Boolean(options.keepScroll);
       const atBottom = keepScroll && panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 24;
       panel.textContent = filtered.length ? filtered.join("\\n") + "\\n" : "等待任务启动...\\n";
@@ -2984,6 +3017,7 @@ HTML_PAGE = """<!doctype html>
     }
 
     function appendLogs(lines){
+      if(!state.logViewIsLive){ return; }
       if(!lines?.length){ return; }
       const panel = $("logPanel");
       const atBottom = panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 24;
@@ -2992,23 +3026,83 @@ HTML_PAGE = """<!doctype html>
       for(const line of filtered){
         panel.textContent += line + "\\n";
       }
-      if(panel.textContent.length > 500000){
+      const tail = Math.max(1, Number(state.logTailLines || 500));
+      const allLines = panel.textContent.split("\\n").filter((line) => line.length);
+      if(allLines.length > tail){
+        panel.textContent = allLines.slice(allLines.length - tail).join("\\n") + "\\n";
+      }else if(panel.textContent.length > 500000){
         panel.textContent = panel.textContent.slice(panel.textContent.length - 400000);
       }
       if(atBottom){ panel.scrollTop = panel.scrollHeight; }
     }
 
-    async function reloadAllLogs(options = {}){
-      const silent = Boolean(options?.silent);
+    function syncLogViewMode(){
+      state.logViewIsLive = state.logSource === state.logLiveId;
+    }
+
+    async function loadLogFileList(options = {}){
+      const select = $("logFileSelect");
+      if(!select){ return null; }
       try{
-        const res = await fetch("/api/run_status?from=0");
+        const res = await fetch("/api/log_files");
         const data = await res.json();
-        state.logNextIndex = data.next_index || 0;
+        if(!res.ok){ throw new Error(data.error || "加载日志列表失败"); }
+        state.logLiveId = data.live_id || "__live__";
+        const previous = options.keepSelection ? state.logSource : "";
+        select.innerHTML = "";
+        const liveOpt = document.createElement("option");
+        liveOpt.value = state.logLiveId;
+        liveOpt.textContent = "实时（面板内存）";
+        select.appendChild(liveOpt);
+        for(const file of data.files || []){
+          const opt = document.createElement("option");
+          opt.value = file.id;
+          opt.textContent = `[${file.category}] ${file.label}`;
+          select.appendChild(opt);
+        }
+        const prefer = previous || state.logSource || data.default_id || state.logLiveId;
+        const hasPrefer = [...select.options].some((opt) => opt.value === prefer);
+        select.value = hasPrefer ? prefer : (data.default_id || state.logLiveId);
+        state.logSource = select.value;
+        syncLogViewMode();
+        return data;
+      }catch(err){
+        if(!options.silent){ setStatus("加载日志列表失败：" + err.message, "warn"); }
+        return null;
+      }
+    }
+
+    async function loadSelectedLogContent(options = {}){
+      const silent = Boolean(options?.silent);
+      const tail = Math.max(1, Math.min(3000, Number(state.logTailLines || 500)));
+      if(!state.logSource){
+        state.logSource = state.logLiveId || "__live__";
+        syncLogViewMode();
+      }
+      try{
+        const url = `/api/log_content?source=${encodeURIComponent(state.logSource)}&tail=${tail}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if(!res.ok){ throw new Error(data.error || "加载日志失败"); }
         renderLogPanel(data.logs || [], {keepScroll: false});
-        if(!silent){ setStatus(`已加载 ${state.logNextIndex} 行日志。`, "ok"); }
+        if(state.logViewIsLive){
+          state.logNextIndex = data.total_lines || 0;
+        }
+        if(!silent){
+          const suffix = data.truncated ? `（共 ${data.total_lines} 行，已截取末尾 ${data.tail} 行）` : `（共 ${data.total_lines || 0} 行）`;
+          setStatus(`已加载日志${suffix}`, "ok");
+        }
       }catch(err){
         if(!silent){ setStatus("加载日志失败：" + err.message, "warn"); }
       }
+    }
+
+    async function reloadAllLogs(options = {}){
+      const silent = Boolean(options?.silent);
+      if(!state.logSource){
+        await loadLogFileList({silent: true});
+      }
+      await loadSelectedLogContent({silent});
     }
 
     async function copyLogPanel(){
@@ -3017,10 +3111,14 @@ HTML_PAGE = """<!doctype html>
       await copyText(text, "日志已复制到剪贴板。");
     }
 
-    function 切换日志抽屉(打开){
+    async function 切换日志抽屉(打开){
+      state.logDrawerOpen = 打开;
       $("logDrawer").classList.toggle("open", 打开);
       $("logToggleBtn").textContent = 打开 ? "收起日志" : "日志";
-      if(打开){ reloadAllLogs({silent: true}); }
+      if(打开){
+        await loadLogFileList({silent: true});
+        await loadSelectedLogContent({silent: true});
+      }
     }
 
     function updateGalleryIndexLabel(){
@@ -4407,6 +4505,9 @@ HTML_PAGE = """<!doctype html>
         fetchRunStatus({silent: true});
         fetchPublishStatus({silent: true});
         fetchCustomImageStatus({silent: true});
+        if(state.logDrawerOpen && !state.logViewIsLive){
+          await loadSelectedLogContent({silent: true});
+        }
       }, 2000);
     }
 
@@ -4417,8 +4518,10 @@ HTML_PAGE = """<!doctype html>
         const data = await res.json();
         notePanelReachable();
         if(data.logs?.length){
-          appendLogs(data.logs);
-          state.logNextIndex = data.next_index || state.logNextIndex;
+          if(state.logViewIsLive && (state.logDrawerOpen || $("logDrawer")?.classList.contains("open"))){
+            appendLogs(data.logs);
+            state.logNextIndex = data.next_index || state.logNextIndex;
+          }
         }
         state.taskQueueSnapshot = data.task_queue || {running: data.current_task || null, queued: []};
         if(data.running && state.taskQueueSnapshot.running){
@@ -4526,8 +4629,14 @@ HTML_PAGE = """<!doctype html>
       $("posterQuality").value = $("detailQuality").value = $("recipeQuality").value = $("coverMode2Quality").value = "high";
       同步参数滑块();
       if(data.last_result && !state.selectedHistoryPath){ renderResult(data.last_result); }
+      await loadLogFileList({silent: true});
+      if(!state.logSource){
+        state.logSource = $("logFileSelect")?.value || state.logLiveId;
+        syncLogViewMode();
+      }
       state.logNextIndex = 0;
       $("logPanel").textContent = "";
+      await loadSelectedLogContent({silent: true});
       state.historyRevision = data.history_revision || "";
       if(data.meal_tag_labels){ state.mealTagLabels = data.meal_tag_labels; }
       if(data.publish_plan){ state.publishPlan = data.publish_plan; }
@@ -4545,8 +4654,10 @@ HTML_PAGE = """<!doctype html>
         return;
       }
       state.submittingTask = true;
-      state.logNextIndex = 0;
-      if(!state.pollTimer){ $("logPanel").textContent = ""; }
+      if(state.logViewIsLive){
+        state.logNextIndex = 0;
+        if(!state.pollTimer){ $("logPanel").textContent = ""; }
+      }
       setStatus(okText || "任务已提交，正在加入队列...");
       try{
         const res = await fetch("/api/run_start", {
@@ -4838,6 +4949,16 @@ HTML_PAGE = """<!doctype html>
         $("logFilterBtn").textContent = `只看错误：${state.logOnlyErrors ? "开" : "关"}`;
         await reloadAllLogs({silent: true});
       };
+      $("logFileSelect")?.addEventListener("change", async () => {
+        state.logSource = $("logFileSelect").value;
+        syncLogViewMode();
+        if(state.logViewIsLive){ state.logNextIndex = 0; }
+        await loadSelectedLogContent({silent: true});
+      });
+      $("logLinesSelect")?.addEventListener("change", async () => {
+        state.logTailLines = Math.max(1, Math.min(3000, Number($("logLinesSelect").value || "500")));
+        await loadSelectedLogContent({silent: true});
+      });
       $("customAddBtn")?.addEventListener("click", () => $("customFileInput")?.click());
       $("customFileInput")?.addEventListener("change", (event) => {
         const input = event.target;
@@ -5044,6 +5165,131 @@ def write_publish_log_file(output_dir_text: str, log_lines: list[str]) -> str:
     log_file = output_dir / PUBLISH_LOG_FILE_NAME
     log_file.write_text(content, encoding="utf-8")
     return str(log_file)
+
+
+def _log_file_display_label(path: Path, category: str) -> str:
+    mtime_text = time.strftime("%m-%d %H:%M", time.localtime(path.stat().st_mtime))
+    if category == "脚本":
+        return f"{path.name} ({mtime_text})"
+    parent_name = path.parent.name
+    kind = "运行" if path.name == RUN_LOG_FILE_NAME else "发布"
+    return f"{parent_name}/{kind} ({mtime_text})"
+
+
+def _register_log_file_entry(
+    path: Path,
+    category: str,
+    seen: set[str],
+    entries: list[tuple[float, dict[str, Any]]],
+) -> None:
+    if not path.is_file():
+        return
+    try:
+        rel = path.resolve().relative_to(REPO_ROOT.resolve())
+    except ValueError:
+        return
+    rel_key = rel.as_posix()
+    if rel_key in seen:
+        return
+    seen.add(rel_key)
+    try:
+        stat = path.stat()
+    except OSError:
+        return
+    entries.append(
+        (
+            stat.st_mtime,
+            {
+                "id": rel_key,
+                "label": _log_file_display_label(path, category),
+                "category": category,
+                "size": stat.st_size,
+                "modified_at": stat.st_mtime,
+            },
+        )
+    )
+
+
+def collect_log_file_entries() -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    entries: list[tuple[float, dict[str, Any]]] = []
+    for log_root in (REPO_ROOT / "logs", ROOT_DIR / "logs"):
+        if not log_root.is_dir():
+            continue
+        for path in log_root.glob("*.log"):
+            _register_log_file_entry(path, "脚本", seen, entries)
+    for base_name, category in (("output", "任务"), ("dish_pool", "菜品池")):
+        base = ROOT_DIR / base_name
+        if not base.is_dir():
+            continue
+        for log_name in (RUN_LOG_FILE_NAME, PUBLISH_LOG_FILE_NAME):
+            for path in base.rglob(log_name):
+                _register_log_file_entry(path, category, seen, entries)
+    entries.sort(key=lambda item: item[0], reverse=True)
+    return [item[1] for item in entries[:LOG_LIST_LIMIT]]
+
+
+def resolve_log_source_path(source_id: str) -> Path:
+    source_id = source_id.strip().replace("\\", "/")
+    if not source_id or source_id == LOG_SOURCE_LIVE:
+        raise ValueError("invalid log source")
+    if ".." in source_id.split("/"):
+        raise ValueError("invalid log source")
+    candidate = (REPO_ROOT / source_id).resolve()
+    repo_root = REPO_ROOT.resolve()
+    if candidate != repo_root and repo_root not in candidate.parents:
+        raise ValueError("invalid log source")
+    if not candidate.is_file():
+        raise FileNotFoundError(source_id)
+    return candidate
+
+
+def read_log_lines_tail(lines_source: list[str] | Path, tail: int) -> tuple[list[str], int, bool]:
+    tail = max(1, min(LOG_TAIL_MAX, tail))
+    if isinstance(lines_source, Path):
+        text = lines_source.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+    else:
+        lines = list(lines_source)
+    total = len(lines)
+    if total <= tail:
+        return lines, total, False
+    return lines[-tail:], total, True
+
+
+def log_files_payload() -> dict[str, Any]:
+    files = collect_log_file_entries()
+    default_id = files[0]["id"] if files else LOG_SOURCE_LIVE
+    return {
+        "files": files,
+        "default_id": default_id,
+        "live_id": LOG_SOURCE_LIVE,
+        "tail_default": LOG_TAIL_DEFAULT,
+        "tail_max": LOG_TAIL_MAX,
+    }
+
+
+def log_content_payload(source_id: str, tail: int) -> dict[str, Any]:
+    tail = max(1, min(LOG_TAIL_MAX, tail))
+    if source_id == LOG_SOURCE_LIVE:
+        with RUN_LOCK:
+            lines, total, truncated = read_log_lines_tail(RUN_LOG_LINES, tail)
+        return {
+            "source_id": LOG_SOURCE_LIVE,
+            "logs": lines,
+            "total_lines": total,
+            "truncated": truncated,
+            "tail": tail,
+        }
+    path = resolve_log_source_path(source_id)
+    lines, total, truncated = read_log_lines_tail(path, tail)
+    return {
+        "source_id": source_id,
+        "logs": lines,
+        "total_lines": total,
+        "truncated": truncated,
+        "tail": tail,
+    }
 
 
 def build_run_meta(result: dict[str, Any], task: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -5966,6 +6212,24 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                     "history_revision": history_revision(),
                 }
             self._send_json(payload)
+            return
+        if parsed.path == "/api/log_files":
+            self._send_json(log_files_payload())
+            return
+        if parsed.path == "/api/log_content":
+            query = parse_qs(parsed.query)
+            source_id = (query.get("source", [LOG_SOURCE_LIVE])[0] or LOG_SOURCE_LIVE).strip()
+            raw_tail = (query.get("tail", [str(LOG_TAIL_DEFAULT)])[0] or str(LOG_TAIL_DEFAULT)).strip()
+            try:
+                tail = max(1, min(LOG_TAIL_MAX, int(raw_tail)))
+            except ValueError:
+                tail = LOG_TAIL_DEFAULT
+            try:
+                self._send_json(log_content_payload(source_id, tail))
+            except FileNotFoundError:
+                self._send_json({"error": "日志文件不存在。"}, code=404)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, code=400)
             return
         if parsed.path == "/api/publish_status":
             query = parse_qs(parsed.query)
