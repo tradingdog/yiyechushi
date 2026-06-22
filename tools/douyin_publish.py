@@ -760,7 +760,91 @@ def cover_apply_confirm_locators(page: Page) -> tuple[Locator, ...]:
     return (
         page.locator("button.submit-eXWVUP").filter(has_text="确定"),
         page.locator("div.operation-zqnRB8 button").filter(has_text="确定"),
+        page.locator("div[role='modal']:visible button").filter(has_text="确定").last,
     )
+
+
+def cover_editor_modal_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.locator("div.semi-modal-wrap[role='modal']:visible").filter(has_text=re.compile("封面")),
+        page.locator("div[role='dialog']:visible").filter(has_text=re.compile("封面")),
+        page.locator("div[role='modal']:visible").filter(has_text=re.compile("上传封面|选择封面|编辑封面|裁剪封面")),
+    )
+
+
+def is_cover_editor_open(page: Page) -> bool:
+    return find_optional_locator(page, cover_editor_modal_locators(page), timeout_ms=400) is not None
+
+
+def is_cover_poster_page(page: Page) -> bool:
+    return "/publish/poster" in (page.url or "")
+
+
+def is_cover_flow_active(page: Page) -> bool:
+    if is_cover_poster_page(page) or is_cover_editor_open(page):
+        return True
+    return find_optional_locator(page, upload_cover_ready_locators(page), timeout_ms=400) is not None
+
+
+def wait_for_main_publish_editor(page: Page, *, timeout_ms: int = 30_000) -> None:
+    deadline = time.time() + timeout_ms / 1000
+    while time.time() < deadline:
+        if is_cover_poster_page(page) or is_cover_editor_open(page):
+            page.wait_for_timeout(300)
+            continue
+        if find_optional_locator(page, publish_editor_resume_locators(page), timeout_ms=500):
+            return
+        if find_optional_locator(page, title_input_locators(page), timeout_ms=500):
+            return
+        page.wait_for_timeout(300)
+    raise RuntimeError("等待返回图文编辑页超时。")
+
+
+def finish_cover_upload(page: Page, settings: PublishSettings) -> None:
+    for attempt_index in range(10):
+        if find_optional_locator(page, publish_editor_resume_locators(page), timeout_ms=800):
+            break
+        if find_optional_locator(page, title_input_locators(page), timeout_ms=800) and not is_cover_poster_page(page):
+            break
+
+        if is_cover_poster_page(page):
+            confirm_button = find_optional_locator(page, cover_save_confirm_locators(page), timeout_ms=2_000)
+            if confirm_button is not None:
+                confirm_button.click()
+                print("已点击：封面页确定按钮")
+                page.wait_for_load_state("domcontentloaded")
+                page.wait_for_timeout(1_200)
+                continue
+            page.wait_for_timeout(800)
+            continue
+
+        if is_cover_editor_open(page) or find_optional_locator(page, upload_cover_ready_locators(page), timeout_ms=800):
+            apply_button = find_optional_locator(page, cover_apply_confirm_locators(page), timeout_ms=1_500)
+            if apply_button is not None:
+                apply_button.click()
+                print("已点击：封面应用确认按钮")
+                page.wait_for_timeout(800)
+                continue
+            save_button = find_optional_locator(page, cover_save_confirm_locators(page), timeout_ms=1_500)
+            if save_button is not None:
+                save_button.click()
+                print("已点击：上传封面确认按钮")
+                page.wait_for_timeout(800)
+                continue
+
+        if not is_cover_flow_active(page):
+            break
+
+        if attempt_index >= 9:
+            break
+        page.wait_for_timeout(800)
+
+    if is_cover_poster_page(page):
+        raise RuntimeError("封面页确定后仍未返回图文编辑页。")
+
+    wait_for_main_publish_editor(page, timeout_ms=30_000)
+    print("封面编辑已完成，主编辑区已恢复。")
+    page.wait_for_timeout(settings.after_cover_confirm_wait_ms)
 
 
 def final_publish_button_locators(page: Page) -> tuple[Locator, ...]:
@@ -790,8 +874,12 @@ def confirm_button_locators(page: Page) -> tuple[Locator, ...]:
 def declaration_select_locators(page: Page) -> tuple[Locator, ...]:
     return (
         page.get_by_text("请选择自主声明", exact=True),
+        page.locator("span.semi-select-selection-placeholder").filter(has_text="请选择自主声明"),
+        page.locator("div.semi-select-selection").filter(has_text="请选择自主声明"),
         page.locator("div").filter(has_text="请选择自主声明"),
         page.locator("span").filter(has_text="请选择自主声明"),
+        page.locator("div").filter(has_text=re.compile("^自主声明$")),
+        page.locator(".semi-select").filter(has_text="自主声明"),
     )
 
 
@@ -824,13 +912,13 @@ def location_option_locators(page: Page, location_name: str) -> tuple[Locator, .
 
 
 def publish_editor_resume_locators(page: Page) -> tuple[Locator, ...]:
-    return declaration_select_locators(page) + title_input_locators(page)
+    return declaration_select_locators(page)
 
 
 def scheduled_publish_label_locators(page: Page) -> tuple[Locator, ...]:
     return (
-        page.locator('label:has(input[type="checkbox"][value="1"])'),
         page.locator("label").filter(has_text="定时发布"),
+        page.locator('label:has(input[type="checkbox"][value="1"])').filter(has_text="定时发布"),
     )
 
 
@@ -838,7 +926,14 @@ def scheduled_datetime_input_locators(page: Page) -> tuple[Locator, ...]:
     return (
         page.locator('input[placeholder="日期和时间"]'),
         page.get_by_placeholder("日期和时间"),
+        page.locator(".semi-datepicker-input input"),
+        page.locator(".schedule-publish input.semi-input"),
+        page.locator("input.semi-input[placeholder='日期和时间']"),
     )
+
+
+def scheduled_publish_mode_input(page: Page) -> Locator:
+    return page.locator("label").filter(has_text="定时发布").locator('input[type="checkbox"]').first
 
 
 def datepicker_panel_locator(page: Page) -> Locator:
@@ -955,13 +1050,23 @@ def dismiss_datetime_picker(page: Page) -> None:
 
 def set_scheduled_publish_time(page: Page, schedule_at: str, settings: PublishSettings) -> None:
     year, month, day, hour, minute = _parse_schedule_parts(schedule_at)
-    click_locator(page, scheduled_publish_label_locators(page), description="定时发布选项", timeout_ms=30_000)
+    schedule_label = wait_for_locator(
+        page,
+        scheduled_publish_label_locators(page),
+        description="定时发布选项",
+        timeout_ms=30_000,
+    )
+    schedule_label.scroll_into_view_if_needed()
+    schedule_label.click()
+    print("已点击：定时发布选项")
+    page.wait_for_timeout(600)
     datetime_input = wait_for_locator(
         page,
         scheduled_datetime_input_locators(page),
         description="定时发布日期时间输入框",
-        timeout_ms=15_000,
+        timeout_ms=20_000,
     )
+    datetime_input.scroll_into_view_if_needed()
     datetime_input.click()
     page.wait_for_timeout(400)
     wait_for_locator(page, (datepicker_panel_locator(page),), description="日期时间选择弹层", timeout_ms=10_000)
@@ -990,7 +1095,7 @@ def set_scheduled_publish_time(page: Page, schedule_at: str, settings: PublishSe
     if current_value != schedule_at:
         raise RuntimeError(f"定时发布时间未生效，期望 {schedule_at}，当前 {current_value or '空'}。")
 
-    scheduled_mode = page.locator('input[type="checkbox"][value="1"]').first
+    scheduled_mode = scheduled_publish_mode_input(page)
     if scheduled_mode.count() and not scheduled_mode.is_checked():
         raise RuntimeError("定时发布模式未保持选中状态。")
 
@@ -1117,22 +1222,8 @@ def upload_cover(page: Page, assets: PublishAssets, settings: PublishSettings) -
     if not crop_modal_closed:
         raise RuntimeError("封面裁剪弹窗确认后仍未关闭。")
 
-    wait_for_locator(page, upload_cover_ready_locators(page), description="上传封面就绪状态", timeout_ms=30_000)
-
-    editor_resumed = False
-    for attempt_index in range(3):
-        click_locator(page, cover_save_confirm_locators(page), description="上传封面确认按钮", timeout_ms=30_000)
-        if find_optional_locator(page, publish_editor_resume_locators(page), timeout_ms=4_000):
-            editor_resumed = True
-            break
-        if attempt_index == 2:
-            break
-        page.wait_for_timeout(1_500)
-
-    if not editor_resumed:
-        raise RuntimeError("上传封面确认后，主编辑区仍未恢复。")
-
-    page.wait_for_timeout(settings.after_cover_confirm_wait_ms)
+    page.wait_for_timeout(800)
+    finish_cover_upload(page, settings)
 
 
 def submit_declaration(page: Page, settings: PublishSettings) -> None:
