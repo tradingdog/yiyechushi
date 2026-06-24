@@ -456,6 +456,7 @@ def to_cdp_settings(settings: XiaohongshuPublishSettings) -> PublishSettings:
         after_cover_confirm_wait_ms=0,
         after_declaration_open_wait_ms=0,
         auto_submit_publish=False,
+        schedule_at=None,
         debug_screenshot=settings.debug_screenshot,
         dry_run=settings.dry_run,
     )
