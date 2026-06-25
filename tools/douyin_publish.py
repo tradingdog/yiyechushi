@@ -197,7 +197,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--schedule-at",
         default="",
-        help="定时发布时间，格式 yyyy-MM-dd HH:mm；传入后会自动勾选「定时发布」并填写时间。",
+        help="定时发布时间，格式 yyyy-MM-dd HH:mm；传入后会自动勾选「定时发布」并填写时间，不会自动点击发布（须配合 --auto-submit-publish 才会提交）。",
     )
     parser.add_argument(
         "--debug-screenshot",
@@ -255,7 +255,7 @@ def resolve_settings(args: argparse.Namespace) -> PublishSettings:
     chrome_path_text = str(args.chrome_path or "").strip()
     chrome_path = resolve_path(chrome_path_text) if chrome_path_text else find_default_chrome_path()
     schedule_at = normalize_schedule_at(getattr(args, "schedule_at", ""))
-    auto_submit_publish = bool(args.auto_submit_publish) or schedule_at is not None
+    auto_submit_publish = bool(args.auto_submit_publish)
 
     return PublishSettings(
         output_dir=output_dir,
@@ -1267,8 +1267,14 @@ def submit_final_publish(page: Page) -> None:
     print("已进入作品管理页，发布流程已提交。")
 
 
-def wait_for_manual_publish_ready(page: Page) -> None:
+def wait_for_manual_publish_ready(page: Page, *, schedule_at: str | None = None) -> None:
     wait_for_locator(page, final_publish_button_locators(page), description="最终发布按钮", timeout_ms=30_000)
+    if schedule_at:
+        print(
+            f"已完成自动填充、声明与定时设置（{schedule_at}），"
+            "当前停在待人工发布状态，请人工审核后手动点击发布。"
+        )
+        return
     print("已完成自动填充与声明处理，当前停在待人工发布状态，请人工审核后手动点击发布。")
 
 
@@ -1310,7 +1316,7 @@ def run_publish(settings: PublishSettings, assets: PublishAssets) -> None:
             if settings.auto_submit_publish:
                 submit_final_publish(page)
             else:
-                wait_for_manual_publish_ready(page)
+                wait_for_manual_publish_ready(page, schedule_at=settings.schedule_at)
         except Exception:
             settings.debug_screenshot.parent.mkdir(parents=True, exist_ok=True)
             try:
