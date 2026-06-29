@@ -3230,6 +3230,18 @@ _DESC_LIMIT_HINT = "描述正文不超过 100 个汉字（不含话题标签）�
 
 _FORBIDDEN_ORIGIN_MARKERS = ("原创", "自制", "自创", "自主研发")
 
+_PUBLISH_EXTRA_FORBIDDEN_HINT = (
+    "另外禁止：话题不得使用 #家常硬菜，不得含「天花板」字样；"
+    "标题与正文不得出现「连炫几碗饭」「连吃三碗」「连炫三碗」等碗饭数量套话。"
+)
+
+_PUBLISH_FORBIDDEN_TOPIC_EXACT = frozenset({"家常硬菜"})
+
+_BOWL_RICE_CLICHE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"连[吃炫馋扒撬]"), "连炫/连吃几碗类套话"),
+    (re.compile(r"[吃炫干馋][一二三四五六七八九十百千万两\d]+碗"), "吃/炫N碗类套话"),
+)
+
 PUBLISH_COPY_TITLE_SUFFIXES: tuple[str, ...] = (
     "_图文标题.txt",
     "_抖音标题.txt",
@@ -3503,6 +3515,24 @@ def validate_publish_no_origin_markers(text: str, *, platform_label: str, field_
             )
 
 
+def validate_publish_bowl_rice_cliche(text: str, *, platform_label: str, field_label: str) -> None:
+    body = str(text or "").strip()
+    if not body:
+        return
+    for pattern, label in _BOWL_RICE_CLICHE_PATTERNS:
+        if pattern.search(body):
+            raise ValueError(f"{platform_label}{field_label}禁止{label}，请改写：{body}")
+
+
+def validate_publish_forbidden_topics(topics: list[str], *, platform_label: str) -> None:
+    for topic in topics:
+        tag = str(topic).lstrip("#").strip()
+        if tag in _PUBLISH_FORBIDDEN_TOPIC_EXACT:
+            raise ValueError(f"{platform_label}话题禁止使用 #{tag}：{topic}")
+        if "天花板" in tag:
+            raise ValueError(f"{platform_label}话题不得含「天花板」：{topic}")
+
+
 def build_v2_publish_platform_prompt(
     platform_key: str,
     dish_payload: dict[str, str],
@@ -3571,7 +3601,7 @@ def build_v2_publish_platform_prompt(
     if not task:
         raise ValueError(f"未知平台：{platform_key}")
     return (
-        f"{basic_block}{task}"
+        f"{basic_block}{task}\n\n{_PUBLISH_EXTRA_FORBIDDEN_HINT}"
         f"{history_suffix}\n"
         f"可参考附件海报图的色泽与摆盘。只输出 JSON，不要 Markdown，不要解释。格式：\n"
         f'{{"title": "...", "description": "...", "topics": ["#...", "..."]}}'
@@ -3761,9 +3791,12 @@ def parse_v2_publish_single_platform_block(
     validate_publish_description_length(description, platform_key=platform_key)
     validate_publish_title_no_dish_name(title, dish_name, platform_label=platform_label)
     validate_publish_no_origin_markers(title, platform_label=platform_label, field_label="标题")
+    validate_publish_bowl_rice_cliche(title, platform_label=platform_label, field_label="标题")
     validate_publish_no_origin_markers(description, platform_label=platform_label, field_label="正文")
+    validate_publish_bowl_rice_cliche(description, platform_label=platform_label, field_label="正文")
     topics = normalize_v2_publish_topics(block.get("topics"), topic_count)
     validate_publish_topics_no_dish_name(topics, dish_name, platform_label=platform_label)
+    validate_publish_forbidden_topics(topics, platform_label=platform_label)
     if not title:
         raise ValueError(f"{platform_label} 标题为空。")
     if not description:
