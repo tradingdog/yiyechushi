@@ -1195,8 +1195,9 @@ def _compress_image_to_byte_limit(
     *,
     max_bytes: int,
     log_prefix: str,
+    max_long_edge: int | None = None,
 ) -> tuple[bytes, str]:
-    """仅在超过体积上限时缩放并转 JPEG（保留尽可能大的尺寸）。"""
+    """缩放（可选）并转 JPEG，压至体积上限以内。"""
     try:
         from PIL import Image
     except ModuleNotFoundError as exc:
@@ -1209,6 +1210,12 @@ def _compress_image_to_byte_limit(
     with Image.open(image_path) as image:
         original_size = image.size
         canvas = image.convert("RGB")
+        if max_long_edge and max(canvas.size) > max_long_edge:
+            scale = max_long_edge / max(canvas.size)
+            canvas = canvas.resize(
+                (max(1, int(canvas.width * scale)), max(1, int(canvas.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
         for _ in range(10):
             quality = 92
             for _ in range(8):
@@ -1237,22 +1244,65 @@ def _compress_image_to_byte_limit(
     )
 
 
-def prepare_image_bytes_for_vision_api(image_path: Path) -> tuple[bytes, str]:
-    """多模态 image_url 用图：未超限则原样返回，仅豆包 10 MiB 等体积超限时才压缩。"""
+def resolve_vision_image_upload_limits(image_count: int) -> tuple[int, int]:
+    """返回 (单图最大字节, 长边上限)。"""
+    single_max = parse_int_env("VISION_IMAGE_MAX_BYTES", 9 * 1024 * 1024)
+    total_budget = parse_int_env("VISION_MULTI_IMAGE_TOTAL_MAX_BYTES", 6 * 1024 * 1024)
+    count = max(1, image_count)
+    per_image = min(single_max, max(512 * 1024, total_budget // count))
+    if count >= 3:
+        max_long_edge = parse_int_env("VISION_MULTI_IMAGE_MAX_LONG_EDGE", 1280)
+    elif count >= 2:
+        max_long_edge = parse_int_env("VISION_DUAL_IMAGE_MAX_LONG_EDGE", 1536)
+    else:
+        max_long_edge = parse_int_env("VISION_IMAGE_MAX_LONG_EDGE", 2048)
+    return per_image, max_long_edge
+
+
+def prepare_image_bytes_for_vision_api(
+    image_path: Path,
+    *,
+    max_bytes: int | None = None,
+    max_long_edge: int | None = None,
+    log_prefix: str = "多模态参考图",
+) -> tuple[bytes, str]:
+    """多模态 image_url 用图：按体积与长边上限归一化后再上传豆包。"""
+    per_image_max, default_long_edge = resolve_vision_image_upload_limits(1)
+    max_bytes = max_bytes or per_image_max
+    max_long_edge = max_long_edge or default_long_edge
     raw = image_path.read_bytes()
     guessed_mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
-    max_bytes = parse_int_env("VISION_IMAGE_MAX_BYTES", 9 * 1024 * 1024)
-    if len(raw) <= max_bytes:
-        return raw, guessed_mime
+    needs_resize = False
+    try:
+        from PIL import Image
+
+        with Image.open(image_path) as image:
+            needs_resize = max(image.size) > max_long_edge
+    except Exception:
+        needs_resize = False
+    if len(raw) <= max_bytes and not needs_resize and guessed_mime in {"image/jpeg", "image/jpg"}:
+        return raw, "image/jpeg"
     return _compress_image_to_byte_limit(
         image_path,
         max_bytes=max_bytes,
-        log_prefix="多模态参考图",
+        log_prefix=log_prefix,
+        max_long_edge=max_long_edge,
     )
 
 
-def encode_image_as_data_url(image_path: Path) -> str:
-    image_bytes, mime = prepare_image_bytes_for_vision_api(image_path)
+def encode_image_as_data_url(
+    image_path: Path,
+    *,
+    max_bytes: int | None = None,
+    max_long_edge: int | None = None,
+    log_prefix: str = "多模态参考图",
+) -> str:
+    image_bytes, mime = prepare_image_bytes_for_vision_api(
+        image_path,
+        max_bytes=max_bytes,
+        max_long_edge=max_long_edge,
+        log_prefix=log_prefix,
+    )
     encoded = base64.b64encode(image_bytes).decode("ascii")
     return f"data:{mime};base64,{encoded}"
 
@@ -1523,19 +1573,71 @@ def generate_haibao_prompt_by_template(
     paths = [Path(item).resolve() for item in (ingredient_reference_paths or []) if Path(item).is_file()]
     paths = paths[:MAX_POSTER_INGREDIENT_REFERENCE_COUNT]
     if paths:
-        return generate_haibao_prompt_with_ingredient_refs(
-            client=client,
-            dish_name=dish_name,
-            notes=notes,
-            template_text=template_text,
-            image_paths=paths,
-        )
+        try:
+            return generate_haibao_prompt_with_ingredient_refs(
+                client=client,
+                dish_name=dish_name,
+                notes=notes,
+                template_text=template_text,
+                image_paths=paths,
+            )
+        except RuntimeError as exc:
+            if classify_text_api_error(exc) != "connection" and "Connection error" not in str(exc):
+                raise
+            print(
+                "海报主食材多模态改写连接失败，降级为纯文本模板改写"
+                "（参考图仍用于 gpt-image-2 生图，并在 prompt 中保留主食材提示）。"
+            )
+            text_result = generate_cankao_prompt_by_template(
+                client=client,
+                dish_name=dish_name,
+                notes=notes,
+                template_text=template_text,
+            )
+            if POSTER_INGREDIENT_REFERENCE_HINT not in text_result["prompt"]:
+                text_result["prompt"] = (
+                    f"{POSTER_INGREDIENT_REFERENCE_HINT}。\n{text_result['prompt']}"
+                )
+            return text_result
     return generate_cankao_prompt_by_template(
         client=client,
         dish_name=dish_name,
         notes=notes,
         template_text=template_text,
     )
+
+
+def _build_haibao_ingredient_ref_user_content(
+    *,
+    user_prompt: str,
+    image_paths: list[Path],
+    max_bytes: int,
+    max_long_edge: int,
+) -> list[dict[str, Any]]:
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+    for index, image_path in enumerate(image_paths, start=1):
+        if not image_path.exists():
+            raise FileNotFoundError(f"海报参考图不存在：{image_path}")
+        user_content.append(
+            {
+                "type": "text",
+                "text": f"主食材参考图 {index}（后续 gpt-image-2 生图将使用此图还原食材外观）",
+            }
+        )
+        user_content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": encode_image_as_data_url(
+                        image_path,
+                        max_bytes=max_bytes,
+                        max_long_edge=max_long_edge,
+                        log_prefix="海报主食材参考图",
+                    )
+                },
+            }
+        )
+    return user_content
 
 
 def generate_haibao_prompt_with_ingredient_refs(
@@ -1579,71 +1681,93 @@ def generate_haibao_prompt_with_ingredient_refs(
 请只返回 replacements JSON。
 """.strip()
 
-    user_content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
-    for index, image_path in enumerate(image_paths, start=1):
-        if not image_path.exists():
-            raise FileNotFoundError(f"海报参考图不存在：{image_path}")
-        user_content.append(
-            {
-                "type": "text",
-                "text": f"主食材参考图 {index}（后续 gpt-image-2 生图将使用此图还原食材外观）",
-            }
-        )
-        user_content.append({"type": "image_url", "image_url": {"url": encode_image_as_data_url(image_path)}})
+    per_image_max, max_long_edge = resolve_vision_image_upload_limits(len(image_paths))
+    print(
+        f"海报主食材参考图多模态上传：{len(image_paths)} 张，"
+        f"单图≤{per_image_max // 1024}KB，长边≤{max_long_edge}px"
+    )
+    compression_profiles: list[tuple[str, int, int]] = [
+        ("标准", per_image_max, max_long_edge),
+        (
+            "降级",
+            max(384 * 1024, per_image_max // 2),
+            min(max_long_edge, parse_int_env("VISION_MULTI_IMAGE_FALLBACK_LONG_EDGE", 960)),
+        ),
+    ]
 
     max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 5)
     last_error: Exception | None = None
     validation_feedback = ""
-    for attempt in range(1, max_retry + 1):
-        attempt_content = list(user_content)
-        if validation_feedback:
-            attempt_content[0] = {
-                "type": "text",
-                "text": user_prompt + f"\n\n上次输出不合格：{validation_feedback}\n请严格按参考图重写 replacements。",
-            }
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": attempt_content},
-                ],
-                max_tokens=2600,
-                temperature=temperature,
+    saw_connection_error = False
+    for profile_label, profile_bytes, profile_long_edge in compression_profiles:
+        user_content = _build_haibao_ingredient_ref_user_content(
+            user_prompt=user_prompt,
+            image_paths=image_paths,
+            max_bytes=profile_bytes,
+            max_long_edge=profile_long_edge,
+        )
+        if profile_label == "降级":
+            print(
+                f"海报主食材参考图多模态请求改用{profile_label}压缩："
+                f"单图≤{profile_bytes // 1024}KB，长边≤{profile_long_edge}px"
             )
-        except Exception as exc:
-            last_error = exc
-            error_kind = classify_text_api_error(exc)
-            if is_retriable_text_api_error(exc) and attempt < max_retry:
-                delay = api_retry_delay_seconds(attempt, error_kind=error_kind)
-                print(f"海报主食材参考图模板改写第 {attempt} 次失败（{error_kind}），{delay:.0f}s 后重试…")
-                sleep_with_cancel(delay)
+        for attempt in range(1, max_retry + 1):
+            attempt_content = list(user_content)
+            if validation_feedback:
+                attempt_content[0] = {
+                    "type": "text",
+                    "text": user_prompt + f"\n\n上次输出不合格：{validation_feedback}\n请严格按参考图重写 replacements。",
+                }
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": attempt_content},
+                    ],
+                    max_tokens=2600,
+                    temperature=temperature,
+                )
+            except Exception as exc:
+                last_error = exc
+                error_kind = classify_text_api_error(exc)
+                if error_kind == "connection":
+                    saw_connection_error = True
+                if is_retriable_text_api_error(exc) and attempt < max_retry:
+                    delay = api_retry_delay_seconds(attempt, error_kind=error_kind)
+                    print(f"海报主食材参考图模板改写第 {attempt} 次失败（{error_kind}），{delay:.0f}s 后重试…")
+                    sleep_with_cancel(delay)
+                    continue
+                break
+
+            raw_text = extract_chat_text_output(response).strip()
+            if not raw_text:
+                validation_feedback = "豆包未返回有效内容。"
+                last_error = ValueError(validation_feedback)
                 continue
-            break
+            try:
+                payload = extract_json_object_from_text(raw_text)
+                replacements_raw = payload.get("replacements")
+                if not isinstance(replacements_raw, list):
+                    raise ValueError("豆包返回 JSON 缺少 replacements 数组。")
+                replacements = [str(item).strip() for item in replacements_raw]
+                if len(replacements) != len(placeholders):
+                    raise ValueError(f"变量替换数量不匹配：需要 {len(placeholders)} 个，实际 {len(replacements)} 个。")
 
-        raw_text = extract_chat_text_output(response).strip()
-        if not raw_text:
-            validation_feedback = "豆包未返回有效内容。"
-            last_error = ValueError(validation_feedback)
+                inject_poster_ingredient_ref_hint(placeholders, replacements)
+                prompt_text = render_cankao_template_by_replacements(
+                    template_text=template_text,
+                    replacements=replacements,
+                )
+                return {"model": model, "prompt": prompt_text}
+            except ValueError as exc:
+                validation_feedback = str(exc)
+                last_error = exc
+                continue
+        if saw_connection_error and profile_label == "标准":
             continue
-        try:
-            payload = extract_json_object_from_text(raw_text)
-            replacements_raw = payload.get("replacements")
-            if not isinstance(replacements_raw, list):
-                raise ValueError("豆包返回 JSON 缺少 replacements 数组。")
-            replacements = [str(item).strip() for item in replacements_raw]
-            if len(replacements) != len(placeholders):
-                raise ValueError(f"变量替换数量不匹配：需要 {len(placeholders)} 个，实际 {len(replacements)} 个。")
-
-            inject_poster_ingredient_ref_hint(placeholders, replacements)
-            prompt_text = render_cankao_template_by_replacements(
-                template_text=template_text,
-                replacements=replacements,
-            )
-            return {"model": model, "prompt": prompt_text}
-        except ValueError as exc:
-            validation_feedback = str(exc)
-            last_error = exc
+        if not saw_connection_error:
+            break
 
     raise RuntimeError(f"海报主食材参考图模板改写失败：{last_error or '未知错误'}")
 
@@ -1725,6 +1849,7 @@ def generate_cankao_prompt_with_images(
 请只返回 replacements JSON。
 """.strip()
 
+    per_image_max, max_long_edge = resolve_vision_image_upload_limits(len(image_paths))
     user_content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
     for image_path in image_paths:
         if not image_path.exists():
@@ -1735,7 +1860,19 @@ def generate_cankao_prompt_with_images(
         else:
             label = "参考海报图（细节图文案必须与本图菜品完全一致）"
         user_content.append({"type": "text", "text": label})
-        user_content.append({"type": "image_url", "image_url": {"url": encode_image_as_data_url(image_path)}})
+        user_content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": encode_image_as_data_url(
+                        image_path,
+                        max_bytes=per_image_max,
+                        max_long_edge=max_long_edge,
+                        log_prefix=f"{stage_name}参考图",
+                    )
+                },
+            }
+        )
 
     max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 5)
     last_error: Exception | None = None
