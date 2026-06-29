@@ -320,10 +320,92 @@ def parse_bool_env(env_name: str, default: bool) -> bool:
     raise RuntimeError(f"{env_name} 只支持 1/0/true/false/on/off。")
 
 
-def build_httpx_client(timeout_seconds: float, *, trust_env: bool | None = None) -> httpx.Client:
+BAT_PROXY_PORT = "17890"
+
+
+def read_windows_ie_proxy_url() -> str:
+    if sys.platform != "win32":
+        return ""
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        ) as key:
+            enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            if not int(enabled or 0):
+                return ""
+            server, _ = winreg.QueryValueEx(key, "ProxyServer")
+    except OSError:
+        return ""
+
+    server_text = str(server or "").strip()
+    if not server_text:
+        return ""
+    if ";" in server_text:
+        chosen = ""
+        for part in server_text.split(";"):
+            item = part.strip()
+            if item.lower().startswith("https="):
+                chosen = item.split("=", 1)[1].strip()
+                break
+        if not chosen:
+            chosen = server_text.split(";")[0].strip()
+        server_text = chosen
+    if "://" not in server_text:
+        server_text = f"http://{server_text}"
+    return server_text
+
+
+def resolve_env_proxy_url() -> str:
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def is_stale_bat_proxy_url(proxy_url: str) -> bool:
+    return BAT_PROXY_PORT in str(proxy_url or "")
+
+
+def clear_stale_bat_proxy_env() -> None:
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        value = os.getenv(name, "").strip()
+        if value and is_stale_bat_proxy_url(value):
+            os.environ.pop(name, None)
+
+
+def resolve_effective_http_proxy(*, prefer_system: bool = True) -> str:
+    env_proxy = resolve_env_proxy_url()
+    system_proxy = read_windows_ie_proxy_url() if prefer_system else ""
+    if env_proxy and is_stale_bat_proxy_url(env_proxy):
+        clear_stale_bat_proxy_env()
+        env_proxy = ""
+    if env_proxy:
+        return env_proxy
+    return system_proxy
+
+
+def build_httpx_client(
+    timeout_seconds: float,
+    *,
+    trust_env: bool | None = None,
+    use_system_proxy: bool = True,
+) -> httpx.Client:
     if trust_env is None:
         trust_env = parse_bool_env("HTTP_TRUST_ENV", default=True)
-    return httpx.Client(timeout=timeout_seconds, trust_env=trust_env)
+    if not trust_env:
+        return httpx.Client(timeout=timeout_seconds, trust_env=False)
+
+    proxy_url = resolve_effective_http_proxy(prefer_system=use_system_proxy)
+    if proxy_url:
+        if is_stale_bat_proxy_url(proxy_url):
+            proxy_url = read_windows_ie_proxy_url()
+        if proxy_url:
+            return httpx.Client(timeout=timeout_seconds, proxy=proxy_url, trust_env=False)
+    return httpx.Client(timeout=timeout_seconds, trust_env=True)
 
 
 def parse_float_env(env_name: str, default: float) -> float:
