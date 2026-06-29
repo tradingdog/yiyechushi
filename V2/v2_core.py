@@ -3147,6 +3147,7 @@ def infer_dish_name_from_folder(folder_name: str) -> str:
 
 PUBLISH_TITLE_MAX_UNITS = 40
 XIAOHONGSHU_TITLE_MAX_UNITS = PUBLISH_TITLE_MAX_UNITS
+PUBLISH_DESCRIPTION_MAX_CHARS = 100
 
 
 def count_publish_title_units(text: str) -> int:
@@ -3198,6 +3199,21 @@ def normalize_xiaohongshu_title(title: str) -> str:
     return normalize_publish_title(title, platform_key="xiaohongshu")
 
 
+def count_publish_description_chars(text: str) -> int:
+    """描述正文计字：去掉空白后的可见字符数（中文场景下约等于汉字数）。"""
+    return len(re.sub(r"\s+", "", str(text or "")))
+
+
+def validate_publish_description_length(description: str, *, platform_key: str = "") -> None:
+    chars = count_publish_description_chars(description)
+    if chars > PUBLISH_DESCRIPTION_MAX_CHARS:
+        label = platform_key or "平台"
+        raise ValueError(
+            f"{label} 描述正文超过 {PUBLISH_DESCRIPTION_MAX_CHARS} 个汉字上限"
+            f"（当前约 {chars} 字）：{description}"
+        )
+
+
 V2_PUBLISH_PLATFORM_SPECS: tuple[tuple[str, str, int], ...] = (
     ("douyin", "抖音", 5),
     ("xiaohongshu", "小红书", 10),
@@ -3207,58 +3223,36 @@ V2_PUBLISH_PLATFORM_SPECS: tuple[tuple[str, str, int], ...] = (
 )
 
 _TITLE_LIMIT_HINT = (
-    "标题必须不超过 20 个汉字（40 字符上限；汉字/表情/符号等非 ASCII 计 2、英文/数字计 1，表情也算字符）。"
+    "标题不超过 20 个汉字（40 字符上限；汉字/表情/符号等非 ASCII 计 2、英文/数字计 1）。"
 )
 
-_TITLE_CLICHE_FORBIDDEN_HINT = (
-    "标题禁止「几碗饭/连吃几碗/连炫几碗」类套话（如「三碗饭」「连炫三碗」「连吃三碗」「能干两碗」等）；"
-    "勿用数量+碗/碗饭作钩子，换写口感、做法亮点、场景或反差，各平台标题句式要有变化。"
-)
+_DESC_LIMIT_HINT = "描述正文不超过 100 个汉字（不含话题标签）。"
 
-_FORBIDDEN_TITLE_CLICHE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"连[吃炫馋扒撬]"), "连吃/连炫几碗类套话"),
-    (re.compile(r"[吃炫干馋][一二三四五六七八九十百千万两\d]+碗"), "吃/炫N碗类套话"),
-    (re.compile(r"[一二三四五六七八九十百千万两\d]+碗饭"), "N碗饭类套话"),
-)
-
-
-def reject_cliche_bowl_title(title: str) -> str | None:
-    text = str(title or "").strip()
-    if not text:
-        return None
-    for pattern, label in _FORBIDDEN_TITLE_CLICHE_PATTERNS:
-        if pattern.search(text):
-            return (
-                f"标题含禁用{label}（如「三碗饭」「连炫三碗」「连吃三碗」），"
-                f"请改写：{text}"
-            )
-    return None
-
-V2_PUBLISH_PLATFORM_TASKS: dict[str, str] = {
+V2_PUBLISH_PLATFORM_PERSONAS: dict[str, str] = {
     "douyin": (
-        f"先完成三要素分析，再写抖音标题、描述和正好 5 个话题（不超过 5 个）。"
-        f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}"
-        f"标题要有网感、像真人发图文；描述从本菜感官 + 受众场景 + 食欲冲动写起，别写成菜谱步骤。"
+        "标题调性：冲突/反问/具体画面，1 个钩子。"
+        "描述调性：约 2 句，先写视觉感受，再带一句行动号召。"
+        "话题 5 个。"
     ),
     "xiaohongshu": (
-        f"先完成三要素分析，再写小红书标题、描述和 10 个话题。"
-        f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}"
-        f"标题像真实分享笔记；描述写清「我为什么在这个时节想吃它」。"
+        "标题调性：第一人称「我」+ 真实动机。"
+        "描述调性：经历 → 踩坑或惊喜 → 适合谁。"
+        "话题 10 个。"
     ),
     "weixin_mp": (
-        f"先完成三要素分析，再写公众号标题、描述和正好 10 个话题（不超过 10 个）。"
-        f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}"
-        f"标题可读、有吸引力；描述稳重但不空，突出本菜特色与食用场景。"
+        "标题调性：信息型，少感叹号。"
+        "描述调性：做法亮点 1 句 + 适合谁 1 句。"
+        "话题 10 个。"
     ),
     "weixin_channels": (
-        f"先完成三要素分析，再写视频号标题、描述和正好 30 个话题（不超过 30 个）。"
-        f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}"
-        f"标题适合信息流；描述短平快，抓住时节 + 食欲点。"
+        "标题调性：6～12 字主标题感（仍须满足 20 字上限）。"
+        "描述调性：1 句口播感。"
+        "话题 30 个。"
     ),
     "kuaishou": (
-        f"先完成三要素分析，再写快手标题、描述和 4 个话题。"
-        f"{_TITLE_LIMIT_HINT}{_TITLE_CLICHE_FORBIDDEN_HINT}"
-        f"标题接地气；描述像跟朋友唠这道菜为什么此刻值得做。"
+        "标题调性：方言感/整一句。"
+        "描述调性：唠嗑式，为啥此刻做、咋简单。"
+        "话题 4 个。"
     ),
 }
 
@@ -3481,13 +3475,14 @@ def build_v2_publish_context_text(dish_payload: dict[str, str]) -> str:
     notes = str(dish_payload.get("notes", "")).strip()
     region_label = str(dish_payload.get("region_label", "")).strip()
     reference_dish = str(dish_payload.get("reference_dish", "")).strip()
-    lines = [f"菜名：{dish_name}"]
+    today = datetime.now().strftime("%Y年%m月%d日")
+    lines = [f"当前日期：{today}", f"菜名：{dish_name}"]
     if notes:
         lines.append(f"做法与菜品描述：{notes}")
     if region_label:
         lines.append(f"参考菜系：{region_label}")
     if reference_dish:
-        lines.append(f"参考传统菜：{reference_dish}")
+        lines.append(f"参考传统菜（仅作研发灵感，文案须强调这是阿叶原创全新菜，勿写成该传统菜本身）：{reference_dish}")
     return "\n".join(lines)
 
 
@@ -3499,54 +3494,30 @@ def build_v2_publish_multimodal_prompt(
     creative_angle: str = "",
     output_dir: Path | None = None,
 ) -> str:
+    del history_titles, history_descriptions, creative_angle, output_dir
     platform_lines = "\n".join(
-        f"- {label}：{V2_PUBLISH_PLATFORM_TASKS[key]}" for key, label, _count in V2_PUBLISH_PLATFORM_SPECS
+        f"- {label}：{V2_PUBLISH_PLATFORM_PERSONAS[key]}{_TITLE_LIMIT_HINT}{_DESC_LIMIT_HINT}"
+        for key, label, _count in V2_PUBLISH_PLATFORM_SPECS
     )
-    history_block = build_publish_copy_history_prompt_block(
-        history_titles or [],
-        history_descriptions or [],
-    )
-    meal_context = build_dish_copy_meal_context(dish_payload, output_dir=output_dir)
-    angle_line = creative_angle.strip() or pick_publish_copy_creative_angle(
-        avoid_late_night=bool(meal_context["avoid_late_night"]),
-    )
-    forbidden_block = build_huasu_forbidden_prompt_block(max_items=56)
-    pillars_block = build_copy_three_pillars_block()
-    scene_block = build_copy_dish_scene_context_block(dish_payload, output_dir=output_dir)
-    desire_block = build_food_desire_framework_block()
-    return f"""你是多平台美食图文运营。请结合附件里的「入选海报图」和下方菜品信息，为这道【全新菜品】写各平台发布文案。
+    topic_spec = "、".join(f"{label} {count} 个" for _key, label, count in V2_PUBLISH_PLATFORM_SPECS)
+    return f"""你是「阿叶」（账号 @阿叶造新菜），专注自己从零研发的原创新菜。请结合附件「入选海报图」与下方菜品信息，为这道【阿叶原创新菜】写各平台发布文案。
 
-{pillars_block}
-
-写作流程（必须按顺序思考，不要跳步）：
-1) 阅读「菜品食用场景」，写出 timely_hook：与本菜餐次/特色匹配的生活场景，让用户更想吃这道菜（勿按程序运行时刻硬套夜宵/佐酒）。
-2) 阅读菜品信息与海报，写出 audience_analysis：谁会吃、在什么场景点开、本菜独特卖点是什么。
-3) 从「人性食欲切入点」中选最贴合的，写出 food_desire_angle：触达哪种底层食欲冲动。
-4) 本次创意辅助角度（标题与描述须与之协调，但不能替代三要素；若与本菜餐次冲突则忽略该角度）：{angle_line}
-5) 基于以上三点，用口语/网感写各平台标题与描述：多写色泽、香气、声响、质感、余味、搭配反差；禁止万能菜谱腔。
-
-{scene_block}
-
-{desire_block}
+人设与边界：
+- 这是阿叶自己创的新菜，不是传统名菜、不是他人创意；文案勿写成「经典 XX 菜」「某某名店同款」或把参考传统菜当成成品名。
+- 各平台按下方「平台人设」调整语气，但勿照抄固定句式；发挥你的观察与表达，每次可不同。
+- 若你有联网/检索能力，可结合各平台近期热点、热门内容机制，为本菜自拟匹配话题；若无，请依据平台常见高互动话题类型发挥。不要编造「今日热搜第一」等具体假词条。
 
 {build_v2_publish_context_text(dish_payload)}
 
-{history_block}{forbidden_block}各平台写作要求：
+各平台人设（标题 + 描述正文 + 话题）：
 {platform_lines}
 
-通用要求：
-1) 标题、描述须能看出来源三要素（菜品场景 + 本菜受众/特色 + 食欲冲动），不要只堆形容词。
-2) 各平台标题禁止「几碗饭/连吃几碗/连炫几碗」类句式；五个平台标题不得都用同一开头。
-3) 描述 2–4 句：从本菜感官细节切入，可自然提菜名，不要写成步骤清单；五个平台描述不要整段同义复述。
-4) topics 数组每项以 # 开头，不要菜品全名话题，不要 #阿叶造新菜（话题可复用通用标签，不受历史标题/描述限制）；餐次话题须与本菜匹配（早餐菜勿写 #夜宵美食 #佐酒菜）。
-5) 各平台 title 均必须不超过 20 个汉字（40 字符；汉字/表情/符号等非 ASCII 计 2、英文/数字计 1，表情也算字符），超出会被截断或判不合格。
-6) topics 数组长度必须与各平台要求完全一致：抖音 5、小红书 10、微信公众号 10、微信视频号 30、快手 4；不能合并公众号与视频号。
-7) 新写的标题、描述不得与上方历史列表重复或高度相似（仅改菜名、同义换词也算不合格）。
-8) 只输出 JSON，不要 Markdown，不要解释。必须先写 timely_hook、audience_analysis、food_desire_angle，再写各平台字段。格式如下：
+程序硬性校验（仅此几项）：
+1) 各平台 title：{_TITLE_LIMIT_HINT}
+2) 各平台 description：{_DESC_LIMIT_HINT}
+3) topics 每项以 # 开头；数量须严格为 {topic_spec}；不要 #阿叶造新菜；话题由你针对本菜自拟。
+4) 只输出 JSON，不要 Markdown，不要解释。格式如下：
 {{
-  "timely_hook": "结合本菜适餐次与生活场景，说明为何在该场景更想吃这道菜",
-  "audience_analysis": "本菜具体受众、食用场景、核心点击动机与菜品特色",
-  "food_desire_angle": "触达的人性食欲（解馋/好奇/治愈/社交等）及如何写进文案",
   "douyin": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
   "xiaohongshu": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
   "weixin_mp": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
@@ -3707,10 +3678,8 @@ def parse_v2_publish_platform_payload(raw_payload: dict[str, Any]) -> dict[str, 
         if not isinstance(block, dict):
             raise ValueError(f"缺少平台字段：{platform_key}")
         title = normalize_publish_title(str(block.get("title", "")).strip(), platform_key=platform_key)
-        cliche_error = reject_cliche_bowl_title(title)
-        if cliche_error:
-            raise ValueError(f"{platform_key} {cliche_error}")
         description = str(block.get("description", "")).strip()
+        validate_publish_description_length(description, platform_key=platform_key)
         topics = normalize_v2_publish_topics(block.get("topics"), topic_count)
         if not title:
             raise ValueError(f"{platform_key} 标题为空。")
@@ -3803,27 +3772,10 @@ def generate_v2_publish_copy_assets(
 
     model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
     temperature = get_publish_copy_temperature()
-    meal_context = build_dish_copy_meal_context(dish_payload, output_dir=output_dir)
-    creative_angle = pick_publish_copy_creative_angle(
-        avoid_late_night=bool(meal_context["avoid_late_night"]),
-    )
-    exclude_titles, exclude_descs = collect_publish_copy_exclude_from_output_dir(output_dir)
-    history_titles, history_descriptions = sync_publish_copy_history_file(
-        exclude_titles=exclude_titles,
-        exclude_descs=exclude_descs,
-    )
-    prompt_text = build_v2_publish_multimodal_prompt(
-        dish_payload,
-        history_titles=history_titles,
-        history_descriptions=history_descriptions,
-        creative_angle=creative_angle,
-        output_dir=output_dir,
-    )
+    prompt_text = build_v2_publish_multimodal_prompt(dish_payload)
     prompt_file = output_dir / f"{dish_name}_平台文案生成prompt.txt"
     save_text_output(prompt_text, prompt_file)
-    print(
-        f"平台文案提示词已保存：{prompt_file}（temperature={temperature}，创意角度={creative_angle}）"
-    )
+    print(f"平台文案提示词已保存：{prompt_file}（temperature={temperature}）")
 
     user_content: list[dict[str, Any]] = [
         {"type": "text", "text": prompt_text},
@@ -3845,24 +3797,7 @@ def generate_v2_publish_copy_assets(
             if not raw_text:
                 raise ValueError("豆包未返回平台文案。")
             payload = extract_json_object_from_text(raw_text)
-            strategy = parse_v2_publish_strategy_fields(payload, dish_payload)
             platform_payload = parse_v2_publish_platform_payload(payload)
-            validate_v2_publish_forbidden_phrases(platform_payload)
-            validate_v2_publish_meal_occasion_consistency(
-                raw_payload=payload,
-                platform_payload=platform_payload,
-                dish_payload=dish_payload,
-                output_dir=output_dir,
-            )
-            validate_v2_publish_copy_platform_diversity(
-                platform_payload,
-                dish_name=str(dish_payload.get("dish_name", "")).strip(),
-            )
-            validate_v2_publish_copy_not_in_history(
-                platform_payload,
-                history_titles,
-                history_descriptions,
-            )
             saved = save_v2_publish_copy_files(
                 output_dir=output_dir,
                 timestamp=timestamp,
@@ -3871,10 +3806,6 @@ def generate_v2_publish_copy_assets(
             )
             saved["model"] = model
             saved["prompt_file"] = str(prompt_file)
-            saved.update(strategy)
-            print(f"平台文案场景切入：{strategy['timely_hook']}")
-            print(f"平台文案受众分析：{strategy['audience_analysis']}")
-            print(f"平台文案食欲角度：{strategy['food_desire_angle']}")
             print(f"图文标题已保存：{saved['title_file']}")
             print(f"图文描述正文已保存：{saved['description_body_file']}")
             for platform_key, platform_label, _count in V2_PUBLISH_PLATFORM_SPECS:
@@ -3883,16 +3814,7 @@ def generate_v2_publish_copy_assets(
             return saved
         except (ValueError, json.JSONDecodeError) as exc:
             last_error = str(exc)
-            creative_angle = pick_publish_copy_creative_angle(
-                avoid_late_night=bool(meal_context["avoid_late_night"]),
-            )
-            prompt_text = build_v2_publish_multimodal_prompt(
-                dish_payload,
-                history_titles=history_titles,
-                history_descriptions=history_descriptions,
-                creative_angle=creative_angle,
-                output_dir=output_dir,
-            )
+            prompt_text = build_v2_publish_multimodal_prompt(dish_payload)
             save_text_output(prompt_text, prompt_file)
             user_content[0] = {
                 "type": "text",
