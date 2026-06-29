@@ -1316,6 +1316,158 @@ def generate_cankao_prompt_by_template(
     raise RuntimeError(f"豆包模板改写失败：{last_error or '未知错误'}")
 
 
+POSTER_INGREDIENT_REFERENCE_HINT = "以上传的参考图为菜品的主食材"
+MAX_POSTER_INGREDIENT_REFERENCE_COUNT = 3
+
+
+def inject_poster_ingredient_ref_hint(placeholders: list[str], replacements: list[str]) -> None:
+    prefix = f"{POSTER_INGREDIENT_REFERENCE_HINT}，"
+    for index, placeholder in enumerate(placeholders):
+        if "菜品核心视觉" not in placeholder:
+            continue
+        value = str(replacements[index]).strip()
+        if not value or value.startswith(POSTER_INGREDIENT_REFERENCE_HINT):
+            break
+        replacements[index] = prefix + value
+        break
+
+
+def generate_haibao_prompt_by_template(
+    client: OpenAI,
+    dish_name: str,
+    notes: str,
+    template_text: str,
+    *,
+    ingredient_reference_paths: list[Path] | None = None,
+) -> dict[str, str]:
+    paths = [Path(item).resolve() for item in (ingredient_reference_paths or []) if Path(item).is_file()]
+    paths = paths[:MAX_POSTER_INGREDIENT_REFERENCE_COUNT]
+    if paths:
+        return generate_haibao_prompt_with_ingredient_refs(
+            client=client,
+            dish_name=dish_name,
+            notes=notes,
+            template_text=template_text,
+            image_paths=paths,
+        )
+    return generate_cankao_prompt_by_template(
+        client=client,
+        dish_name=dish_name,
+        notes=notes,
+        template_text=template_text,
+    )
+
+
+def generate_haibao_prompt_with_ingredient_refs(
+    client: OpenAI,
+    dish_name: str,
+    notes: str,
+    template_text: str,
+    image_paths: list[Path],
+) -> dict[str, str]:
+    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    temperature = get_text_temperature()
+    placeholders = collect_cankao_placeholders(template_text)
+    if not placeholders:
+        return {"model": model, "prompt": template_text.strip()}
+
+    system_prompt = append_eating_action_guidance(
+        """
+你是菜谱视觉策划总监。用户已上传主食材参考图，请结合参考图只为模板变量位提供替换值。
+要求：
+1) 不得改写模板固定文本，只输出 replacements 数组。
+2) replacements 顺序必须与变量位从上到下完全一致。
+3) 只输出 JSON：{"replacements":["值1","值2",...]}。
+4) 变量位「菜品核心视觉」须依据参考图中的真实食材形态、颜色与质感撰写，不要写「见上图」。
+5) 每个变量位形如 {标签，示例}，必须结合菜名、补充说明与参考图生成，严禁照抄模板示例中的其它菜名或食材。
+6) 所有 replacements 必须描述同一道菜，不得混入模板示例菜。
+""".strip(),
+        placeholders,
+    )
+
+    placeholder_lines = "\n".join(f"{index + 1}. {placeholder}" for index, placeholder in enumerate(placeholders))
+    user_prompt = f"""
+菜名：{dish_name}
+补充说明：{notes or "无"}
+
+模板如下：
+{template_text}
+
+变量位清单（按顺序）：
+{placeholder_lines}
+
+请只返回 replacements JSON。
+""".strip()
+
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+    for index, image_path in enumerate(image_paths, start=1):
+        if not image_path.exists():
+            raise FileNotFoundError(f"海报参考图不存在：{image_path}")
+        user_content.append(
+            {
+                "type": "text",
+                "text": f"主食材参考图 {index}（后续 gpt-image-2 生图将使用此图还原食材外观）",
+            }
+        )
+        user_content.append({"type": "image_url", "image_url": {"url": encode_image_as_data_url(image_path)}})
+
+    max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 5)
+    last_error: Exception | None = None
+    validation_feedback = ""
+    for attempt in range(1, max_retry + 1):
+        attempt_content = list(user_content)
+        if validation_feedback:
+            attempt_content[0] = {
+                "type": "text",
+                "text": user_prompt + f"\n\n上次输出不合格：{validation_feedback}\n请严格按参考图重写 replacements。",
+            }
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": attempt_content},
+                ],
+                max_tokens=2600,
+                temperature=temperature,
+            )
+        except Exception as exc:
+            last_error = exc
+            error_kind = classify_text_api_error(exc)
+            if is_retriable_text_api_error(exc) and attempt < max_retry:
+                delay = api_retry_delay_seconds(attempt, error_kind=error_kind)
+                print(f"海报主食材参考图模板改写第 {attempt} 次失败（{error_kind}），{delay:.0f}s 后重试…")
+                sleep_with_cancel(delay)
+                continue
+            break
+
+        raw_text = extract_chat_text_output(response).strip()
+        if not raw_text:
+            validation_feedback = "豆包未返回有效内容。"
+            last_error = ValueError(validation_feedback)
+            continue
+        try:
+            payload = extract_json_object_from_text(raw_text)
+            replacements_raw = payload.get("replacements")
+            if not isinstance(replacements_raw, list):
+                raise ValueError("豆包返回 JSON 缺少 replacements 数组。")
+            replacements = [str(item).strip() for item in replacements_raw]
+            if len(replacements) != len(placeholders):
+                raise ValueError(f"变量替换数量不匹配：需要 {len(placeholders)} 个，实际 {len(replacements)} 个。")
+
+            inject_poster_ingredient_ref_hint(placeholders, replacements)
+            prompt_text = render_cankao_template_by_replacements(
+                template_text=template_text,
+                replacements=replacements,
+            )
+            return {"model": model, "prompt": prompt_text}
+        except ValueError as exc:
+            validation_feedback = str(exc)
+            last_error = exc
+
+    raise RuntimeError(f"海报主食材参考图模板改写失败：{last_error or '未知错误'}")
+
+
 def validate_detail_prompt_dish_consistency(dish_name: str, prompt_text: str) -> None:
     """拒绝细节图 prompt 仍残留其它菜的模板示例用语。"""
     stale_markers = ("仔姜爆猪颈肉", "猪颈肉", "仔姜爆", "金黄脆壳的猪")

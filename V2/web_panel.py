@@ -76,7 +76,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.54"
+PANEL_VERSION = "v1.55"
 PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
     "image_provider": "official",
     "image_aspect_ratio": "2:3",
@@ -907,6 +907,10 @@ HTML_PAGE = """<!doctype html>
     .custom-ref-chip{position:relative;width:52px;height:52px;border-radius:8px;overflow:hidden;border:1px solid #334155;background:#0b1220;flex:0 0 auto}
     .custom-ref-chip img{width:100%;height:100%;object-fit:cover;display:block}
     .custom-ref-chip button{position:absolute;top:2px;right:2px;width:16px;height:16px;border:none;border-radius:999px;background:rgba(0,0,0,.7);color:#fff;font-size:11px;line-height:16px;padding:0;cursor:pointer}
+    .mode2-item .poster-ref-block{margin-top:8px;padding-top:8px;border-top:1px dashed #334155}
+    .mode2-item .poster-ref-label{font-size:11px;color:#94a3b8;line-height:1.4;margin-bottom:4px}
+    .mode2-item .poster-ref-toolbar{display:flex;align-items:center;gap:6px;margin-top:4px}
+    .poster-ref-add-btn{width:28px;height:28px;border:1px dashed #475569;border-radius:8px;background:#0b1220;color:#dbe7ff;cursor:pointer;font-size:16px;line-height:1;padding:0}
     .custom-toolbar{display:flex;align-items:center;gap:8px}
     .custom-add-btn{width:36px;height:36px;border-radius:10px;border:1px solid #475569;background:#111827;color:#e2e8f0;font-size:22px;line-height:1;cursor:pointer;flex:0 0 auto}
     .custom-count{width:58px;padding:6px;border:1px solid #334155;border-radius:8px;background:#0b1220;color:#e2e8f0;font-size:12px}
@@ -1491,6 +1495,14 @@ HTML_PAGE = """<!doctype html>
                 <label>数量</label><input id="posterCount" type="number" min="1" max="4" step="1" value="2" />
                 <label style="margin-top:6px">画质</label>
                 <select id="posterQuality"><option value="low">标准</option><option value="medium">中等</option><option value="high" selected>高清</option><option value="auto">自动</option></select>
+                <div id="posterRefBlock" class="poster-ref-block" style="display:none">
+                  <div class="poster-ref-label">主食材参考图（最多 3 张，供 gpt-image-2 还原真实食材）</div>
+                  <div id="posterRefs" class="custom-refs"></div>
+                  <div class="poster-ref-toolbar">
+                    <button id="posterRefAddBtn" class="poster-ref-add-btn" type="button" title="上传参考图">+</button>
+                    <input id="posterRefFileInput" type="file" accept="image/*" multiple class="hidden" />
+                  </div>
+                </div>
               </div>
               <div class="mode2-item">
                 <h4>细节图</h4>
@@ -1701,6 +1713,8 @@ HTML_PAGE = """<!doctype html>
       selectedHistoryItem: null,
       selectionSource: "pool",
       customRefs: [],
+      posterRefs: [],
+      posterRefMax: 3,
       customPolling: false,
       customRunning: false,
       customLogNextIndex: 0,
@@ -1932,6 +1946,10 @@ HTML_PAGE = """<!doctype html>
       $("dishNotes").disabled = target;
       $("dishNotes").classList.toggle("input-disabled", target);
       $("notesCard").style.display = (manual || target) ? "block" : "none";
+      $("posterRefBlock").style.display = manual ? "block" : "none";
+      if(!manual){
+        clearPosterRefs();
+      }
       if(target && state.selectedHistoryItem){
         applyTargetDishFromItem(state.selectedHistoryItem);
       }
@@ -4224,6 +4242,64 @@ HTML_PAGE = """<!doctype html>
       box.style.color = level === "warn" ? "#fbbf24" : (level === "ok" ? "#86efac" : "");
     }
 
+    function renderPosterRefs(){
+      const box = $("posterRefs");
+      if(!box){ return; }
+      box.innerHTML = "";
+      state.posterRefs.forEach((item) => {
+        const chip = document.createElement("div");
+        chip.className = "custom-ref-chip";
+        chip.title = item.name || "参考图";
+        const img = document.createElement("img");
+        img.src = item.previewUrl;
+        img.alt = item.name || "参考图";
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = "×";
+        btn.onclick = (event) => {
+          event.stopPropagation();
+          URL.revokeObjectURL(item.previewUrl);
+          state.posterRefs = state.posterRefs.filter((ref) => ref.id !== item.id);
+          renderPosterRefs();
+        };
+        chip.appendChild(img);
+        chip.appendChild(btn);
+        box.appendChild(chip);
+      });
+      const addBtn = $("posterRefAddBtn");
+      if(addBtn){
+        addBtn.disabled = state.posterRefs.length >= state.posterRefMax;
+        addBtn.title = addBtn.disabled ? `最多 ${state.posterRefMax} 张参考图` : "上传参考图";
+      }
+    }
+
+    function clearPosterRefs(){
+      state.posterRefs.forEach((item) => URL.revokeObjectURL(item.previewUrl));
+      state.posterRefs = [];
+      renderPosterRefs();
+    }
+
+    function addPosterRefFiles(fileList){
+      const remain = Math.max(0, state.posterRefMax - state.posterRefs.length);
+      if(!remain){
+        setStatus(`海报参考图最多 ${state.posterRefMax} 张。`, "warn");
+        return;
+      }
+      const files = Array.from(fileList || [])
+        .filter((file) => file && file.type.startsWith("image/"))
+        .slice(0, remain);
+      if(!files.length){ return; }
+      files.forEach((file) => {
+        state.posterRefs.push({
+          id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
+          file,
+          name: file.name,
+          previewUrl: URL.createObjectURL(file),
+        });
+      });
+      renderPosterRefs();
+    }
+
     function renderCustomRefs(){
       const box = $("customRefs");
       if(!box){ return; }
@@ -4659,14 +4735,33 @@ HTML_PAGE = """<!doctype html>
         if(!state.pollTimer){ $("logPanel").textContent = ""; }
       }
       setStatus(okText || "任务已提交，正在加入队列...");
+      const posterRefs = payload.mode === "file" ? [...state.posterRefs] : [];
       try{
-        const res = await fetch("/api/run_start", {
-          method:"POST",
-          headers:{"Content-Type":"application/json"},
-          body: JSON.stringify(payload)
-        });
+        let res;
+        if(posterRefs.length){
+          const fd = new FormData();
+          Object.entries(payload).forEach(([key, value]) => {
+            if(value === undefined || value === null){ return; }
+            if(Array.isArray(value)){
+              value.forEach((item) => fd.append(key, String(item)));
+              return;
+            }
+            fd.append(key, String(value));
+          });
+          posterRefs.forEach((ref, index) => {
+            fd.append(`poster_ref_${index}`, ref.file, ref.name || `poster_ref_${index}.png`);
+          });
+          res = await fetch("/api/run_start", {method:"POST", body: fd});
+        }else{
+          res = await fetch("/api/run_start", {
+            method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body: JSON.stringify(payload)
+          });
+        }
         const data = await res.json();
         if(!res.ok){ throw new Error(data.error || "运行失败"); }
+        if(posterRefs.length){ clearPosterRefs(); }
         if(data.started_now){
           appendLogs([`[${new Date().toLocaleTimeString()}] 任务 #${data.task_id} 已开始执行。`]);
           setStatus("任务已开始执行。");
@@ -4960,6 +5055,12 @@ HTML_PAGE = """<!doctype html>
         await loadSelectedLogContent({silent: true});
       });
       $("customAddBtn")?.addEventListener("click", () => $("customFileInput")?.click());
+      $("posterRefAddBtn")?.addEventListener("click", () => $("posterRefFileInput")?.click());
+      $("posterRefFileInput")?.addEventListener("change", (event) => {
+        const input = event.target;
+        if(input?.files?.length){ addPosterRefFiles(input.files); }
+        input.value = "";
+      });
       $("customFileInput")?.addEventListener("change", (event) => {
         const input = event.target;
         if(input?.files?.length){ addCustomRefFiles(input.files); }
@@ -5076,6 +5177,30 @@ def build_task_queue_snapshot() -> dict[str, Any]:
     }
 
 
+def save_poster_reference_uploads(files: list[tuple[str, str, bytes]]) -> list[str]:
+    from v2_core import MAX_POSTER_INGREDIENT_REFERENCE_COUNT
+
+    ref_items: list[tuple[str, bytes]] = []
+    for name, filename, content in files:
+        if not content:
+            continue
+        if name.startswith("poster_ref"):
+            ref_items.append((filename, content))
+    ref_items = ref_items[:MAX_POSTER_INGREDIENT_REFERENCE_COUNT]
+    if not ref_items:
+        return []
+
+    staging_dir = ROOT_DIR / "tmp" / "poster_refs" / f"{int(time.time())}_{os.getpid()}"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    saved: list[str] = []
+    for index, (filename, content) in enumerate(ref_items, start=1):
+        suffix = Path(filename).suffix or ".png"
+        ref_path = staging_dir / f"ref_{index:02d}{suffix}"
+        ref_path.write_bytes(content)
+        saved.append(str(ref_path.resolve()))
+    return saved
+
+
 def build_task_run_params(task: dict[str, Any]) -> dict[str, Any]:
     return {
         "task_id": task.get("task_id"),
@@ -5095,6 +5220,7 @@ def build_task_run_params(task: dict[str, Any]) -> dict[str, Any]:
         "target_output_dir": str(task.get("target_output_dir", "")).strip(),
         "anchor_poster_path": str(task.get("anchor_poster_path", "")).strip(),
         "replacement_paths": list(task.get("replacement_paths") or []),
+        "poster_reference_count": len(task.get("poster_reference_paths") or []),
     }
 
 
@@ -6030,7 +6156,15 @@ def run_task_worker(task: dict[str, Any]) -> None:
                         raise ValueError("指定造菜需要选中菜品目录。")
                     result = run_v2_mode2(mode="target", target_output_dir=target_output_dir)
                 else:
-                    result = run_v2_mode2(mode=mode if mode in {"auto", "file"} else None)
+                    poster_reference_paths = [
+                        str(item).strip()
+                        for item in (task.get("poster_reference_paths") or [])
+                        if str(item).strip()
+                    ]
+                    result = run_v2_mode2(
+                        mode=mode if mode in {"auto", "file"} else None,
+                        poster_ingredient_reference_paths=poster_reference_paths if mode == "file" else None,
+                    )
         task_log_lines = RUN_LOG_LINES[log_start_index:]
         run_log_file = write_run_log_file(
             result=result,
@@ -6319,12 +6453,26 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             return
 
         length = int(self.headers.get("Content-Length", "0") or "0")
-        body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
-        try:
-            payload = json.loads(body) if body.strip() else {}
-        except json.JSONDecodeError:
-            self._send_json({"error": "请求体 JSON 格式错误。"}, code=400)
-            return
+        raw_body = self.rfile.read(length) if length > 0 else b""
+        content_type = self.headers.get("Content-Type", "")
+        poster_reference_paths: list[str] = []
+        if parsed.path == "/api/run_start" and "multipart/form-data" in content_type.lower():
+            try:
+                from custom_image_service import parse_multipart_form
+
+                parsed_form = parse_multipart_form(raw_body, content_type)
+                payload = dict(parsed_form["fields"])
+                poster_reference_paths = save_poster_reference_uploads(parsed_form["files"])
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
+                return
+        else:
+            try:
+                body_text = raw_body.decode("utf-8") if raw_body else "{}"
+                payload = json.loads(body_text) if body_text.strip() else {}
+            except json.JSONDecodeError:
+                self._send_json({"error": "请求体 JSON 格式错误。"}, code=400)
+                return
 
         if parsed.path == "/api/open_output":
             try:
@@ -6449,6 +6597,9 @@ class V2PanelHandler(BaseHTTPRequestHandler):
         if action == "run" and mode == "file" and not dish_name:
             self._send_json({"error": "手动模式下，菜名不能为空。"}, code=400)
             return
+        if poster_reference_paths and mode != "file":
+            self._send_json({"error": "海报参考图仅支持手动造菜模式。"}, code=400)
+            return
         if action == "run" and mode == "target":
             target_output_dir = str(payload.get("target_output_dir", "")).strip()
             if not target_output_dir:
@@ -6560,6 +6711,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 "recipe_count": str(payload.get("recipe_count", "")).strip(),
                 "cover_mode2_quality": str(payload.get("cover_mode2_quality", "")).strip(),
                 "cover_mode2_count": str(payload.get("cover_mode2_count", "")).strip(),
+                "poster_reference_paths": list(poster_reference_paths) if action == "run" and mode == "file" else [],
                 "queued_at": time.time(),
             }
             if waiting_ahead == 0:

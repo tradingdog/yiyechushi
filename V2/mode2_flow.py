@@ -22,6 +22,9 @@ from v2_core import (
     dedupe_archive_duplicate_dish_folders,
     generate_cankao_prompt_by_template,
     generate_cankao_prompt_with_images,
+    generate_haibao_prompt_by_template,
+    MAX_POSTER_INGREDIENT_REFERENCE_COUNT,
+    POSTER_INGREDIENT_REFERENCE_HINT,
     generate_images_by_prompt,
     generate_images_from_references,
     generate_poster_bubble_copy,
@@ -220,7 +223,27 @@ def select_publish_group_with_defect_regeneration(
     raise RuntimeError(f"{image_kind}选图失败。")
 
 
-def run_v2_mode2(mode: str | None = None, *, target_output_dir: str | Path | None = None) -> dict[str, object]:
+def persist_poster_ingredient_references(
+    run_output_dir: Path,
+    dish_name: str,
+    reference_paths: list[Path],
+) -> list[str]:
+    saved: list[str] = []
+    for index, ref_path in enumerate(reference_paths[:MAX_POSTER_INGREDIENT_REFERENCE_COUNT], start=1):
+        suffix = ref_path.suffix or ".png"
+        dest = run_output_dir / f"{dish_name}_海报参考图_{index:02d}{suffix}"
+        shutil.copy2(ref_path, dest)
+        saved.append(str(dest))
+        print(f"已存档海报参考图：{dest}")
+    return saved
+
+
+def run_v2_mode2(
+    mode: str | None = None,
+    *,
+    target_output_dir: str | Path | None = None,
+    poster_ingredient_reference_paths: list[str | Path] | None = None,
+) -> dict[str, object]:
     from v2_core import ensure_runtime_config_loaded
 
     ensure_runtime_config_loaded()
@@ -256,13 +279,26 @@ def run_v2_mode2(mode: str | None = None, *, target_output_dir: str | Path | Non
     poster_selected_image = ""
     poster_selection_mode = ""
     poster_selection_result: dict[str, Any] = {}
+    poster_reference_paths = [
+        Path(item).resolve()
+        for item in (poster_ingredient_reference_paths or [])
+        if str(item).strip() and Path(item).is_file()
+    ][:MAX_POSTER_INGREDIENT_REFERENCE_COUNT]
+    if poster_reference_paths:
+        persist_poster_ingredient_references(run_output_dir, dish_name, poster_reference_paths)
+        print(
+            f"海报主食材参考图：{len(poster_reference_paths)} 张，"
+            f"提示词将注入「{POSTER_INGREDIENT_REFERENCE_HINT}」"
+        )
+
     haibao_template = load_cankao_group_template(HAIBAO_TEMPLATE_FILE)
     try:
-        poster_prompt_result = generate_cankao_prompt_by_template(
+        poster_prompt_result = generate_haibao_prompt_by_template(
             client=doubao_client,
             dish_name=dish_name,
             notes=notes,
             template_text=haibao_template,
+            ingredient_reference_paths=poster_reference_paths,
         )
     except Exception as exc:
         raise RuntimeError(f"海报模板改写失败：{exc}") from exc
@@ -277,10 +313,12 @@ def run_v2_mode2(mode: str | None = None, *, target_output_dir: str | Path | Non
         f"开始生成海报：quality={poster_settings['quality']}，n={poster_settings['image_count']}，"
         f"model={poster_settings['model']}"
     )
+    if poster_reference_paths:
+        print("海报参考图生图输入：" + "，".join(str(path) for path in poster_reference_paths))
     poster_saved_images, poster_error = generate_group_images(
         image_client=image_client,
         prompt_text=poster_prompt_result["prompt"],
-        reference_paths=[],
+        reference_paths=poster_reference_paths,
         settings=poster_settings,
         output_dir=run_output_dir,
         timestamp=timestamp,
