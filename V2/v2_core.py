@@ -1258,6 +1258,19 @@ EATING_ACTION_PLACEHOLDER_MARKERS = (
 
 EATING_ACTION_GUIDANCE = (
     "海报图夹起的主菜、细节图人物送嘴的主菜，均须是人类吃这道菜时通常会食用的部分。"
+    "夹取的必须是锅中/盘中真实食材，筷子须接触食材，禁止整块主菜或食材悬浮在空中。"
+)
+
+IMAGE_EDIT_PHYSICS_BLOCK = (
+    "物理真实性（必须遵守）：主菜须完整盛放在海报中同一口锅/碗/盘内，禁止整块主菜悬浮在空中；"
+    "筷子/勺子/手必须真实接触并夹取食材，禁止食材脱离餐具或锅沿漂浮；"
+    "三宫格/步骤图须拍锅中或盘中实物特写，禁止把整盘菜抠图悬浮展示；"
+    "所有食物须受重力约束，与容器、桌面或承托面有清晰接触。"
+)
+
+DOUBAO_POSTER_REFERENCE_PHYSICS = (
+    "9) 涉及主菜、夹取动作、三宫格特写时：须写清食物在锅/碗/盘内或筷子真实夹取，"
+    "禁止「悬浮」「漂浮」「空中」「脱离容器」等描述；主菜尺寸与海报一致但不得脱离原容器。"
 )
 
 
@@ -1272,6 +1285,21 @@ def append_eating_action_guidance(system_prompt: str, placeholders: list[str]) -
     if not template_needs_eating_action_guidance(placeholders):
         return system_prompt
     return f"{system_prompt}\n\n{EATING_ACTION_GUIDANCE}"
+
+
+def append_image_edit_physics_guidance(prompt_text: str) -> str:
+    body = str(prompt_text or "").strip()
+    if not body or IMAGE_EDIT_PHYSICS_BLOCK in body:
+        return body
+    return f"{body}\n\n{IMAGE_EDIT_PHYSICS_BLOCK}"
+
+
+def finalize_mode2_image_prompt(prompt_text: str, *, stage_label: str = "") -> str:
+    result = append_image_edit_physics_guidance(prompt_text)
+    label = str(stage_label or "")
+    if "细节" in label:
+        result = soften_detail_image_prompt(result)
+    return result
 
 
 def _compress_image_to_byte_limit(
@@ -1364,8 +1392,8 @@ def prepare_image_bytes_for_vision_api(
             needs_resize = max(image.size) > max_long_edge
     except Exception:
         needs_resize = False
-    if len(raw) <= max_bytes and not needs_resize and guessed_mime in {"image/jpeg", "image/jpg"}:
-        return raw, "image/jpeg"
+    if len(raw) <= max_bytes and not needs_resize:
+        return raw, guessed_mime or "image/png"
     return _compress_image_to_byte_limit(
         image_path,
         max_bytes=max_bytes,
@@ -1925,17 +1953,18 @@ def generate_cankao_prompt_with_images(
         multi_ingredient_hint = infer_detail_multi_ingredient_guidance(dish_name)
 
     system_prompt = append_eating_action_guidance(
-        """
+        f"""
 你是抖音美食图文视觉策划。请结合参考图片，只为模板变量位提供替换值。
 要求：
 1) 不得改写模板固定文本，只输出 replacements 数组。
 2) replacements 顺序必须与变量位从上到下完全一致。
-3) 只输出 JSON：{"replacements":["值1","值2",...]}。
+3) 只输出 JSON：{{"replacements":["值1","值2",...]}}。
 4) 变量位含“海报图”时，用一句话描述参考海报中的菜品视觉，不要写“见上图”。
 5) 变量位含“豆包生成的气泡话语”时，必须使用用户提供的已定稿气泡文案。
-6) 每个变量位形如 {标签，示例}，必须结合菜名、补充说明与「参考海报图」生成，严禁照抄模板示例中的其它菜名或食材。
+6) 每个变量位形如 {{标签，示例}}，必须结合菜名、补充说明与「参考海报图」生成，严禁照抄模板示例中的其它菜名或食材。
 7) 所有 replacements 必须描述参考海报中的同一道菜，不得混入模板示例菜。
 8) 变量位含“细节特写”时，若菜名含多种主食材，三宫格须分别展示不同主食材，不得三格只拍一种。
+{DOUBAO_POSTER_REFERENCE_PHYSICS}
 """.strip(),
         placeholders,
     )
@@ -2575,9 +2604,11 @@ def augment_prompt_with_reference_labels(prompt_text: str, reference_paths: list
         else:
             labels.append(
                 f"第{index}张参考图为海报原图（{path.name}），"
-                "菜品外观、餐具与餐桌环境必须与此图完全一致。"
+                "菜品外观、餐具与餐桌环境必须与此图完全一致；"
+                "生图时主菜须仍在原锅/碗/盘内，禁止悬浮抠图。"
             )
-    return f"{prompt_text.rstrip()}\n\n【参考图说明】{' '.join(labels)}"
+    physics = IMAGE_EDIT_PHYSICS_BLOCK
+    return f"{prompt_text.rstrip()}\n\n【参考图说明】{' '.join(labels)}\n{physics}"
 
 
 def prepare_reference_image_for_edit_api(image_path: Path) -> tuple[str, bytes, str]:
@@ -2636,6 +2667,8 @@ def generate_images_from_references(
 
     request_timeout = parse_float_env("OPENAI_IMAGE_REQUEST_TIMEOUT_SECONDS", 900.0)
     request_prompt = augment_prompt_with_reference_labels(prompt_text, valid_paths)
+    if valid_paths:
+        request_prompt = append_image_edit_physics_guidance(request_prompt)
     model_name = str(settings.get("model", "")).strip().lower()
 
     def call_edit_api(batch_n: int) -> Any:

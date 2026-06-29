@@ -41,6 +41,7 @@ from v2_core import (
     save_text_output,
     select_and_publish_image_group,
     soften_detail_image_prompt,
+    finalize_mode2_image_prompt,
     write_dish_idea_file,
 )
 
@@ -131,6 +132,7 @@ def generate_group_images(
     stage_label: str,
     moderation_fallback: bool = False,
 ) -> tuple[list[str], str]:
+    prompt_text = finalize_mode2_image_prompt(prompt_text, stage_label=stage_label)
     image_error = ""
     saved_images: list[str] = []
     attempts = build_image_generation_attempts(

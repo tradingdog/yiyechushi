@@ -76,7 +76,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.59"
+PANEL_VERSION = "v1.60"
 PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
     "image_provider": "official",
     "image_aspect_ratio": "2:3",
@@ -3028,10 +3028,20 @@ HTML_PAGE = """<!doctype html>
       const panel = $("logPanel");
       if(!panel){ return; }
       const filtered = filterLogLines(trimLogPanelToTail(lines || []));
-      const keepScroll = Boolean(options.keepScroll);
-      const atBottom = keepScroll && panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 24;
+      const prevScrollTop = panel.scrollTop;
+      const prevScrollHeight = panel.scrollHeight;
+      const wasAtBottom = prevScrollTop + panel.clientHeight >= prevScrollHeight - 24;
       panel.textContent = filtered.length ? filtered.join("\\n") + "\\n" : "等待任务启动...\\n";
-      if(!keepScroll || atBottom){ panel.scrollTop = panel.scrollHeight; }
+      if(options.forceBottom){
+        panel.scrollTop = panel.scrollHeight;
+        return;
+      }
+      const followTail = Boolean(options.followTail);
+      if(followTail && wasAtBottom){
+        panel.scrollTop = panel.scrollHeight;
+      }else{
+        panel.scrollTop = Math.min(prevScrollTop, Math.max(0, panel.scrollHeight - panel.clientHeight));
+      }
     }
 
     function appendLogs(lines){
@@ -3102,7 +3112,7 @@ HTML_PAGE = """<!doctype html>
         const res = await fetch(url);
         const data = await res.json();
         if(!res.ok){ throw new Error(data.error || "加载日志失败"); }
-        renderLogPanel(data.logs || [], {keepScroll: false});
+        renderLogPanel(data.logs || [], {followTail: state.logViewIsLive, forceBottom: Boolean(options?.forceBottom)});
         if(state.logViewIsLive){
           state.logNextIndex = data.total_lines || 0;
         }
@@ -3135,7 +3145,7 @@ HTML_PAGE = """<!doctype html>
       $("logToggleBtn").textContent = 打开 ? "收起日志" : "日志";
       if(打开){
         await loadLogFileList({silent: true});
-        await loadSelectedLogContent({silent: true});
+        await loadSelectedLogContent({silent: true, forceBottom: true});
       }
     }
 
