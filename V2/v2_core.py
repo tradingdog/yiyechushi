@@ -3228,33 +3228,7 @@ _TITLE_LIMIT_HINT = (
 
 _DESC_LIMIT_HINT = "描述正文不超过 100 个汉字（不含话题标签）。"
 
-V2_PUBLISH_PLATFORM_PERSONAS: dict[str, str] = {
-    "douyin": (
-        "标题调性：冲突/反问/具体画面，1 个钩子。"
-        "描述调性：约 2 句，先写视觉感受，再带一句行动号召。"
-        "话题 5 个。"
-    ),
-    "xiaohongshu": (
-        "标题调性：第一人称「我」+ 真实动机。"
-        "描述调性：经历 → 踩坑或惊喜 → 适合谁。"
-        "话题 10 个。"
-    ),
-    "weixin_mp": (
-        "标题调性：信息型，少感叹号。"
-        "描述调性：做法亮点 1 句 + 适合谁 1 句。"
-        "话题 10 个。"
-    ),
-    "weixin_channels": (
-        "标题调性：6～12 字主标题感（仍须满足 20 字上限）。"
-        "描述调性：1 句口播感。"
-        "话题 30 个。"
-    ),
-    "kuaishou": (
-        "标题调性：方言感/整一句。"
-        "描述调性：唠嗑式，为啥此刻做、咋简单。"
-        "话题 4 个。"
-    ),
-}
+_FORBIDDEN_ORIGIN_MARKERS = ("原创", "自制", "自创", "自主研发")
 
 PUBLISH_COPY_TITLE_SUFFIXES: tuple[str, ...] = (
     "_图文标题.txt",
@@ -3470,20 +3444,138 @@ def build_publish_copy_history_prompt_block(
     return "\n\n".join(blocks) + "\n\n"
 
 
-def build_v2_publish_context_text(dish_payload: dict[str, str]) -> str:
+def infer_dish_created_date_label(output_dir: Path | None = None) -> str:
+    if output_dir is not None:
+        matched = re.match(r"^(\d{4})(\d{2})(\d{2})_", output_dir.name)
+        if matched:
+            year, month, day = matched.groups()
+            return f"{year}年{int(month)}月{int(day)}日"
+    return datetime.now().strftime("%Y年%m月%d日").replace("年0", "年").replace("月0", "月")
+
+
+def build_v2_publish_dish_basic_info_block(
+    dish_payload: dict[str, str],
+    *,
+    output_dir: Path | None = None,
+) -> str:
     dish_name = str(dish_payload.get("dish_name", "")).strip()
-    notes = str(dish_payload.get("notes", "")).strip()
-    region_label = str(dish_payload.get("region_label", "")).strip()
-    reference_dish = str(dish_payload.get("reference_dish", "")).strip()
-    today = datetime.now().strftime("%Y年%m月%d日")
-    lines = [f"当前日期：{today}", f"菜名：{dish_name}"]
-    if notes:
-        lines.append(f"做法与菜品描述：{notes}")
-    if region_label:
-        lines.append(f"参考菜系：{region_label}")
-    if reference_dish:
-        lines.append(f"参考传统菜（仅作研发灵感，文案须强调这是阿叶原创全新菜，勿写成该传统菜本身）：{reference_dish}")
-    return "\n".join(lines)
+    notes = str(dish_payload.get("notes", "")).strip() or "无"
+    created_date = infer_dish_created_date_label(output_dir)
+    return (
+        f"菜名：{dish_name}\n"
+        f"菜名描述：{notes}\n"
+        f"\n"
+        f"-----------\n"
+        f"\n"
+        f"以上是这道原创菜的基本信息（创造于{created_date}，"
+        f"不要专门写「原创」「自制」等类似于的词语描述），"
+    )
+
+
+def validate_publish_title_no_dish_name(title: str, dish_name: str, *, platform_label: str) -> None:
+    dish_name = str(dish_name or "").strip()
+    text = str(title or "").strip()
+    if dish_name and dish_name in text:
+        raise ValueError(f"{platform_label}标题不能带菜名「{dish_name}」：{text}")
+
+
+def validate_publish_topics_no_dish_name(
+    topics: list[str],
+    dish_name: str,
+    *,
+    platform_label: str,
+) -> None:
+    dish_name = str(dish_name or "").strip()
+    if not dish_name:
+        return
+    for topic in topics:
+        tag = str(topic).lstrip("#").strip()
+        if tag == dish_name or dish_name in tag:
+            raise ValueError(f"{platform_label}话题不能是菜名或含菜名：{topic}")
+
+
+def validate_publish_no_origin_markers(text: str, *, platform_label: str, field_label: str) -> None:
+    body = str(text or "").strip()
+    for marker in _FORBIDDEN_ORIGIN_MARKERS:
+        if marker in body:
+            raise ValueError(
+                f"{platform_label}{field_label}不要专门写「{marker}」类词语，请改写：{body}"
+            )
+
+
+def build_v2_publish_platform_prompt(
+    platform_key: str,
+    dish_payload: dict[str, str],
+    *,
+    output_dir: Path | None = None,
+    history_titles: list[str] | None = None,
+    history_descriptions: list[str] | None = None,
+) -> str:
+    basic_block = build_v2_publish_dish_basic_info_block(dish_payload, output_dir=output_dir)
+    history_block = build_publish_copy_history_prompt_block(
+        history_titles or [],
+        history_descriptions or [],
+    )
+    history_suffix = (
+        f"\n{history_block}"
+        if history_block
+        else "\n（暂无历史标题/描述记录；仍须避免与常见套话雷同。）\n"
+    )
+    platform_tasks: dict[str, str] = {
+        "douyin": (
+            "基于这道菜为我在抖音上发布的图文，撰写标题（不超过20个汉字），"
+            "正文（不超过100个汉字）+话题（话题数量为5个），"
+            "要求必须符合抖音的美食菜谱用户，深挖他们的兴趣，"
+            "结合最新的抖音相关热门话题（符合这道菜的）。\n"
+            "\n"
+            "注意：标题不能带菜名，话题不能是菜名，不能是常规的描述，"
+            "要与众不同的，不常见的但很吸引人的。"
+        ),
+        "xiaohongshu": (
+            "基于这道菜为我在小红书上发布的图文笔记，撰写标题（不超过20个汉字），"
+            "正文（不超过100个汉字）+话题（话题数量为10个），"
+            "要求必须符合小红书美食用户，深挖他们的兴趣，"
+            "结合最新的小红书相关热门话题（符合这道菜的）。"
+            "标题宜用第一人称「我」，像真实笔记分享。\n"
+            "\n"
+            "注意：标题不能带菜名，话题不能是菜名，不能是常规泛滥标签，"
+            "要与众不同的，不常见的但很吸引人的。"
+        ),
+        "weixin_mp": (
+            "基于这道菜为我在微信公众号上发布的图文，撰写标题（不超过20个汉字），"
+            "正文（不超过100个汉字）+话题（话题数量为10个），"
+            "要求符合公众号读者阅读习惯，信息清晰、少感叹号，"
+            "结合适合本菜的传播角度与读者兴趣。\n"
+            "\n"
+            "注意：标题不能带菜名，话题不能是菜名，不能是常规描述，"
+            "要与众不同的，不常见的但很吸引人的。"
+        ),
+        "weixin_channels": (
+            "基于这道菜为我在微信视频号上发布的图文，撰写标题（不超过20个汉字，宜6～12字主标题感），"
+            "正文（不超过100个汉字，1句口播感）+话题（话题数量为30个），"
+            "要求符合视频号信息流用户，结合视频号近期热门话题（符合这道菜的）。\n"
+            "\n"
+            "注意：标题不能带菜名，话题不能是菜名，不能是常规描述，"
+            "要与众不同的，不常见的但很吸引人的。"
+        ),
+        "kuaishou": (
+            "基于这道菜为我在快手发布的图文，撰写标题（不超过20个汉字），"
+            "正文（不超过100个汉字）+话题（话题数量为4个），"
+            "要求符合快手用户，唠嗑感、接地气，结合快手相关热门话题（符合这道菜的）。\n"
+            "\n"
+            "注意：标题不能带菜名，话题不能是菜名，不能是常规描述，"
+            "要与众不同的，不常见的但很吸引人的。"
+        ),
+    }
+    task = platform_tasks.get(platform_key)
+    if not task:
+        raise ValueError(f"未知平台：{platform_key}")
+    return (
+        f"{basic_block}{task}"
+        f"{history_suffix}\n"
+        f"可参考附件海报图的色泽与摆盘。只输出 JSON，不要 Markdown，不要解释。格式：\n"
+        f'{{"title": "...", "description": "...", "topics": ["#...", "..."]}}'
+    )
 
 
 def build_v2_publish_multimodal_prompt(
@@ -3494,36 +3586,18 @@ def build_v2_publish_multimodal_prompt(
     creative_angle: str = "",
     output_dir: Path | None = None,
 ) -> str:
-    del history_titles, history_descriptions, creative_angle, output_dir
-    platform_lines = "\n".join(
-        f"- {label}：{V2_PUBLISH_PLATFORM_PERSONAS[key]}{_TITLE_LIMIT_HINT}{_DESC_LIMIT_HINT}"
-        for key, label, _count in V2_PUBLISH_PLATFORM_SPECS
-    )
-    topic_spec = "、".join(f"{label} {count} 个" for _key, label, count in V2_PUBLISH_PLATFORM_SPECS)
-    return f"""你是「阿叶」（账号 @阿叶造新菜），专注自己从零研发的原创新菜。请结合附件「入选海报图」与下方菜品信息，为这道【阿叶原创新菜】写各平台发布文案。
-
-人设与边界：
-- 这是阿叶自己创的新菜，不是传统名菜、不是他人创意；文案勿写成「经典 XX 菜」「某某名店同款」或把参考传统菜当成成品名。
-- 各平台按下方「平台人设」调整语气，但勿照抄固定句式；发挥你的观察与表达，每次可不同。
-- 若你有联网/检索能力，可结合各平台近期热点、热门内容机制，为本菜自拟匹配话题；若无，请依据平台常见高互动话题类型发挥。不要编造「今日热搜第一」等具体假词条。
-
-{build_v2_publish_context_text(dish_payload)}
-
-各平台人设（标题 + 描述正文 + 话题）：
-{platform_lines}
-
-程序硬性校验（仅此几项）：
-1) 各平台 title：{_TITLE_LIMIT_HINT}
-2) 各平台 description：{_DESC_LIMIT_HINT}
-3) topics 每项以 # 开头；数量须严格为 {topic_spec}；不要 #阿叶造新菜；话题由你针对本菜自拟。
-4) 只输出 JSON，不要 Markdown，不要解释。格式如下：
-{{
-  "douyin": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
-  "xiaohongshu": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
-  "weixin_mp": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
-  "weixin_channels": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
-  "kuaishou": {{"title": "...", "description": "...", "topics": ["#...", "..."]}}
-}}"""
+    del creative_angle
+    sections: list[str] = []
+    for platform_key, platform_label, _count in V2_PUBLISH_PLATFORM_SPECS:
+        section_prompt = build_v2_publish_platform_prompt(
+            platform_key,
+            dish_payload,
+            output_dir=output_dir,
+            history_titles=history_titles,
+            history_descriptions=history_descriptions,
+        )
+        sections.append(f"{'=' * 12} {platform_label} {'=' * 12}\n{section_prompt}")
+    return "\n\n".join(sections)
 
 
 def normalize_v2_publish_topics(raw_topics: Any, expected_count: int) -> list[str]:
@@ -3671,6 +3745,36 @@ def validate_v2_publish_copy_platform_diversity(
         raise ValueError("五个平台描述正文过于相似，请按各平台受众分别重写。")
 
 
+def parse_v2_publish_single_platform_block(
+    raw_payload: dict[str, Any],
+    *,
+    platform_key: str,
+    platform_label: str,
+    topic_count: int,
+    dish_name: str,
+) -> dict[str, Any]:
+    block = raw_payload.get(platform_key) if platform_key in raw_payload else raw_payload
+    if not isinstance(block, dict):
+        raise ValueError(f"{platform_label} 返回格式不正确。")
+    title = normalize_publish_title(str(block.get("title", "")).strip(), platform_key=platform_key)
+    description = str(block.get("description", "")).strip()
+    validate_publish_description_length(description, platform_key=platform_key)
+    validate_publish_title_no_dish_name(title, dish_name, platform_label=platform_label)
+    validate_publish_no_origin_markers(title, platform_label=platform_label, field_label="标题")
+    validate_publish_no_origin_markers(description, platform_label=platform_label, field_label="正文")
+    topics = normalize_v2_publish_topics(block.get("topics"), topic_count)
+    validate_publish_topics_no_dish_name(topics, dish_name, platform_label=platform_label)
+    if not title:
+        raise ValueError(f"{platform_label} 标题为空。")
+    if not description:
+        raise ValueError(f"{platform_label} 描述为空。")
+    return {
+        "title": title,
+        "description": description,
+        "topics": topics,
+    }
+
+
 def parse_v2_publish_platform_payload(raw_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     normalized: dict[str, dict[str, Any]] = {}
     for platform_key, _label, topic_count in V2_PUBLISH_PLATFORM_SPECS:
@@ -3772,58 +3876,98 @@ def generate_v2_publish_copy_assets(
 
     model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
     temperature = get_publish_copy_temperature()
-    prompt_text = build_v2_publish_multimodal_prompt(dish_payload)
+    exclude_titles, exclude_descs = collect_publish_copy_exclude_from_output_dir(output_dir)
+    history_titles, history_descriptions = sync_publish_copy_history_file(
+        exclude_titles=exclude_titles,
+        exclude_descs=exclude_descs,
+    )
+    prompt_text = build_v2_publish_multimodal_prompt(
+        dish_payload,
+        history_titles=history_titles,
+        history_descriptions=history_descriptions,
+        output_dir=output_dir,
+    )
     prompt_file = output_dir / f"{dish_name}_平台文案生成prompt.txt"
     save_text_output(prompt_text, prompt_file)
-    print(f"平台文案提示词已保存：{prompt_file}（temperature={temperature}）")
+    print(f"平台文案提示词已保存：{prompt_file}（temperature={temperature}，分平台调用）")
 
-    user_content: list[dict[str, Any]] = [
-        {"type": "text", "text": prompt_text},
-        {"type": "text", "text": "参考海报图（已入选 publish 的成品图）："},
-        {"type": "image_url", "image_url": {"url": encode_image_as_data_url(poster_image_path)}},
-    ]
-
+    poster_data_url = encode_image_as_data_url(poster_image_path)
     max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
+    platform_payload: dict[str, dict[str, Any]] = {}
     last_error = ""
-    for attempt in range(1, max_retry + 1):
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": user_content}],
-                max_tokens=4096,
-                temperature=temperature,
-            )
-            raw_text = extract_chat_text_output(response).strip()
-            if not raw_text:
-                raise ValueError("豆包未返回平台文案。")
-            payload = extract_json_object_from_text(raw_text)
-            platform_payload = parse_v2_publish_platform_payload(payload)
-            saved = save_v2_publish_copy_files(
-                output_dir=output_dir,
-                timestamp=timestamp,
-                dish_name=dish_name,
-                platform_payload=platform_payload,
-            )
-            saved["model"] = model
-            saved["prompt_file"] = str(prompt_file)
-            print(f"图文标题已保存：{saved['title_file']}")
-            print(f"图文描述正文已保存：{saved['description_body_file']}")
-            for platform_key, platform_label, _count in V2_PUBLISH_PLATFORM_SPECS:
-                print(f"{platform_label}话题已保存：{saved['platform_topic_files'][platform_key]}")
-                print(f"{platform_label}图文描述已保存：{saved['platform_description_files'][platform_key]}")
-            return saved
-        except (ValueError, json.JSONDecodeError) as exc:
-            last_error = str(exc)
-            prompt_text = build_v2_publish_multimodal_prompt(dish_payload)
-            save_text_output(prompt_text, prompt_file)
-            user_content[0] = {
-                "type": "text",
-                "text": prompt_text + f"\n\n上次输出不合格：{last_error}\n请严格按 JSON 格式重写。",
-            }
-        except Exception as exc:
-            last_error = str(exc)
 
-    raise RuntimeError(f"平台文案生成失败：{last_error or '未知错误'}")
+    for platform_key, platform_label, topic_count in V2_PUBLISH_PLATFORM_SPECS:
+        platform_prompt = build_v2_publish_platform_prompt(
+            platform_key,
+            dish_payload,
+            output_dir=output_dir,
+            history_titles=history_titles,
+            history_descriptions=history_descriptions,
+        )
+        user_content: list[dict[str, Any]] = [
+            {"type": "text", "text": platform_prompt},
+            {"type": "text", "text": "参考海报图（已入选 publish 的成品图）："},
+            {"type": "image_url", "image_url": {"url": poster_data_url}},
+        ]
+        block: dict[str, Any] | None = None
+        for attempt in range(1, max_retry + 1):
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": user_content}],
+                    max_tokens=4096,
+                    temperature=temperature,
+                )
+                raw_text = extract_chat_text_output(response).strip()
+                if not raw_text:
+                    raise ValueError(f"{platform_label} 豆包未返回文案。")
+                payload = extract_json_object_from_text(raw_text)
+                block = parse_v2_publish_single_platform_block(
+                    payload,
+                    platform_key=platform_key,
+                    platform_label=platform_label,
+                    topic_count=topic_count,
+                    dish_name=dish_name,
+                )
+                validate_v2_publish_copy_not_in_history(
+                    {platform_key: block},
+                    history_titles,
+                    history_descriptions,
+                )
+                break
+            except (ValueError, json.JSONDecodeError) as exc:
+                last_error = str(exc)
+                retry_prompt = (
+                    platform_prompt
+                    + f"\n\n上次输出不合格：{last_error}\n请严格按 JSON 格式重写。"
+                )
+                user_content[0] = {"type": "text", "text": retry_prompt}
+            except Exception as exc:
+                last_error = str(exc)
+                break
+        if block is None:
+            raise RuntimeError(
+                f"{platform_label} 平台文案生成失败：{last_error or '未知错误'}"
+            )
+        platform_payload[platform_key] = block
+        history_titles.append(str(block["title"]))
+        history_descriptions.append(str(block["description"]))
+        print(f"{platform_label}文案已生成：{block['title']}")
+
+    saved = save_v2_publish_copy_files(
+        output_dir=output_dir,
+        timestamp=timestamp,
+        dish_name=dish_name,
+        platform_payload=platform_payload,
+    )
+    saved["model"] = model
+    saved["prompt_file"] = str(prompt_file)
+    print(f"图文标题已保存：{saved['title_file']}")
+    print(f"图文描述正文已保存：{saved['description_body_file']}")
+    for platform_key, platform_label, _count in V2_PUBLISH_PLATFORM_SPECS:
+        print(f"{platform_label}话题已保存：{saved['platform_topic_files'][platform_key]}")
+        print(f"{platform_label}图文描述已保存：{saved['platform_description_files'][platform_key]}")
+    return saved
 
 
 def persist_v2_dish_record(output_dir: Path, dish_payload: dict[str, str]) -> str:
