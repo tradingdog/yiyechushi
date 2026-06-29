@@ -3985,7 +3985,7 @@ def generate_v2_publish_copy_assets(
         platform_payload[platform_key] = block
         history_titles.append(str(block["title"]))
         history_descriptions.append(str(block["description"]))
-        print(f"{platform_label}文案已生成：{block['title']}")
+        print(f"[publish-copy] {platform_key} ok")
 
     saved = save_v2_publish_copy_files(
         output_dir=output_dir,
