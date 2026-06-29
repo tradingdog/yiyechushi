@@ -1251,14 +1251,23 @@ def render_cankao_template_by_replacements(template_text: str, replacements: lis
 
 EATING_ACTION_PLACEHOLDER_MARKERS = (
     "互动内容",
+    "互动工具",
     "夹取本菜",
     "代表性一口",
     "细节特写一",
 )
 
 EATING_ACTION_GUIDANCE = (
-    "海报图夹起的主菜、细节图人物送嘴的主菜，均须是人类吃这道菜时通常会食用的部分。"
-    "夹取的必须是锅中/盘中真实食材，筷子须接触食材，禁止整块主菜或食材悬浮在空中。"
+    "海报图夹起/舀起的主菜、细节图人物送嘴的主菜，均须是人类吃这道菜时通常会食用的部分。"
+    "夹取或舀取的必须是锅中/盘中真实食材，餐具须真实接触食材（可为筷、勺、叉、夹、漏勺等），"
+    "禁止整块主菜或食材悬浮在空中。"
+)
+
+INTERACTION_UTENSIL_GUIDANCE = (
+    "「互动工具」须按本道菜吃法、盛器与食材形态选择唯一最合适的餐具："
+    "汤羹煲粥用长柄汤勺，排类/西餐用刀叉，面粉类可用筷子或叉子，"
+    "干锅/火锅/共享菜可用漏勺或食品夹，甜品/糕点用小甜品勺，"
+    "禁止所有菜一律写筷子。"
 )
 
 IMAGE_EDIT_PHYSICS_BLOCK = (
@@ -1269,7 +1278,7 @@ IMAGE_EDIT_PHYSICS_BLOCK = (
 )
 
 DOUBAO_POSTER_REFERENCE_PHYSICS = (
-    "9) 涉及主菜、夹取动作、三宫格特写时：须写清食物在锅/碗/盘内或筷子真实夹取，"
+    "9) 涉及主菜、夹取/舀取动作、三宫格特写时：须写清食物在锅/碗/盘内或有餐具真实接触，"
     "禁止「悬浮」「漂浮」「空中」「脱离容器」等描述；主菜尺寸与海报一致但不得脱离原容器。"
 )
 
@@ -1284,7 +1293,10 @@ def template_needs_eating_action_guidance(placeholders: list[str]) -> bool:
 def append_eating_action_guidance(system_prompt: str, placeholders: list[str]) -> str:
     if not template_needs_eating_action_guidance(placeholders):
         return system_prompt
-    return f"{system_prompt}\n\n{EATING_ACTION_GUIDANCE}"
+    blocks = [EATING_ACTION_GUIDANCE]
+    if any("互动工具" in placeholder for placeholder in placeholders):
+        blocks.insert(0, INTERACTION_UTENSIL_GUIDANCE)
+    return f"{system_prompt}\n\n" + "\n".join(blocks)
 
 
 def append_image_edit_physics_guidance(prompt_text: str) -> str:
@@ -1662,6 +1674,36 @@ POSTER_INGREDIENT_REFERENCE_HINT = "以上传的参考图为菜品的主食材"
 MAX_POSTER_INGREDIENT_REFERENCE_COUNT = 3
 
 
+def infer_interaction_utensil_for_dish(dish_name: str, notes: str = "") -> str:
+    """本地兜底：按菜名/描述推断最合适的互动餐具（非固定筷子）。"""
+    text = f"{dish_name}{notes}"
+    rules: tuple[tuple[tuple[str, ...], str], ...] = (
+        (("蛋糕", "布丁", "蛋挞", "流心", "墩", "糕点", "甜品", "慕斯", "铜锣烧"), "小甜品勺"),
+        (("汤", "羹", "煲", "粥", "炖", "狮子头", "丸子汤"), "长柄汤勺"),
+        (("牛排", "羊排", "猪排", "西餐", "意面", "披萨"), "刀叉"),
+        (("干锅", "火锅", "沸腾", "涮"), "漏勺或食品夹"),
+        (("串", "烧烤", "烤肉", "烤翅"), "竹签或叉子"),
+        (("炒饭", "盖饭", "拌饭", "寿司", "焗"), "勺子"),
+        (("面", "粉", "粉丝", "米线", "河粉", "馄饨", "饺子", "抄手"), "筷子"),
+        (("虾", "蟹", "贝", "蚝", "海鲜"), "筷子或海鲜叉"),
+    )
+    for keywords, utensil in rules:
+        if any(keyword in text for keyword in keywords):
+            return utensil
+    return "与本菜吃法最匹配的一种餐具（勺/筷/叉/夹等择一）"
+
+
+def infer_interaction_content_for_dish(dish_name: str, notes: str, utensil: str) -> str:
+    del dish_name, notes
+    if "勺" in utensil:
+        return "舀起一口带汤汁或挂汁的主料，可见质感，自然准备送入口中"
+    if "刀叉" in utensil:
+        return "刀叉配合切下或叉起一块主菜，可见内里，酱汁微微欲滴"
+    if "夹" in utensil or "签" in utensil:
+        return "用夹具夹起一块挂汁主料，正准备入口"
+    return "夹起一块带酱汁的主料一口，可见肉质或内里，酱汁微微欲滴"
+
+
 def inject_poster_ingredient_ref_hint(placeholders: list[str], replacements: list[str]) -> None:
     prefix = f"{POSTER_INGREDIENT_REFERENCE_HINT}，"
     for index, placeholder in enumerate(placeholders):
@@ -1693,9 +1735,10 @@ def render_haibao_prompt_fallback(template_text: str, dish_name: str, notes: str
         elif "菜品做法" in placeholder:
             replacements.append(notes_text)
         elif "互动工具" in placeholder:
-            replacements.append("筷子")
+            replacements.append(infer_interaction_utensil_for_dish(dish_name, notes_text))
         elif "互动内容" in placeholder:
-            replacements.append(f"夹起一块带红汤汁的{dish_name}主料，酱汁欲滴")
+            utensil = infer_interaction_utensil_for_dish(dish_name, notes_text)
+            replacements.append(infer_interaction_content_for_dish(dish_name, notes_text, utensil))
         elif "主食" in placeholder or "画面搭配" in placeholder:
             replacements.append(
                 "本道为红汤锅类主菜，不配米饭；深色砂锅或家用锅盛满红亮汤汁，"
