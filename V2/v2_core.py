@@ -320,9 +320,9 @@ def parse_bool_env(env_name: str, default: bool) -> bool:
     raise RuntimeError(f"{env_name} 只支持 1/0/true/false/on/off。")
 
 
-def build_httpx_client(timeout_seconds: float) -> httpx.Client:
-    # 与 V1 行为保持一致：默认继承系统代理/证书环境。
-    trust_env = parse_bool_env("HTTP_TRUST_ENV", default=True)
+def build_httpx_client(timeout_seconds: float, *, trust_env: bool | None = None) -> httpx.Client:
+    if trust_env is None:
+        trust_env = parse_bool_env("HTTP_TRUST_ENV", default=True)
     return httpx.Client(timeout=timeout_seconds, trust_env=trust_env)
 
 
@@ -951,11 +951,13 @@ def build_doubao_client() -> OpenAI:
         raise RuntimeError("未找到 DOUBAO_API_KEY，请在根目录 .env 中配置。")
     base_url = os.getenv("DOUBAO_BASE_URL", DEFAULT_DOUBAO_BASE_URL).strip() or DEFAULT_DOUBAO_BASE_URL
     timeout = parse_float_env("TEXT_REQUEST_TIMEOUT_SECONDS", 120.0)
+    # 豆包为国内 API，默认不走系统 HTTP 代理，避免本地代理未启动时 Connection refused。
+    trust_env = parse_bool_env("DOUBAO_HTTP_TRUST_ENV", default=False)
     return OpenAI(
         api_key=api_key,
         base_url=base_url,
         timeout=timeout,
-        http_client=build_httpx_client(timeout_seconds=timeout),
+        http_client=build_httpx_client(timeout_seconds=timeout, trust_env=trust_env),
     )
 
 
@@ -1562,6 +1564,38 @@ def inject_poster_ingredient_ref_hint(placeholders: list[str], replacements: lis
         break
 
 
+def render_haibao_prompt_fallback(template_text: str, dish_name: str, notes: str) -> str:
+    placeholders = collect_cankao_placeholders(template_text)
+    if not placeholders:
+        prompt = template_text.strip()
+        if POSTER_INGREDIENT_REFERENCE_HINT not in prompt:
+            return f"{POSTER_INGREDIENT_REFERENCE_HINT}。\n{prompt}"
+        return prompt
+
+    notes_text = notes.strip() or f"{dish_name}，突出家常真实出锅状态。"
+    visual_text = f"{POSTER_INGREDIENT_REFERENCE_HINT}，{notes_text[:240]}"
+    replacements: list[str] = []
+    for placeholder in placeholders:
+        if "菜名" in placeholder and "核心" not in placeholder:
+            replacements.append(dish_name)
+        elif "菜品核心视觉" in placeholder:
+            replacements.append(visual_text)
+        elif "菜品做法" in placeholder:
+            replacements.append(notes_text)
+        elif "互动工具" in placeholder:
+            replacements.append("筷子")
+        elif "互动内容" in placeholder:
+            replacements.append(f"夹起一块带红汤汁的{dish_name}主料，酱汁欲滴")
+        elif "主食" in placeholder or "画面搭配" in placeholder:
+            replacements.append(
+                "本道为红汤锅类主菜，不配米饭；深色砂锅或家用锅盛满红亮汤汁，"
+                "鳝段与鱼片错落分布，表面浮着辣椒与花椒，锅气腾腾"
+            )
+        else:
+            replacements.append(notes_text)
+    return render_cankao_template_by_replacements(template_text=template_text, replacements=replacements)
+
+
 def generate_haibao_prompt_by_template(
     client: OpenAI,
     dish_name: str,
@@ -1585,20 +1619,13 @@ def generate_haibao_prompt_by_template(
             if classify_text_api_error(exc) != "connection" and "Connection error" not in str(exc):
                 raise
             print(
-                "海报主食材多模态改写连接失败，降级为纯文本模板改写"
-                "（参考图仍用于 gpt-image-2 生图，并在 prompt 中保留主食材提示）。"
+                "海报主食材多模态改写连接失败，降级为本地模板填充"
+                "（参考图仍用于 gpt-image-2 生图）。"
             )
-            text_result = generate_cankao_prompt_by_template(
-                client=client,
-                dish_name=dish_name,
-                notes=notes,
-                template_text=template_text,
-            )
-            if POSTER_INGREDIENT_REFERENCE_HINT not in text_result["prompt"]:
-                text_result["prompt"] = (
-                    f"{POSTER_INGREDIENT_REFERENCE_HINT}。\n{text_result['prompt']}"
-                )
-            return text_result
+            return {
+                "model": "local-fallback",
+                "prompt": render_haibao_prompt_fallback(template_text, dish_name, notes),
+            }
     return generate_cankao_prompt_by_template(
         client=client,
         dish_name=dish_name,
