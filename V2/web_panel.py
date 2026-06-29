@@ -911,6 +911,8 @@ HTML_PAGE = """<!doctype html>
     .mode2-item .poster-ref-label{font-size:11px;color:#94a3b8;line-height:1.4;margin-bottom:4px}
     .mode2-item .poster-ref-toolbar{display:flex;align-items:center;gap:6px;margin-top:4px}
     .poster-ref-add-btn{width:28px;height:28px;border:1px dashed #475569;border-radius:8px;background:#0b1220;color:#dbe7ff;cursor:pointer;font-size:16px;line-height:1;padding:0}
+    .poster-ref-add-btn:disabled,.poster-ref-paste-btn:disabled{opacity:.45;cursor:not-allowed}
+    .poster-ref-paste-btn{height:28px;padding:0 8px;border:1px dashed #475569;border-radius:8px;background:#0b1220;color:#dbe7ff;cursor:pointer;font-size:12px;line-height:1;white-space:nowrap}
     .custom-toolbar{display:flex;align-items:center;gap:8px}
     .custom-add-btn{width:36px;height:36px;border-radius:10px;border:1px solid #475569;background:#111827;color:#e2e8f0;font-size:22px;line-height:1;cursor:pointer;flex:0 0 auto}
     .custom-count{width:58px;padding:6px;border:1px solid #334155;border-radius:8px;background:#0b1220;color:#e2e8f0;font-size:12px}
@@ -1500,6 +1502,7 @@ HTML_PAGE = """<!doctype html>
                   <div id="posterRefs" class="custom-refs"></div>
                   <div class="poster-ref-toolbar">
                     <button id="posterRefAddBtn" class="poster-ref-add-btn" type="button" title="上传参考图">+</button>
+                    <button id="posterRefPasteBtn" class="poster-ref-paste-btn" type="button" title="从剪贴板粘贴一张参考图">粘贴</button>
                     <input id="posterRefFileInput" type="file" accept="image/*" multiple class="hidden" />
                   </div>
                 </div>
@@ -4277,10 +4280,40 @@ HTML_PAGE = """<!doctype html>
         box.appendChild(chip);
       });
       const addBtn = $("posterRefAddBtn");
+      const pasteBtn = $("posterRefPasteBtn");
+      const atMax = state.posterRefs.length >= state.posterRefMax;
       if(addBtn){
-        addBtn.disabled = state.posterRefs.length >= state.posterRefMax;
-        addBtn.title = addBtn.disabled ? `最多 ${state.posterRefMax} 张参考图` : "上传参考图";
+        addBtn.disabled = atMax;
+        addBtn.title = atMax ? `最多 ${state.posterRefMax} 张参考图` : "上传参考图";
       }
+      if(pasteBtn){
+        pasteBtn.disabled = atMax;
+        pasteBtn.title = atMax ? `最多 ${state.posterRefMax} 张参考图` : "从剪贴板粘贴一张参考图";
+      }
+    }
+
+    function posterRefExtensionFromMime(mime){
+      const type = String(mime || "").toLowerCase();
+      if(type.includes("jpeg") || type.includes("jpg")){ return "jpg"; }
+      if(type.includes("webp")){ return "webp"; }
+      if(type.includes("gif")){ return "gif"; }
+      if(type.includes("bmp")){ return "bmp"; }
+      return "png";
+    }
+
+    function appendPosterRef(file){
+      if(state.posterRefs.length >= state.posterRefMax){
+        setStatus(`海报参考图最多 ${state.posterRefMax} 张。`, "warn");
+        return false;
+      }
+      state.posterRefs.push({
+        id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        file,
+        name: file.name,
+        previewUrl: URL.createObjectURL(file),
+      });
+      renderPosterRefs();
+      return true;
     }
 
     function clearPosterRefs(){
@@ -4299,15 +4332,36 @@ HTML_PAGE = """<!doctype html>
         .filter((file) => file && file.type.startsWith("image/"))
         .slice(0, remain);
       if(!files.length){ return; }
-      files.forEach((file) => {
-        state.posterRefs.push({
-          id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
-          file,
-          name: file.name,
-          previewUrl: URL.createObjectURL(file),
-        });
-      });
-      renderPosterRefs();
+      files.forEach((file) => appendPosterRef(file));
+    }
+
+    async function pastePosterRefFromClipboard(){
+      if(state.posterRefs.length >= state.posterRefMax){
+        setStatus(`海报参考图最多 ${state.posterRefMax} 张。`, "warn");
+        return;
+      }
+      if(!navigator.clipboard?.read){
+        setStatus("当前浏览器不支持剪贴板读取，请改用 + 上传。", "warn");
+        return;
+      }
+      try{
+        const items = await navigator.clipboard.read();
+        for(const item of items){
+          const imageType = (item.types || []).find((type) => String(type).startsWith("image/"));
+          if(!imageType){ continue; }
+          const blob = await item.getType(imageType);
+          const mime = blob.type || imageType;
+          const ext = posterRefExtensionFromMime(mime);
+          const file = new File([blob], `clipboard_${Date.now()}.${ext}`, { type: mime });
+          if(appendPosterRef(file)){
+            setStatus("已从剪贴板粘贴 1 张参考图。", "ok");
+          }
+          return;
+        }
+        setStatus("剪贴板中没有图片，请先复制一张图片。", "warn");
+      }catch(err){
+        setStatus("读取剪贴板失败，请确认已复制图片并允许剪贴板权限：" + err.message, "warn");
+      }
     }
 
     function renderCustomRefs(){
@@ -5066,6 +5120,7 @@ HTML_PAGE = """<!doctype html>
       });
       $("customAddBtn")?.addEventListener("click", () => $("customFileInput")?.click());
       $("posterRefAddBtn")?.addEventListener("click", () => $("posterRefFileInput")?.click());
+      $("posterRefPasteBtn")?.addEventListener("click", () => pastePosterRefFromClipboard());
       $("posterRefFileInput")?.addEventListener("change", (event) => {
         const input = event.target;
         if(input?.files?.length){ addPosterRefFiles(input.files); }
