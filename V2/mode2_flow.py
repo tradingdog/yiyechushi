@@ -387,6 +387,7 @@ def run_v2_mode2(
                 doubao_client,
                 poster_path,
                 dish_name=dish_name,
+                notes=notes,
                 current_bubble_file=bubble_path,
             )
             save_text_output(bubble_result["content"], bubble_path)
@@ -1219,6 +1220,7 @@ def run_supplement_for_output_dir(
                 doubao_client,
                 poster_path,
                 dish_name=dish_name,
+                notes=notes,
                 current_bubble_file=bubble_path,
             )
             save_text_output(bubble_result["content"], bubble_path)

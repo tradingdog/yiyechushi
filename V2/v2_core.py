@@ -65,6 +65,51 @@ PUBLISH_COPY_CREATIVE_ANGLES: tuple[str, ...] = (
     "夏天没胃口、需要咸香开胃、提振食欲的一盘",
     "带娃家庭：大人小孩都能接受的非辣硬菜",
 )
+DISH_MEAL_TAGS_FILE = ROOT_DIR / "dish_meal_tags.json"
+PUBLISH_PLAN_FILE = ROOT_DIR / "publish_plan.json"
+MEAL_TAG_LABELS_CN: dict[str, str] = {
+    "breakfast": "早餐",
+    "lunch": "午餐",
+    "dinner": "晚餐",
+    "late_night": "夜宵",
+}
+PLAN_SLOT_TO_MEAL_TAG: dict[str, str] = {
+    "morning": "breakfast",
+    "noon": "lunch",
+    "evening": "dinner",
+}
+_DISH_OCCASION_MARKERS: dict[str, tuple[str, ...]] = {
+    "breakfast": (
+        "早餐",
+        "早茶",
+        "brunch",
+        "Brunch",
+        "流心蛋",
+        "蛋墩",
+        "水波蛋",
+        "太阳蛋",
+        "溏心蛋",
+        "吐司",
+        "贝果",
+        "三明治",
+        "粥",
+        "包子",
+        "馒头",
+        "豆浆",
+        "燕麦",
+        "可颂",
+        "松饼",
+        "华夫",
+        "班尼迪克",
+    ),
+    "lunch": ("便当", "盖饭", "简餐", "工作餐", "午市", "一人食"),
+    "dinner": ("家宴", "下饭", "炖", "煲", "砂锅", "宴客", "全家"),
+    "late_night": ("夜宵", "烧烤", "烤串", "串串", "小龙虾", "下酒", "小酌", "深夜", "啤酒"),
+}
+_LATE_NIGHT_COPY_PATTERN = re.compile(
+    r"夜宵|佐酒|冰啤|配酒|小酌|下酒|追剧看球|#夜宵|#佐酒"
+)
+_LATE_NIGHT_CREATIVE_MARKERS: tuple[str, ...] = ("小酌", "佐酒", "追剧", "看球")
 _HUASU_DISH_CATEGORY_TAIL = re.compile(
     r"(菜|餐|料|食|小吃|甜品|火锅|烧烤|家常|快手|懒人|减脂|轻食|素食|日料|韩料|泰料|川菜|粤菜|湘菜|鲁菜|苏菜|浙菜|闽菜|徽菜|东北菜|西北菜|云南菜|贵州菜|广西菜|海南菜|新疆菜|西藏菜|内蒙古菜|宁夏菜|青海菜|甘肃菜|陕西菜|山西菜|河北菜|河南菜|山东菜|江苏菜|安徽菜|湖北菜|湖南菜|江西菜|福建菜|台湾菜|香港菜|澳门菜)天花板$"
 )
@@ -568,8 +613,17 @@ def get_publish_copy_temperature() -> float:
     return PUBLISH_COPY_DEFAULT_TEMPERATURE
 
 
-def pick_publish_copy_creative_angle() -> str:
-    return random.choice(PUBLISH_COPY_CREATIVE_ANGLES)
+def pick_publish_copy_creative_angle(*, avoid_late_night: bool = False) -> str:
+    candidates = list(PUBLISH_COPY_CREATIVE_ANGLES)
+    if avoid_late_night:
+        filtered = [
+            angle
+            for angle in candidates
+            if not any(marker in angle for marker in _LATE_NIGHT_CREATIVE_MARKERS)
+        ]
+        if filtered:
+            candidates = filtered
+    return random.choice(candidates)
 
 
 _COPY_WEEKDAY_LABELS: tuple[str, ...] = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -585,45 +639,171 @@ def _resolve_season_label(month: int) -> str:
     return "冬季"
 
 
-def _resolve_daypart_label(hour: int) -> str:
-    if 5 <= hour < 11:
-        return "早晨/上午"
-    if 11 <= hour < 14:
-        return "午间"
-    if 14 <= hour < 17:
-        return "下午"
-    if 17 <= hour < 21:
-        return "傍晚/晚餐"
-    return "夜间/夜宵"
+def _normalize_meal_tags(raw_tags: Any) -> list[str]:
+    if not isinstance(raw_tags, list):
+        return []
+    normalized: list[str] = []
+    for item in raw_tags:
+        tag = str(item or "").strip()
+        if tag in MEAL_TAG_LABELS_CN and tag not in normalized:
+            normalized.append(tag)
+    return normalized
 
 
-def build_copy_timely_context_block() -> str:
+def load_meal_tags_for_output_dir(output_dir: Path) -> list[str]:
+    if not DISH_MEAL_TAGS_FILE.exists():
+        return []
+    try:
+        payload = json.loads(DISH_MEAL_TAGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    paths = payload.get("paths")
+    if not isinstance(paths, dict):
+        return []
+    path_key = str(output_dir.resolve())
+    for key, value in paths.items():
+        if str(key).strip() == path_key:
+            return _normalize_meal_tags(value)
+    return []
+
+
+def find_publish_plan_slot_for_path(output_dir: Path) -> str | None:
+    if not PUBLISH_PLAN_FILE.exists():
+        return None
+    try:
+        payload = json.loads(PUBLISH_PLAN_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    slots = payload.get("slots")
+    if not isinstance(slots, dict):
+        return None
+    path_key = str(output_dir.resolve())
+    for slot_map in slots.values():
+        if not isinstance(slot_map, dict):
+            continue
+        for slot_key in PLAN_SLOT_TO_MEAL_TAG:
+            assigned = str(slot_map.get(slot_key, "")).strip()
+            if assigned and assigned == path_key:
+                return slot_key
+    return None
+
+
+def infer_dish_natural_meal_tags(dish_name: str, notes: str = "") -> list[str]:
+    text = f"{dish_name}{notes}"
+    scores: Counter[str] = Counter()
+    for tag, markers in _DISH_OCCASION_MARKERS.items():
+        for marker in markers:
+            if marker in text:
+                scores[tag] += 1
+    if not scores:
+        return []
+    max_score = max(scores.values())
+    return [tag for tag, score in scores.items() if score == max_score]
+
+
+def build_dish_copy_meal_context(
+    dish_payload: dict[str, str],
+    *,
+    output_dir: Path | None = None,
+) -> dict[str, Any]:
+    dish_name = str(dish_payload.get("dish_name", "")).strip()
+    notes = str(dish_payload.get("notes", "")).strip()
+    meal_tags: list[str] = []
+    plan_slot: str | None = None
+    if output_dir is not None:
+        meal_tags = load_meal_tags_for_output_dir(output_dir)
+        plan_slot = find_publish_plan_slot_for_path(output_dir)
+    inferred = infer_dish_natural_meal_tags(dish_name, notes)
+
+    primary_tags: list[str] = []
+    for tag in meal_tags:
+        if tag not in primary_tags:
+            primary_tags.append(tag)
+    if plan_slot:
+        plan_tag = PLAN_SLOT_TO_MEAL_TAG[plan_slot]
+        if plan_tag not in primary_tags:
+            primary_tags.insert(0, plan_tag)
+    if not primary_tags and inferred:
+        primary_tags = list(inferred)
+
+    primary_labels = [MEAL_TAG_LABELS_CN[tag] for tag in primary_tags if tag in MEAL_TAG_LABELS_CN]
+    avoid_late_night = (
+        "breakfast" in primary_tags
+        or plan_slot == "morning"
+        or ("breakfast" in inferred and "late_night" not in primary_tags and "late_night" not in inferred)
+    )
+    return {
+        "meal_tags": meal_tags,
+        "plan_slot": plan_slot,
+        "inferred_tags": inferred,
+        "primary_tags": primary_tags,
+        "primary_labels_cn": primary_labels,
+        "avoid_late_night": avoid_late_night,
+    }
+
+
+def build_copy_dish_scene_context_block(
+    dish_payload: dict[str, str],
+    *,
+    output_dir: Path | None = None,
+) -> str:
     now = datetime.now()
     month = now.month
     weekday = _COPY_WEEKDAY_LABELS[now.weekday()]
-    daypart = _resolve_daypart_label(now.hour)
     season = _resolve_season_label(month)
+    meal_context = build_dish_copy_meal_context(dish_payload, output_dir=output_dir)
     hints: list[str] = []
     if month in {6, 7, 8}:
         hints.extend(
             [
                 "天热没胃口时需要开胃但不厚重的菜",
-                "冰饮冷饮吃多后，更想吃有咀嚼感的咸香热菜",
-                "周末居家小聚、阳台小酌",
+                "夏令时节更想有咀嚼感、咸香不腻的一盘",
             ]
         )
     if month in {11, 12, 1, 2}:
         hints.extend(["御寒暖胃", "砂锅炖菜", "年节家宴"])
     if now.weekday() >= 5:
-        hints.append("周末加餐、来客、追剧夜宵")
+        hints.append("周末居家加餐、来客小聚")
     else:
-        hints.append("工作日下班想快速解馋、替代外卖")
+        hints.append("工作日也想快速解馋、替代外卖")
     hint_text = "；".join(dict.fromkeys(hints))
+
+    occasion_lines: list[str] = []
+    if meal_context["primary_labels_cn"]:
+        occasion_lines.append(
+            f"- 本菜最适餐次（优先依据，勿被程序运行时刻带偏）：{'、'.join(meal_context['primary_labels_cn'])}"
+        )
+    elif meal_context["inferred_tags"]:
+        inferred_labels = [
+            MEAL_TAG_LABELS_CN[tag]
+            for tag in meal_context["inferred_tags"]
+            if tag in MEAL_TAG_LABELS_CN
+        ]
+        occasion_lines.append(
+            f"- 从菜名/做法推断的适餐次：{'、'.join(inferred_labels)}（须与海报视觉一致）"
+        )
+    else:
+        occasion_lines.append(
+            "- 请根据菜名、做法描述与海报视觉，自行判断最自然的餐次与食用场景"
+        )
+    if meal_context["meal_tags"]:
+        occasion_lines.append(f"- 面板餐次标签：{', '.join(meal_context['meal_tags'])}")
+    if meal_context["plan_slot"]:
+        slot_label = {"morning": "发布计划·早", "noon": "发布计划·中", "evening": "发布计划·晚"}.get(
+            meal_context["plan_slot"], meal_context["plan_slot"]
+        )
+        occasion_lines.append(f"- {slot_label}（排期餐次须优先遵守）")
+
     return (
-        f"当下时间背景（自然融入，勿编造不存在的具体热搜名、新闻或榜单）：\n"
-        f"- 日期：{now.strftime('%Y年%m月%d日')} {weekday}，时段：{daypart}，时节：{season}\n"
-        f"- 可联想的生活场景：{hint_text}\n"
-        f"- timely_hook 须回答：这个时间点，用户为什么更想吃【本道菜】，而不是硬蹭无关热点。"
+        "菜品食用场景（以菜为本，勿本末倒置）：\n"
+        + "\n".join(occasion_lines)
+        + "\n"
+        f"- 时节参考（仅作轻量联想，不得盖过菜品本身）：{season}，{now.strftime('%Y年%m月%d日')} {weekday}\n"
+        f"- 可联想的生活场景（须与本菜餐次匹配）：{hint_text}\n"
+        "- 禁止：因文案在凌晨/夜间生成，就把早餐类、蛋类等菜写成夜宵、佐酒、配冰啤；"
+        "只有菜品本身适合夜宵/小酌时才可写此类场景。\n"
+        "- timely_hook 须回答：结合本菜特色与上述适餐次，用户为什么在【对应场景】更想吃这道菜；"
+        "勿编造不存在的具体热搜名、新闻或榜单。"
     )
 
 
@@ -644,7 +824,7 @@ def build_food_desire_framework_block() -> str:
 def build_copy_three_pillars_block() -> str:
     return (
         "文案三要素（缺一不可，先想清楚再写标题/描述）：\n"
-        "1) 当下热点/时节：结合 timely_hook，把「此刻的生活场景」和本菜连起来；\n"
+        "1) 菜品食用场景：结合 timely_hook，把「与本菜匹配的餐次/生活场景」和本菜连起来（以菜为本，勿按程序运行时刻硬套夜宵/佐酒）；\n"
         "2) 菜品特色 + 受众：结合 audience_analysis，写清谁会吃、在什么场景点开、本菜独特卖点；\n"
         "3) 人性食欲：结合 food_desire_angle，触达用户想吃的底层冲动，再用具体感官细节落地。"
     )
@@ -1713,6 +1893,7 @@ def validate_bubble_copy_text(text: str) -> str:
 def build_bubble_copy_prompt(
     *,
     dish_name: str,
+    notes: str = "",
     retry_feedback: str = "",
     history_texts: list[str] | None = None,
 ) -> str:
@@ -1731,13 +1912,16 @@ def build_bubble_copy_prompt(
             f"\n\n以下历史气泡文案均已使用过{scope_note}，"
             f"禁止重复、仅改几个字或同义改写，必须写出全新句式：\n{lines}"
         )
+    scene_block = build_copy_dish_scene_context_block(
+        {"dish_name": dish_name.strip(), "notes": notes.strip()},
+    )
     return (
         f"{dish_line}上图是这道菜的海报，另有阿叶厨师角色参考。"
         f"写他在品尝这道菜时，气泡里最能勾起食欲的一句话——他是说话的人，不是菜。"
-        f"须同时扣住：①当下时节/生活场景 ②本菜特色 ③人的食欲冲动（解馋/好奇/治愈等），用具体感官瞬间表达。"
-        f"禁止「绝了」「太香了」等空话。"
+        f"须同时扣住：①与本菜匹配的餐次/生活场景 ②本菜特色 ③人的食欲冲动（解馋/好奇/治愈等），用具体感官瞬间表达。"
+        f"禁止「绝了」「太香了」等空话；禁止因凌晨生成就把早餐类菜写成夜宵佐酒。"
         f"{BUBBLE_COPY_MIN_CHARS}–{BUBBLE_COPY_MAX_CHARS} 个汉字，只输出这一句。"
-        f"\n{build_copy_timely_context_block()}\n"
+        f"\n{scene_block}\n"
         f"{build_huasu_forbidden_prompt_block(max_items=20)}"
         f"{history_block}{feedback_block}"
     )
@@ -1748,6 +1932,7 @@ def generate_poster_bubble_copy(
     poster_image_path: Path,
     *,
     dish_name: str = "",
+    notes: str = "",
     current_bubble_file: Path | str | None = None,
 ) -> dict[str, str]:
     model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
@@ -1778,6 +1963,7 @@ def generate_poster_bubble_copy(
                 "type": "text",
                 "text": build_bubble_copy_prompt(
                     dish_name=dish_name,
+                    notes=notes,
                     retry_feedback=retry_feedback,
                     history_texts=history_texts,
                 ),
@@ -3032,6 +3218,7 @@ def build_v2_publish_multimodal_prompt(
     history_titles: list[str] | None = None,
     history_descriptions: list[str] | None = None,
     creative_angle: str = "",
+    output_dir: Path | None = None,
 ) -> str:
     platform_lines = "\n".join(
         f"- {label}：{V2_PUBLISH_PLATFORM_TASKS[key]}" for key, label, _count in V2_PUBLISH_PLATFORM_SPECS
@@ -3040,23 +3227,26 @@ def build_v2_publish_multimodal_prompt(
         history_titles or [],
         history_descriptions or [],
     )
-    angle_line = creative_angle.strip() or pick_publish_copy_creative_angle()
+    meal_context = build_dish_copy_meal_context(dish_payload, output_dir=output_dir)
+    angle_line = creative_angle.strip() or pick_publish_copy_creative_angle(
+        avoid_late_night=bool(meal_context["avoid_late_night"]),
+    )
     forbidden_block = build_huasu_forbidden_prompt_block(max_items=56)
     pillars_block = build_copy_three_pillars_block()
-    timely_block = build_copy_timely_context_block()
+    scene_block = build_copy_dish_scene_context_block(dish_payload, output_dir=output_dir)
     desire_block = build_food_desire_framework_block()
     return f"""你是多平台美食图文运营。请结合附件里的「入选海报图」和下方菜品信息，为这道【全新菜品】写各平台发布文案。
 
 {pillars_block}
 
 写作流程（必须按顺序思考，不要跳步）：
-1) 阅读「当下时间背景」，写出 timely_hook：此刻什么生活场景，让用户更想吃这道菜。
+1) 阅读「菜品食用场景」，写出 timely_hook：与本菜餐次/特色匹配的生活场景，让用户更想吃这道菜（勿按程序运行时刻硬套夜宵/佐酒）。
 2) 阅读菜品信息与海报，写出 audience_analysis：谁会吃、在什么场景点开、本菜独特卖点是什么。
 3) 从「人性食欲切入点」中选最贴合的，写出 food_desire_angle：触达哪种底层食欲冲动。
-4) 本次创意辅助角度（标题与描述须与之协调，但不能替代三要素）：{angle_line}
+4) 本次创意辅助角度（标题与描述须与之协调，但不能替代三要素；若与本菜餐次冲突则忽略该角度）：{angle_line}
 5) 基于以上三点，用口语/网感写各平台标题与描述：多写色泽、香气、声响、质感、余味、搭配反差；禁止万能菜谱腔。
 
-{timely_block}
+{scene_block}
 
 {desire_block}
 
@@ -3066,16 +3256,16 @@ def build_v2_publish_multimodal_prompt(
 {platform_lines}
 
 通用要求：
-1) 标题、描述须能看出来源三要素（时节场景 + 本菜受众/特色 + 食欲冲动），不要只堆形容词。
+1) 标题、描述须能看出来源三要素（菜品场景 + 本菜受众/特色 + 食欲冲动），不要只堆形容词。
 2) 各平台标题禁止「几碗饭/连吃几碗/连炫几碗」类句式；五个平台标题不得都用同一开头。
 3) 描述 2–4 句：从本菜感官细节切入，可自然提菜名，不要写成步骤清单；五个平台描述不要整段同义复述。
-4) topics 数组每项以 # 开头，不要菜品全名话题，不要 #阿叶造新菜（话题可复用通用标签，不受历史标题/描述限制）。
+4) topics 数组每项以 # 开头，不要菜品全名话题，不要 #阿叶造新菜（话题可复用通用标签，不受历史标题/描述限制）；餐次话题须与本菜匹配（早餐菜勿写 #夜宵美食 #佐酒菜）。
 5) 各平台 title 均必须不超过 20 个汉字（40 字符；汉字/表情/符号等非 ASCII 计 2、英文/数字计 1，表情也算字符），超出会被截断或判不合格。
 6) topics 数组长度必须与各平台要求完全一致：抖音 5、小红书 10、微信公众号 10、微信视频号 30、快手 4；不能合并公众号与视频号。
 7) 新写的标题、描述不得与上方历史列表重复或高度相似（仅改菜名、同义换词也算不合格）。
 8) 只输出 JSON，不要 Markdown，不要解释。必须先写 timely_hook、audience_analysis、food_desire_angle，再写各平台字段。格式如下：
 {{
-  "timely_hook": "结合当下时节/时段/生活场景，说明为何此刻想吃这道菜",
+  "timely_hook": "结合本菜适餐次与生活场景，说明为何在该场景更想吃这道菜",
   "audience_analysis": "本菜具体受众、食用场景、核心点击动机与菜品特色",
   "food_desire_angle": "触达的人性食欲（解馋/好奇/治愈/社交等）及如何写进文案",
   "douyin": {{"title": "...", "description": "...", "topics": ["#...", "..."]}},
@@ -3140,7 +3330,7 @@ def parse_v2_publish_audience_analysis(raw_payload: dict[str, Any], dish_payload
 def parse_v2_publish_timely_hook(raw_payload: dict[str, Any]) -> str:
     timely_hook = str(raw_payload.get("timely_hook", "")).strip()
     if len(timely_hook) < 12:
-        raise ValueError("timely_hook 过短或缺失，须结合当下时节/时段说明为何此刻想吃这道菜。")
+        raise ValueError("timely_hook 过短或缺失，须结合本菜适餐次与生活场景说明为何想吃这道菜。")
     if re.search(r"(今日热搜|刚刚刷屏|热搜第一|爆款话题)", timely_hook):
         raise ValueError(f"timely_hook 禁止编造具体热搜或新闻：{timely_hook}")
     return timely_hook
@@ -3162,6 +3352,33 @@ def parse_v2_publish_strategy_fields(
         "audience_analysis": parse_v2_publish_audience_analysis(raw_payload, dish_payload),
         "food_desire_angle": parse_v2_publish_food_desire_angle(raw_payload),
     }
+
+
+def validate_v2_publish_meal_occasion_consistency(
+    *,
+    raw_payload: dict[str, Any],
+    platform_payload: dict[str, dict[str, Any]],
+    dish_payload: dict[str, str],
+    output_dir: Path | None = None,
+) -> None:
+    meal_context = build_dish_copy_meal_context(dish_payload, output_dir=output_dir)
+    if not meal_context["avoid_late_night"]:
+        return
+
+    texts: list[str] = [str(raw_payload.get("timely_hook", ""))]
+    for block in platform_payload.values():
+        texts.append(str(block.get("title", "")))
+        texts.append(str(block.get("description", "")))
+        topics = block.get("topics")
+        if isinstance(topics, list):
+            texts.extend(str(topic) for topic in topics)
+
+    combined = "\n".join(texts)
+    if _LATE_NIGHT_COPY_PATTERN.search(combined):
+        labels = "、".join(meal_context["primary_labels_cn"]) or "早餐/早市"
+        raise ValueError(
+            f"本菜适餐次为{labels}，文案却出现夜宵/佐酒/冰啤等表述，请按菜品本身重写。"
+        )
 
 
 def validate_v2_publish_forbidden_phrases(platform_payload: dict[str, dict[str, Any]]) -> None:
@@ -3307,7 +3524,10 @@ def generate_v2_publish_copy_assets(
 
     model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
     temperature = get_publish_copy_temperature()
-    creative_angle = pick_publish_copy_creative_angle()
+    meal_context = build_dish_copy_meal_context(dish_payload, output_dir=output_dir)
+    creative_angle = pick_publish_copy_creative_angle(
+        avoid_late_night=bool(meal_context["avoid_late_night"]),
+    )
     exclude_titles, exclude_descs = collect_publish_copy_exclude_from_output_dir(output_dir)
     history_titles, history_descriptions = sync_publish_copy_history_file(
         exclude_titles=exclude_titles,
@@ -3318,6 +3538,7 @@ def generate_v2_publish_copy_assets(
         history_titles=history_titles,
         history_descriptions=history_descriptions,
         creative_angle=creative_angle,
+        output_dir=output_dir,
     )
     prompt_file = output_dir / f"{dish_name}_平台文案生成prompt.txt"
     save_text_output(prompt_text, prompt_file)
@@ -3348,6 +3569,12 @@ def generate_v2_publish_copy_assets(
             strategy = parse_v2_publish_strategy_fields(payload, dish_payload)
             platform_payload = parse_v2_publish_platform_payload(payload)
             validate_v2_publish_forbidden_phrases(platform_payload)
+            validate_v2_publish_meal_occasion_consistency(
+                raw_payload=payload,
+                platform_payload=platform_payload,
+                dish_payload=dish_payload,
+                output_dir=output_dir,
+            )
             validate_v2_publish_copy_platform_diversity(
                 platform_payload,
                 dish_name=str(dish_payload.get("dish_name", "")).strip(),
@@ -3366,7 +3593,7 @@ def generate_v2_publish_copy_assets(
             saved["model"] = model
             saved["prompt_file"] = str(prompt_file)
             saved.update(strategy)
-            print(f"平台文案时节切入：{strategy['timely_hook']}")
+            print(f"平台文案场景切入：{strategy['timely_hook']}")
             print(f"平台文案受众分析：{strategy['audience_analysis']}")
             print(f"平台文案食欲角度：{strategy['food_desire_angle']}")
             print(f"图文标题已保存：{saved['title_file']}")
@@ -3377,12 +3604,15 @@ def generate_v2_publish_copy_assets(
             return saved
         except (ValueError, json.JSONDecodeError) as exc:
             last_error = str(exc)
-            creative_angle = pick_publish_copy_creative_angle()
+            creative_angle = pick_publish_copy_creative_angle(
+                avoid_late_night=bool(meal_context["avoid_late_night"]),
+            )
             prompt_text = build_v2_publish_multimodal_prompt(
                 dish_payload,
                 history_titles=history_titles,
                 history_descriptions=history_descriptions,
                 creative_angle=creative_angle,
+                output_dir=output_dir,
             )
             save_text_output(prompt_text, prompt_file)
             user_content[0] = {
