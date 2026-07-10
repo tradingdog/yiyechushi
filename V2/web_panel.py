@@ -76,7 +76,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.67"
+PANEL_VERSION = "v1.69"
 PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
     "image_provider": "official",
     "image_aspect_ratio": "2:3",
@@ -155,9 +155,10 @@ PUBLISH_LOGIN_REQUIRED = False
 PUBLISH_LOGIN_MESSAGE = ""
 PUBLISH_LOGIN_CONFIRM_KIND = "enter"
 PUBLISH_LOGIN_EVENT: threading.Event | None = None
+PUBLISH_WORKER_THREAD: threading.Thread | None = None
 MAX_PUBLISH_LOG_LINES = 2000
 PANEL_SERVER: ThreadingHTTPServer | None = None
-ACTIVE_PUBLISH_PROCS: list[subprocess.Popen] = []
+ACTIVE_PUBLISH_PROCS: list[subprocess.Popen[Any]] = []
 
 
 def append_run_log(text: str) -> None:
@@ -495,9 +496,14 @@ def _wait_for_publish_login(line: str, platform_label: str) -> str | None:
             PUBLISH_LOGIN_EVENT.clear()
         append_publish_log(f"[面板] 等待手动登录：{platform_label}")
         if PUBLISH_LOGIN_EVENT is not None:
-            PUBLISH_LOGIN_EVENT.wait(timeout=3600)
+            deadline = time.time() + 3600
+            while time.time() < deadline:
+                raise_if_work_cancelled("发布登录等待")
+                if PUBLISH_LOGIN_EVENT.wait(timeout=0.4):
+                    break
         with PUBLISH_LOCK:
             PUBLISH_LOGIN_REQUIRED = False
+        raise_if_work_cancelled("发布登录等待")
         return confirm_kind
     return None
 
@@ -530,10 +536,18 @@ def run_single_platform_publish(platform_key: str, output_dir: Path, schedule_at
         errors="replace",
         env=publish_env,
     )
-    ACTIVE_PUBLISH_PROCS.append(proc)
+    with PUBLISH_LOCK:
+        ACTIVE_PUBLISH_PROCS.append(proc)
     try:
         assert proc.stdout is not None
-        for line in proc.stdout:
+        while True:
+            raise_if_work_cancelled("发布")
+            line = proc.stdout.readline()
+            if not line:
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.15)
+                continue
             append_publish_log(line)
             confirm_kind = _wait_for_publish_login(line, platform["label"])
             if confirm_kind and proc.stdin is not None:
@@ -541,15 +555,17 @@ def run_single_platform_publish(platform_key: str, output_dir: Path, schedule_at
                 proc.stdin.flush()
         return_code = proc.wait()
     finally:
-        if proc in ACTIVE_PUBLISH_PROCS:
-            ACTIVE_PUBLISH_PROCS.remove(proc)
+        with PUBLISH_LOCK:
+            if proc in ACTIVE_PUBLISH_PROCS:
+                ACTIVE_PUBLISH_PROCS.remove(proc)
+    raise_if_work_cancelled("发布")
     if return_code != 0:
         raise RuntimeError(f"{platform['label']} 发布脚本退出码 {return_code}，请查看日志。")
     append_publish_log(f"===== 完成发布：{platform['label']} =====")
 
 
 def publish_worker(output_dir_text: str, platform_keys: list[str], schedule_at: str | None = None) -> None:
-    global PUBLISH_RUNNING, PUBLISH_ERROR, PUBLISH_OUTPUT_DIR, PUBLISH_CURRENT_PLATFORM, PUBLISH_QUEUE
+    global PUBLISH_RUNNING, PUBLISH_ERROR, PUBLISH_OUTPUT_DIR, PUBLISH_CURRENT_PLATFORM, PUBLISH_QUEUE, PUBLISH_WORKER_THREAD
     try:
         output_dir = resolve_output_path(output_dir_text)
         try:
@@ -562,6 +578,7 @@ def publish_worker(output_dir_text: str, platform_keys: list[str], schedule_at: 
             PUBLISH_QUEUE = list(platform_keys)
         failed_platforms: list[str] = []
         for platform_key in platform_keys:
+            raise_if_work_cancelled("发布")
             with PUBLISH_LOCK:
                 PUBLISH_CURRENT_PLATFORM = platform_key
                 if platform_key in PUBLISH_QUEUE:
@@ -570,6 +587,13 @@ def publish_worker(output_dir_text: str, platform_keys: list[str], schedule_at: 
             try:
                 platform_schedule_at = schedule_at if platform_key in SCHEDULE_PUBLISH_PLATFORMS else None
                 run_single_platform_publish(platform_key, output_dir, platform_schedule_at)
+            except RuntimeError as exc:
+                if "用户已请求停止后台任务" in str(exc):
+                    raise
+                failed_platforms.append(platform_label)
+                append_publish_log(f"===== {platform_label} 发布失败，继续下一平台 =====")
+                append_publish_log(str(exc))
+                append_publish_log(traceback.format_exc())
             except Exception as exc:  # noqa: BLE001
                 failed_platforms.append(platform_label)
                 append_publish_log(f"===== {platform_label} 发布失败，继续下一平台 =====")
@@ -585,6 +609,24 @@ def publish_worker(output_dir_text: str, platform_keys: list[str], schedule_at: 
         publish_log_file = write_publish_log_file(PUBLISH_OUTPUT_DIR, list(PUBLISH_LOG_LINES))
         if publish_log_file:
             append_publish_log(f"发布日志已保存：{publish_log_file}")
+    except RuntimeError as exc:
+        if "用户已请求停止后台任务" in str(exc):
+            with PUBLISH_LOCK:
+                PUBLISH_ERROR = ""
+            append_publish_log("发布任务已由用户停止。")
+            publish_log_dir = PUBLISH_OUTPUT_DIR or output_dir_text
+            publish_log_file = write_publish_log_file(publish_log_dir, list(PUBLISH_LOG_LINES))
+            if publish_log_file:
+                append_publish_log(f"发布日志已保存：{publish_log_file}")
+        else:
+            with PUBLISH_LOCK:
+                PUBLISH_ERROR = str(exc)
+            append_publish_log(f"发布任务中断：{exc}")
+            append_publish_log(traceback.format_exc())
+            publish_log_dir = PUBLISH_OUTPUT_DIR or output_dir_text
+            publish_log_file = write_publish_log_file(publish_log_dir, list(PUBLISH_LOG_LINES))
+            if publish_log_file:
+                append_publish_log(f"发布日志已保存：{publish_log_file}")
     except Exception as exc:  # noqa: BLE001
         with PUBLISH_LOCK:
             PUBLISH_ERROR = str(exc)
@@ -599,6 +641,7 @@ def publish_worker(output_dir_text: str, platform_keys: list[str], schedule_at: 
             PUBLISH_RUNNING = False
             PUBLISH_CURRENT_PLATFORM = ""
             PUBLISH_QUEUE = []
+        PUBLISH_WORKER_THREAD = None
 
 
 def normalize_publish_schedule_at(value: object) -> str | None:
@@ -613,7 +656,7 @@ def normalize_publish_schedule_at(value: object) -> str | None:
 
 
 def start_publish_task(output_dir_text: str, platform_keys: list[str], schedule_at: str | None = None) -> None:
-    global PUBLISH_RUNNING, PUBLISH_ERROR, PUBLISH_LOG_LINES, PUBLISH_LOGIN_EVENT
+    global PUBLISH_RUNNING, PUBLISH_ERROR, PUBLISH_LOG_LINES, PUBLISH_LOGIN_EVENT, PUBLISH_WORKER_THREAD
     if not platform_keys:
         raise ValueError("请至少选择一个发布平台。")
     if schedule_at and not any(key in SCHEDULE_PUBLISH_PLATFORMS for key in platform_keys):
@@ -622,17 +665,19 @@ def start_publish_task(output_dir_text: str, platform_keys: list[str], schedule_
     if unknown:
         raise ValueError(f"未知平台：{', '.join(unknown)}")
     with PUBLISH_LOCK:
-        if PUBLISH_RUNNING:
+        if PUBLISH_RUNNING or (PUBLISH_WORKER_THREAD is not None and PUBLISH_WORKER_THREAD.is_alive()):
             raise RuntimeError("已有发布任务在执行，请等待完成后再试。")
         PUBLISH_RUNNING = True
         PUBLISH_ERROR = ""
         PUBLISH_LOG_LINES = []
         PUBLISH_LOGIN_EVENT = threading.Event()
+    clear_work_cancel()
     worker = threading.Thread(
         target=publish_worker,
         args=(output_dir_text, platform_keys, schedule_at),
         daemon=True,
     )
+    PUBLISH_WORKER_THREAD = worker
     worker.start()
 
 
@@ -645,9 +690,32 @@ def confirm_publish_login() -> None:
         event.set()
 
 
+def _close_subprocess_streams(proc: subprocess.Popen[Any]) -> None:
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _kill_subprocess(proc: subprocess.Popen[Any]) -> None:
     if proc.poll() is not None:
         return
+    pid = proc.pid
+    _close_subprocess_streams(proc)
+    if sys.platform == "win32" and pid:
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+        except Exception:  # noqa: BLE001
+            pass
     try:
         proc.terminate()
         proc.wait(timeout=2)
@@ -656,24 +724,28 @@ def _kill_subprocess(proc: subprocess.Popen[Any]) -> None:
     if proc.poll() is None:
         try:
             proc.kill()
+            proc.wait(timeout=2)
         except Exception:  # noqa: BLE001
             pass
 
 
 def force_stop_background_work() -> None:
-    global RUNNING, CURRENT_TASK, PUBLISH_RUNNING, PUBLISH_LOGIN_REQUIRED
+    global RUNNING, CURRENT_TASK, PUBLISH_LOGIN_REQUIRED
     with RUN_LOCK:
         TASK_QUEUE.clear()
         RUNNING = False
         CURRENT_TASK = None
     with PUBLISH_LOCK:
-        PUBLISH_RUNNING = False
+        publish_busy = PUBLISH_RUNNING
         PUBLISH_LOGIN_REQUIRED = False
         login_event = PUBLISH_LOGIN_EVENT
+        publish_procs = list(ACTIVE_PUBLISH_PROCS)
     if login_event is not None:
         login_event.set()
-    for proc in list(ACTIVE_PUBLISH_PROCS):
+    for proc in publish_procs:
         _kill_subprocess(proc)
+    if publish_busy:
+        append_publish_log("[面板] 已收到停止请求，正在中断发布脚本…")
 
 
 def stop_background_work(*, reason: str = "用户请求停止后台任务") -> dict[str, Any]:
@@ -2880,6 +2952,15 @@ HTML_PAGE = """<!doctype html>
     async function shutdownPanelProgram(){
       if(!confirm("确定终止造菜控制台？\\n进行中的造菜/发布任务会被中断，8765 端口服务将停止。")){ return; }
       setStatus("正在终止程序…", "warn");
+      if(state.publishSnapshot?.running){
+        state.publishSnapshot = {...state.publishSnapshot, running: false, platform: ""};
+        renderTaskBar();
+        updateViewContextBar();
+        setPublishStatus("正在终止发布并关闭面板…", "warn");
+      }
+      try{
+        await fetch("/api/work_stop", {method:"POST"});
+      }catch{}
       try{
         await fetch("/api/panel_shutdown", {method:"POST"});
       }catch{}
@@ -4919,15 +5000,27 @@ HTML_PAGE = """<!doctype html>
 
     async function stopBackgroundWork(){
       if(!confirm("确定停止所有后台任务？\\n\\n将清空队列并中断进行中的生图、写文案、发布等脚本；面板本身保持运行。")){ return; }
+      const wasPublishing = Boolean(state.publishSnapshot?.running);
+      if(wasPublishing){
+        state.publishSnapshot = {...state.publishSnapshot, running: false, platform: ""};
+        renderTaskBar();
+        updateViewContextBar();
+        setPublishStatus("正在停止发布任务…", "warn");
+      }
       try{
         const res = await fetch("/api/work_stop", {method:"POST"});
         const data = await res.json();
         if(!res.ok){ throw new Error(data.error || "停止失败"); }
         setStatus(data.message || "已请求停止后台任务。", "ok");
+        state.publishPolling = true;
+        startPublishStatusPolling();
         await fetchRunStatus({silent: true});
         await fetchPublishStatus({silent: true});
         await fetchCustomImageStatus({silent: true});
         await reloadAllLogs({silent: true});
+        if(wasPublishing && !state.publishSnapshot?.running){
+          setPublishStatus("发布任务已停止。", "ok");
+        }
       }catch(err){
         setStatus("停止失败：" + err.message, "danger");
       }
