@@ -3280,6 +3280,72 @@ _PUBLISH_EXTRA_FORBIDDEN_HINT = (
 
 _PUBLISH_FORBIDDEN_TOPIC_EXACT = frozenset({"家常硬菜"})
 
+_PUBLISH_TOPIC_MAX_CHARS = 12
+
+_PUBLISH_TOPIC_INVENTED_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"专属"), "自造「专属」长尾话题"),
+    (re.compile(r"新玩法|小妙招|新思路"), "自造攻略型长尾话题"),
+    (re.compile(r"灵感库|指南库|教程库"), "自造攻略/教程库型长尾话题"),
+    (re.compile(r"配菜清单|食材清单|菜单推荐|聚餐菜单|开胃菜单"), "自造清单型长尾话题"),
+    (re.compile(r"美食家集合|爱好者集合|爱好者狂喜|党专属"), "自造人群长尾话题"),
+    (re.compile(r"神仙食谱|神仙吃|神仙做法|小众"), "过冷门自造话题"),
+)
+
+_PUBLISH_TOPIC_COMMON_HINT: dict[str, str] = {
+    "douyin": (
+        "优先选用抖音真实高热短标签（与本菜食材/做法相关），例如："
+        "#美食教程 #家常菜 #下饭菜 #牛肉做法 #川菜 #快手菜 #今天吃什么 #晚餐吃什么"
+    ),
+    "xiaohongshu": (
+        "优先选用小红书真实常见短标签，例如："
+        "#美食日常 #家常菜 #自己做饭 #下饭菜 #牛肉 #居家美食 #美食分享 #今天晚餐"
+    ),
+    "weixin_mp": (
+        "优先选用公众号图文常见、可被搜索到的短标签，例如："
+        "#家常菜 #美食教程 #下饭菜 #牛肉 #川菜 #快手菜 #晚餐 #美食分享"
+    ),
+    "weixin_channels": (
+        "优先选用视频号真实常见短标签（可含稍长短尾但须为平台已有人用的），例如："
+        "#美食教程 #家常菜 #下饭菜 #今天吃什么 #牛肉做法 #美食分享 #晚餐吃什么 #川菜"
+    ),
+    "kuaishou": (
+        "优先选用快手真实高热短标签，例如："
+        "#美食 #家常菜 #下饭菜 #牛肉 #美食教程"
+    ),
+}
+
+_PUBLISH_TITLE_STRATEGY: dict[str, str] = {
+    "douyin": (
+        "【标题策略·抖音】不超过20字；须有悬念/反问/反差，促使人点「展开」并看评论区；"
+        "必须点出至少1个核心食材或主料（不必写完整菜名），可配合口感；"
+        "宜用问号、感叹号制造停顿感。示例：「牛五花配泡椒，还能这么下饭？」"
+    ),
+    "xiaohongshu": (
+        "【标题策略·小红书】不超过20字；第一人称「我」+真实动机；"
+        "须点出核心食材/主料，让人一眼知道是什么菜；可带1个情绪钩子。"
+    ),
+    "weixin_mp": (
+        "【标题策略·公众号】不超过20字；封面与标题同时曝光，标题须有强点击钩子；"
+        "必须点出核心食材/主料+做法亮点；善用「，」「？」「！」等标点增强节奏。"
+        "示例：「泡椒牛五花，酸辣软糯巨下饭！」"
+    ),
+    "weixin_channels": (
+        "【标题策略·视频号】不超过20字（宜6～12字主标题感）；口播感、信息直给；"
+        "须点出核心食材/主料，可带悬念或利益点。示例：「泡椒牛五花，一锅香到跺脚」"
+    ),
+    "kuaishou": (
+        "【标题策略·快手】不超过20字；唠嗑感、接地气；须点出核心食材/主料；"
+        "可用反问/感叹制造悬念，促使人点展开。示例：「这泡椒牛五花，香迷糊了！」"
+    ),
+}
+
+_COMMON_TOPIC_RULES = (
+    "【话题策略】须选该平台真实存在、有人发布搜索过的热门短标签（通常2～8字），"
+    "与本菜食材/做法相关；禁止自造无人使用的长尾标签"
+    "（如「XX专属美食」「XX新玩法」「灵感库」「小妙招」「合集」等）。"
+    "话题不能是完整菜名。"
+)
+
 _BOWL_RICE_CLICHE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"连[吃炫馋扒撬]"), "连炫/连吃几碗类套话"),
     (re.compile(r"[吃炫干馋][一二三四五六七八九十百千万两\d]+碗"), "吃/炫N碗类套话"),
@@ -3527,11 +3593,104 @@ def build_v2_publish_dish_basic_info_block(
     )
 
 
-def validate_publish_title_no_dish_name(title: str, dish_name: str, *, platform_label: str) -> None:
-    dish_name = str(dish_name or "").strip()
+def collect_title_ingredient_markers(dish_payload: dict[str, str]) -> list[str]:
+    """提取标题应点出的核心食材/主料候选。"""
+    dish_name = str(dish_payload.get("dish_name", "")).strip()
+    notes = str(dish_payload.get("notes", "")).strip()
+    markers: list[str] = []
+    seen: set[str] = set()
+    skip_tokens = {
+        "选用", "口感", "做法", "冷水", "热油", "少许", "加入", "出锅", "装入",
+        "点缀", "搭配", "调入", "翻炒", "煮至", "捞出", "切成", "切片",
+    }
+
+    def add(text: str) -> None:
+        text = text.strip()
+        if len(text) < 2 or text in seen:
+            return
+        seen.add(text)
+        markers.append(text)
+
+    if dish_name:
+        add(dish_name)
+        for part in re.split(r"[·、\s]+", dish_name):
+            add(part)
+        for size in range(min(4, len(dish_name)), 1, -1):
+            for index in range(len(dish_name) - size + 1):
+                add(dish_name[index : index + size])
+
+    for token in re.findall(r"[\u4e00-\u9fff]{2,}", notes):
+        if token in skip_tokens:
+            continue
+        add(token)
+        if len(markers) >= 12:
+            break
+    return markers[:10]
+
+
+def title_mentions_core_ingredient(title: str, dish_payload: dict[str, str]) -> bool:
     text = str(title or "").strip()
+    if not text:
+        return False
+    dish_name = str(dish_payload.get("dish_name", "")).strip()
     if dish_name and dish_name in text:
-        raise ValueError(f"{platform_label}标题不能带菜名「{dish_name}」：{text}")
+        return True
+    if len(dish_name) >= 2:
+        for size in (4, 3, 2):
+            for index in range(len(dish_name) - size + 1):
+                if dish_name[index : index + size] in text:
+                    return True
+    notes = str(dish_payload.get("notes", "")).strip()
+    skip_tokens = {
+        "选用", "口感", "做法", "冷水", "热油", "少许", "加入", "出锅", "装入",
+        "点缀", "搭配", "调入", "翻炒", "煮至", "捞出", "切成", "切片",
+    }
+    for token in re.findall(r"[\u4e00-\u9fff]{2,}", notes):
+        if token in skip_tokens:
+            continue
+        if token in text:
+            return True
+    return False
+
+
+def build_title_ingredient_hint(dish_payload: dict[str, str]) -> str:
+    markers = collect_title_ingredient_markers(dish_payload)
+    if not markers:
+        return ""
+    shown = "、".join(markers[:6])
+    return (
+        f"本菜核心食材/主料（标题必须点出其中至少一项，让人知道是什么菜；不必拘泥完整菜名）：{shown}\n"
+    )
+
+
+def validate_publish_title_mentions_ingredient(
+    title: str,
+    dish_payload: dict[str, str],
+    *,
+    platform_label: str,
+) -> None:
+    if title_mentions_core_ingredient(title, dish_payload):
+        return
+    markers = collect_title_ingredient_markers(dish_payload)
+    hint = "、".join(markers[:4]) if markers else "主料"
+    raise ValueError(
+        f"{platform_label}标题须点出核心食材/主料（如 {hint}），"
+        f"不能只有口感形容词，让人不知道是什么菜：{title}"
+    )
+
+
+def validate_publish_topic_quality(topics: list[str], *, platform_label: str, platform_key: str = "") -> None:
+    max_chars = 15 if platform_key == "weixin_channels" else _PUBLISH_TOPIC_MAX_CHARS
+    for topic in topics:
+        tag = str(topic).lstrip("#").strip()
+        if len(tag) > max_chars:
+            raise ValueError(
+                f"{platform_label}话题过长（>{max_chars}字），"
+                f"请改用平台常见短标签：{topic}"
+            )
+        for pattern, label in _PUBLISH_TOPIC_INVENTED_PATTERNS:
+            if pattern.search(tag):
+                raise ValueError(f"{platform_label}话题{label}，请改用平台真实热门短标签：{topic}")
 
 
 def validate_publish_topics_no_dish_name(
@@ -3594,50 +3753,45 @@ def build_v2_publish_platform_prompt(
         if history_block
         else "\n（暂无历史标题/描述记录；仍须避免与常见套话雷同。）\n"
     )
+    ingredient_hint = build_title_ingredient_hint(dish_payload)
+    title_strategy = _PUBLISH_TITLE_STRATEGY.get(platform_key, "")
+    topic_hint = _PUBLISH_TOPIC_COMMON_HINT.get(platform_key, "")
     platform_tasks: dict[str, str] = {
         "douyin": (
-            "基于这道菜为我在抖音上发布的图文，撰写标题（不超过20个汉字），"
-            "正文（不超过100个汉字）+话题（话题数量为5个），"
-            "要求必须符合抖音的美食菜谱用户，深挖他们的兴趣，"
-            "结合最新的抖音相关热门话题（符合这道菜的）。\n"
-            "\n"
-            "注意：标题不能带菜名，话题不能是菜名，不能是常规的描述，"
-            "要与众不同的，不常见的但很吸引人的。"
+            "基于这道菜为我在抖音上发布的图文，撰写标题、正文（不超过100个汉字）"
+            "与话题（5个）。\n"
+            f"{title_strategy}\n"
+            f"{ingredient_hint}"
+            f"{_COMMON_TOPIC_RULES}\n{topic_hint}\n"
+            "正文可配合标题悬念，让人想继续看。"
         ),
         "xiaohongshu": (
-            "基于这道菜为我在小红书上发布的图文笔记，撰写标题（不超过20个汉字），"
-            "正文（不超过100个汉字）+话题（话题数量为10个），"
-            "要求必须符合小红书美食用户，深挖他们的兴趣，"
-            "结合最新的小红书相关热门话题（符合这道菜的）。"
-            "标题宜用第一人称「我」，像真实笔记分享。\n"
-            "\n"
-            "注意：标题不能带菜名，话题不能是菜名，不能是常规泛滥标签，"
-            "要与众不同的，不常见的但很吸引人的。"
+            "基于这道菜为我在小红书上发布的图文笔记，撰写标题、正文（不超过100个汉字）"
+            "与话题（10个）。\n"
+            f"{title_strategy}\n"
+            f"{ingredient_hint}"
+            f"{_COMMON_TOPIC_RULES}\n{topic_hint}\n"
         ),
         "weixin_mp": (
-            "基于这道菜为我在微信公众号上发布的图文，撰写标题（不超过20个汉字），"
-            "正文（不超过100个汉字）+话题（话题数量为10个），"
-            "要求符合公众号读者阅读习惯，信息清晰、少感叹号，"
-            "结合适合本菜的传播角度与读者兴趣。\n"
-            "\n"
-            "注意：标题不能带菜名，话题不能是菜名，不能是常规描述，"
-            "要与众不同的，不常见的但很吸引人的。"
+            "基于这道菜为我在微信公众号上发布的图文，撰写标题、正文（不超过100个汉字）"
+            "与话题（10个）。\n"
+            f"{title_strategy}\n"
+            f"{ingredient_hint}"
+            f"{_COMMON_TOPIC_RULES}\n{topic_hint}\n"
         ),
         "weixin_channels": (
-            "基于这道菜为我在微信视频号上发布的图文，撰写标题（不超过20个汉字，宜6～12字主标题感），"
-            "正文（不超过100个汉字，1句口播感）+话题（话题数量为30个），"
-            "要求符合视频号信息流用户，结合视频号近期热门话题（符合这道菜的）。\n"
-            "\n"
-            "注意：标题不能带菜名，话题不能是菜名，不能是常规描述，"
-            "要与众不同的，不常见的但很吸引人的。"
+            "基于这道菜为我在微信视频号上发布的图文，撰写标题、正文（不超过100个汉字，1句口播感）"
+            "与话题（30个）。\n"
+            f"{title_strategy}\n"
+            f"{ingredient_hint}"
+            f"{_COMMON_TOPIC_RULES}\n{topic_hint}\n"
         ),
         "kuaishou": (
-            "基于这道菜为我在快手发布的图文，撰写标题（不超过20个汉字），"
-            "正文（不超过100个汉字）+话题（话题数量为4个），"
-            "要求符合快手用户，唠嗑感、接地气，结合快手相关热门话题（符合这道菜的）。\n"
-            "\n"
-            "注意：标题不能带菜名，话题不能是菜名，不能是常规描述，"
-            "要与众不同的，不常见的但很吸引人的。"
+            "基于这道菜为我在快手发布的图文，撰写标题、正文（不超过100个汉字）"
+            "与话题（4个）。\n"
+            f"{title_strategy}\n"
+            f"{ingredient_hint}"
+            f"{_COMMON_TOPIC_RULES}\n{topic_hint}\n"
         ),
     }
     task = platform_tasks.get(platform_key)
@@ -3825,14 +3979,16 @@ def parse_v2_publish_single_platform_block(
     platform_label: str,
     topic_count: int,
     dish_name: str,
+    dish_payload: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     block = raw_payload.get(platform_key) if platform_key in raw_payload else raw_payload
     if not isinstance(block, dict):
         raise ValueError(f"{platform_label} 返回格式不正确。")
+    payload = dish_payload or {"dish_name": dish_name}
     title = normalize_publish_title(str(block.get("title", "")).strip(), platform_key=platform_key)
     description = str(block.get("description", "")).strip()
     validate_publish_description_length(description, platform_key=platform_key)
-    validate_publish_title_no_dish_name(title, dish_name, platform_label=platform_label)
+    validate_publish_title_mentions_ingredient(title, payload, platform_label=platform_label)
     validate_publish_no_origin_markers(title, platform_label=platform_label, field_label="标题")
     validate_publish_bowl_rice_cliche(title, platform_label=platform_label, field_label="标题")
     validate_publish_no_origin_markers(description, platform_label=platform_label, field_label="正文")
@@ -3840,6 +3996,7 @@ def parse_v2_publish_single_platform_block(
     topics = normalize_v2_publish_topics(block.get("topics"), topic_count)
     validate_publish_topics_no_dish_name(topics, dish_name, platform_label=platform_label)
     validate_publish_forbidden_topics(topics, platform_label=platform_label)
+    validate_publish_topic_quality(topics, platform_label=platform_label, platform_key=platform_key)
     if not title:
         raise ValueError(f"{platform_label} 标题为空。")
     if not description:
@@ -4004,6 +4161,7 @@ def generate_v2_publish_copy_assets(
                     platform_label=platform_label,
                     topic_count=topic_count,
                     dish_name=dish_name,
+                    dish_payload=dish_payload,
                 )
                 validate_v2_publish_copy_not_in_history(
                     {platform_key: block},
