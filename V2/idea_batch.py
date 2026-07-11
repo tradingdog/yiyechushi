@@ -6,8 +6,9 @@ from typing import Any
 
 from v2_core import (
     auto_generate_dish_idea,
-    build_doubao_client,
+    build_text_client,
     ensure_runtime_config_loaded,
+    format_text_runtime_label,
     get_timestamp,
     load_manual_dish_idea,
     save_dish_idea_record_file,
@@ -66,7 +67,8 @@ def run_idea_batch(
     batch_dir.mkdir(parents=True, exist_ok=True)
     print(f"批量造菜信息目录：{batch_dir}")
 
-    doubao_client = build_doubao_client()
+    doubao_client = build_text_client()
+    print(format_text_runtime_label())
     entries: list[dict[str, str]] = []
     session_banned_main_ingredients: list[str] = []
     try:

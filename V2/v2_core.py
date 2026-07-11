@@ -1027,20 +1027,27 @@ def extract_chat_text_output(response: Any) -> str:
 
 
 def build_doubao_client() -> OpenAI:
-    ensure_runtime_config_loaded()
-    api_key = os.getenv("DOUBAO_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("未找到 DOUBAO_API_KEY，请在根目录 .env 中配置。")
-    base_url = os.getenv("DOUBAO_BASE_URL", DEFAULT_DOUBAO_BASE_URL).strip() or DEFAULT_DOUBAO_BASE_URL
-    timeout = parse_float_env("TEXT_REQUEST_TIMEOUT_SECONDS", 120.0)
-    # 豆包为国内 API，默认不走系统 HTTP 代理，避免本地代理未启动时 Connection refused。
-    trust_env = parse_bool_env("DOUBAO_HTTP_TRUST_ENV", default=False)
-    return OpenAI(
-        api_key=api_key,
-        base_url=base_url,
-        timeout=timeout,
-        http_client=build_httpx_client(timeout_seconds=timeout, trust_env=trust_env),
-    )
+    from text_provider import build_doubao_openai_client
+
+    return build_doubao_openai_client()
+
+
+def build_text_client(provider: str | None = None):
+    from text_provider import build_text_client as _build_text_client
+
+    return _build_text_client(provider)
+
+
+def resolve_text_model(provider: str | None = None) -> str:
+    from text_provider import resolve_text_model as _resolve_text_model
+
+    return _resolve_text_model(provider)
+
+
+def format_text_runtime_label(provider: str | None = None) -> str:
+    from text_provider import format_text_runtime_label as _format_text_runtime_label
+
+    return _format_text_runtime_label(provider)
 
 
 def resolve_image_api_credentials(provider: str | None = None) -> tuple[str, str, str]:
@@ -1489,7 +1496,7 @@ def generate_doubao_prompt_by_template(
     notes: str,
     template_text: str,
 ) -> dict[str, str]:
-    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    model = resolve_text_model()
     temperature = get_text_temperature()
     placeholders = collect_template_placeholders(template_text)
     if not placeholders:
@@ -1585,7 +1592,7 @@ def generate_cankao_prompt_by_template(
     notes: str,
     template_text: str,
 ) -> dict[str, str]:
-    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    model = resolve_text_model()
     temperature = get_text_temperature()
     placeholders = collect_cankao_placeholders(template_text)
     if not placeholders:
@@ -1827,7 +1834,7 @@ def generate_haibao_prompt_with_ingredient_refs(
     template_text: str,
     image_paths: list[Path],
 ) -> dict[str, str]:
-    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    model = resolve_text_model()
     temperature = get_text_temperature()
     placeholders = collect_cankao_placeholders(template_text)
     if not placeholders:
@@ -1985,7 +1992,7 @@ def generate_cankao_prompt_with_images(
     bubble_text: str = "",
     stage_name: str = "模式2多模态模板",
 ) -> dict[str, str]:
-    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    model = resolve_text_model()
     temperature = get_text_temperature()
     placeholders = collect_cankao_placeholders(template_text)
     if not placeholders:
@@ -2253,7 +2260,7 @@ def generate_poster_bubble_copy(
     notes: str = "",
     current_bubble_file: Path | str | None = None,
 ) -> dict[str, str]:
-    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    model = resolve_text_model()
     temperature = get_text_temperature()
     if not poster_image_path.exists():
         raise FileNotFoundError(f"海报图不存在：{poster_image_path}")
@@ -2393,7 +2400,7 @@ def filter_defective_publish_candidates(
     if not image_paths:
         return [], []
 
-    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    model = resolve_text_model()
     user_content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -2482,7 +2489,7 @@ def select_douyin_publish_image(
             "winner_reason": f"仅 1 张{image_kind}候选，直接入 publish。",
         }
 
-    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    model = resolve_text_model()
     user_content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -2540,6 +2547,9 @@ def select_and_publish_image_group(
     publish_dir.mkdir(parents=True, exist_ok=True)
     pool = paths
     rejected: list[dict[str, Any]] = []
+    # 仅 1 张候选时无择优空间，跳过缺陷审核直接留用。
+    if len(paths) == 1:
+        skip_defect_filter = True
     if not skip_defect_filter:
         try:
             pool, rejected = filter_defective_publish_candidates(client, pool, image_kind=image_kind)
@@ -2548,6 +2558,17 @@ def select_and_publish_image_group(
             pool = paths
 
     if not pool:
+        if len(paths) == 1:
+            selected = move_image_to_publish(str(paths[0]), publish_dir)
+            result = {
+                "auto_selected": True,
+                "winner_index": 1,
+                "winner_image_name": paths[0].name,
+                "winner_reason": f"仅 1 张{image_kind}，缺陷审核未通过仍直接留用。",
+                "rejected_candidates": rejected,
+            }
+            print(f"{image_kind}仅 1 张候选，审核未通过仍入 publish：{selected}")
+            return selected, "direct_keep", result
         raise AllCandidatesDefectiveError(
             f"{image_kind}候选均含明显生成缺陷，已全部剔除（共 {len(rejected)} 张）。",
             rejected=rejected,
@@ -2832,7 +2853,7 @@ def generate_three_card_script(
     notes: str,
     content_track: str,
 ) -> dict[str, Any]:
-    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    model = resolve_text_model()
     temperature = get_text_temperature()
     max_retry = parse_int_env("TEXT_REQUEST_RETRY_COUNT", 3)
     try:
@@ -3314,28 +3335,38 @@ _PUBLISH_TOPIC_COMMON_HINT: dict[str, str] = {
     ),
 }
 
+_PUBLISH_TITLE_NO_FULL_DISH_NAME_RULE = (
+    "【标题禁完整菜名】封面海报已展示完整菜名，标题禁止出现完整菜名（不要复述菜名）；"
+    "须点出至少1个核心食材/主料，让人知道是什么菜。"
+)
+
 _PUBLISH_TITLE_STRATEGY: dict[str, str] = {
     "douyin": (
         "【标题策略·抖音】不超过20字；须有悬念/反问/反差，促使人点「展开」并看评论区；"
-        "必须点出至少1个核心食材或主料（不必写完整菜名），可配合口感；"
-        "宜用问号、感叹号制造停顿感。示例：「牛五花配泡椒，还能这么下饭？」"
+        f"{_PUBLISH_TITLE_NO_FULL_DISH_NAME_RULE}"
+        "可配合口感；宜用问号、感叹号制造停顿感。"
+        "示例：「牛五花配泡椒，还能这么下饭？」"
     ),
     "xiaohongshu": (
         "【标题策略·小红书】不超过20字；第一人称「我」+真实动机；"
-        "须点出核心食材/主料，让人一眼知道是什么菜；可带1个情绪钩子。"
+        f"{_PUBLISH_TITLE_NO_FULL_DISH_NAME_RULE}"
+        "可带1个情绪钩子。"
     ),
     "weixin_mp": (
         "【标题策略·公众号】不超过20字；封面与标题同时曝光，标题须有强点击钩子；"
-        "必须点出核心食材/主料+做法亮点；善用「，」「？」「！」等标点增强节奏。"
-        "示例：「泡椒牛五花，酸辣软糯巨下饭！」"
+        f"{_PUBLISH_TITLE_NO_FULL_DISH_NAME_RULE}"
+        "须配合做法亮点；善用「，」「？」「！」等标点增强节奏。"
+        "示例：「牛腩三味焖，酸辣软糯巨下饭！」"
     ),
     "weixin_channels": (
         "【标题策略·视频号】不超过20字（宜6～12字主标题感）；口播感、信息直给；"
-        "须点出核心食材/主料，可带悬念或利益点。示例：「泡椒牛五花，一锅香到跺脚」"
+        f"{_PUBLISH_TITLE_NO_FULL_DISH_NAME_RULE}"
+        "可带悬念或利益点。示例：「牛腩三味焖，一锅香到跺脚」"
     ),
     "kuaishou": (
-        "【标题策略·快手】不超过20字；唠嗑感、接地气；须点出核心食材/主料；"
-        "可用反问/感叹制造悬念，促使人点展开。示例：「这泡椒牛五花，香迷糊了！」"
+        "【标题策略·快手】不超过20字；唠嗑感、接地气；"
+        f"{_PUBLISH_TITLE_NO_FULL_DISH_NAME_RULE}"
+        "可用反问/感叹制造悬念，促使人点展开。示例：「这牛腩三味焖，香迷糊了！」"
     ),
 }
 
@@ -3612,12 +3643,14 @@ def collect_title_ingredient_markers(dish_payload: dict[str, str]) -> list[str]:
         markers.append(text)
 
     if dish_name:
-        add(dish_name)
         for part in re.split(r"[·、\s]+", dish_name):
-            add(part)
+            if part.strip() and part.strip() != dish_name:
+                add(part)
         for size in range(min(4, len(dish_name)), 1, -1):
             for index in range(len(dish_name) - size + 1):
-                add(dish_name[index : index + size])
+                fragment = dish_name[index : index + size]
+                if fragment != dish_name:
+                    add(fragment)
 
     for token in re.findall(r"[\u4e00-\u9fff]{2,}", notes):
         if token in skip_tokens:
@@ -3628,17 +3661,25 @@ def collect_title_ingredient_markers(dish_payload: dict[str, str]) -> list[str]:
     return markers[:10]
 
 
+def title_contains_full_dish_name(title: str, dish_name: str) -> bool:
+    dish_name = str(dish_name or "").strip()
+    if not dish_name:
+        return False
+    return dish_name in str(title or "").strip()
+
+
 def title_mentions_core_ingredient(title: str, dish_payload: dict[str, str]) -> bool:
     text = str(title or "").strip()
     if not text:
         return False
     dish_name = str(dish_payload.get("dish_name", "")).strip()
-    if dish_name and dish_name in text:
-        return True
+    if dish_name and title_contains_full_dish_name(text, dish_name):
+        return False
     if len(dish_name) >= 2:
         for size in (4, 3, 2):
             for index in range(len(dish_name) - size + 1):
-                if dish_name[index : index + size] in text:
+                fragment = dish_name[index : index + size]
+                if fragment != dish_name and fragment in text:
                     return True
     notes = str(dish_payload.get("notes", "")).strip()
     skip_tokens = {
@@ -3655,12 +3696,34 @@ def title_mentions_core_ingredient(title: str, dish_payload: dict[str, str]) -> 
 
 def build_title_ingredient_hint(dish_payload: dict[str, str]) -> str:
     markers = collect_title_ingredient_markers(dish_payload)
+    dish_name = str(dish_payload.get("dish_name", "")).strip()
     if not markers:
-        return ""
+        return (
+            f"封面海报已展示完整菜名「{dish_name}」，标题禁止写完整菜名，须点出核心食材/主料。\n"
+            if dish_name
+            else ""
+        )
     shown = "、".join(markers[:6])
     return (
-        f"本菜核心食材/主料（标题必须点出其中至少一项，让人知道是什么菜；不必拘泥完整菜名）：{shown}\n"
+        f"封面海报已展示完整菜名「{dish_name}」，标题禁止写完整菜名；"
+        f"须点出核心食材/主料（如 {shown}）中至少一项。\n"
     )
+
+
+def validate_publish_title_no_full_dish_name(
+    title: str,
+    dish_name: str,
+    *,
+    platform_label: str,
+) -> None:
+    dish_name = str(dish_name or "").strip()
+    if not dish_name:
+        return
+    if title_contains_full_dish_name(title, dish_name):
+        raise ValueError(
+            f"{platform_label}标题禁止写完整菜名「{dish_name}」（封面已有菜名），"
+            f"请改用核心食材/主料：{title}"
+        )
 
 
 def validate_publish_title_mentions_ingredient(
@@ -3959,9 +4022,14 @@ def validate_v2_publish_copy_platform_diversity(
             raise ValueError("五个平台标题开头过于雷同，请换不同钩子结构。")
 
     if dish_name:
+        dish_name_in_title_count = sum(
+            1 for title in titles if title_contains_full_dish_name(title, dish_name)
+        )
+        if dish_name_in_title_count > 0:
+            raise ValueError("各平台标题禁止写完整菜名（封面已有菜名），请改用核心食材/主料。")
         dish_prefix_count = sum(1 for title in titles if title.startswith(dish_name))
         if dish_prefix_count >= 4:
-            raise ValueError("各平台标题不要都用菜名开头，至少两个平台换钩子结构。")
+            raise ValueError("各平台标题开头过于雷同，至少两个平台换钩子结构。")
 
     desc_pairs = 0
     for index in range(len(descriptions)):
@@ -3988,6 +4056,7 @@ def parse_v2_publish_single_platform_block(
     title = normalize_publish_title(str(block.get("title", "")).strip(), platform_key=platform_key)
     description = str(block.get("description", "")).strip()
     validate_publish_description_length(description, platform_key=platform_key)
+    validate_publish_title_no_full_dish_name(title, dish_name, platform_label=platform_label)
     validate_publish_title_mentions_ingredient(title, payload, platform_label=platform_label)
     validate_publish_no_origin_markers(title, platform_label=platform_label, field_label="标题")
     validate_publish_bowl_rice_cliche(title, platform_label=platform_label, field_label="标题")
@@ -4107,7 +4176,7 @@ def generate_v2_publish_copy_assets(
     if not poster_image_path.exists():
         raise FileNotFoundError(f"参考海报图不存在：{poster_image_path}")
 
-    model = os.getenv("DOUBAO_TEXT_MODEL", DEFAULT_DOUBAO_TEXT_MODEL).strip() or DEFAULT_DOUBAO_TEXT_MODEL
+    model = resolve_text_model()
     temperature = get_publish_copy_temperature()
     exclude_titles, exclude_descs = collect_publish_copy_exclude_from_output_dir(output_dir)
     history_titles, history_descriptions = sync_publish_copy_history_file(

@@ -29,6 +29,7 @@ from custom_image_service import (
     is_custom_image_path,
 )
 from mode2_flow import (
+    infer_continue_supplement_targets,
     run_anchor_poster_regenerate,
     run_publish_image_replace,
     run_supplement_for_output_dir,
@@ -76,12 +77,15 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.69"
+PANEL_VERSION = "v1.72"
 PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
     "image_provider": "official",
     "image_aspect_ratio": "2:3",
     "image_resolution_tier": "1k",
     "image_quality": "high",
+}
+PANEL_TEXT_GEN_PREFS: dict[str, str] = {
+    "text_provider": "cursor",
 }
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
@@ -1101,6 +1105,11 @@ HTML_PAGE = """<!doctype html>
       width:100%;padding:9px;border:1px solid #3a475f;border-radius:9px;background:#101a2a;color:#dbe7ff;cursor:pointer;
     }
     .run-wrap{position:sticky;bottom:0;background:linear-gradient(180deg,rgba(18,24,38,0),rgba(18,24,38,.95) 35%,rgba(18,24,38,1));padding-top:10px}
+    .btn-continue{
+      width:100%;padding:10px 6px;margin-bottom:8px;border:1px solid #166534;border-radius:10px;
+      background:linear-gradient(180deg,#15803d,#14532d);color:#ecfdf5;font-size:13px;font-weight:700;cursor:pointer;
+    }
+    .btn-continue[disabled]{opacity:.6;cursor:not-allowed}
     .btn-primary{
       width:100%;padding:13px 12px;border:1px solid #4b5563;border-radius:10px;background:linear-gradient(180deg,#111827,#030712);
       color:#fff;font-size:16px;font-weight:700;cursor:pointer;
@@ -1352,6 +1361,10 @@ HTML_PAGE = """<!doctype html>
           <button type="button" class="top-seg-btn" data-ratio="4:3" title="4:3 横版">4:3</button>
         </div>
         <span id="imageSizePreview" class="top-size-hint">1024×1536</span>
+        <div class="top-seg" id="textProviderSeg">
+          <button id="textProviderCursor" type="button" class="top-seg-btn active" title="Cursor Cloud Agent 文本（默认 default/auto）">Cursor</button>
+          <button id="textProviderDoubao" type="button" class="top-seg-btn" title="豆包 Seed 文本">豆包</button>
+        </div>
       </div>
       <div class="top-actions">
         <button id="openOutputTopBtn" type="button" title="打开输出目录">目录</button>
@@ -1469,7 +1482,7 @@ HTML_PAGE = """<!doctype html>
               <div id="emptyImageState" class="empty-image-state">
                 <div class="empty-image-icon">图</div>
                 <div class="empty-image-title">暂未生成图片</div>
-                <div class="empty-image-sub">运行任务后在这里查看结果，双击可放大查看。</div>
+                <div class="empty-image-sub">若上次因余额/网络中断，选中菜品后点右侧「继续生图」即可补全四组图。</div>
               </div>
             </div>
           </div>
@@ -1566,7 +1579,7 @@ HTML_PAGE = """<!doctype html>
             <div class="mode2-grid">
               <div class="mode2-item">
                 <h4>海报图</h4>
-                <label>数量</label><input id="posterCount" type="number" min="1" max="4" step="1" value="2" />
+                <label>数量</label><input id="posterCount" type="number" min="1" max="4" step="1" value="1" />
                 <label style="margin-top:6px">画质</label>
                 <select id="posterQuality"><option value="low">标准</option><option value="medium">中等</option><option value="high" selected>高清</option><option value="auto">自动</option></select>
                 <div id="posterRefBlock" class="poster-ref-block" style="display:none">
@@ -1581,19 +1594,19 @@ HTML_PAGE = """<!doctype html>
               </div>
               <div class="mode2-item">
                 <h4>细节图</h4>
-                <label>数量</label><input id="detailCount" type="number" min="1" max="4" step="1" value="2" />
+                <label>数量</label><input id="detailCount" type="number" min="1" max="4" step="1" value="1" />
                 <label style="margin-top:6px">画质</label>
                 <select id="detailQuality"><option value="low">标准</option><option value="medium">中等</option><option value="high" selected>高清</option><option value="auto">自动</option></select>
               </div>
               <div class="mode2-item">
                 <h4>菜谱图</h4>
-                <label>数量</label><input id="recipeCount" type="number" min="1" max="4" step="1" value="2" />
+                <label>数量</label><input id="recipeCount" type="number" min="1" max="4" step="1" value="1" />
                 <label style="margin-top:6px">画质</label>
                 <select id="recipeQuality"><option value="low">标准</option><option value="medium">中等</option><option value="high" selected>高清</option><option value="auto">自动</option></select>
               </div>
               <div class="mode2-item">
                 <h4>封面图</h4>
-                <label>数量</label><input id="coverMode2Count" type="number" min="1" max="4" step="1" value="2" />
+                <label>数量</label><input id="coverMode2Count" type="number" min="1" max="4" step="1" value="1" />
                 <label style="margin-top:6px">画质</label>
                 <select id="coverMode2Quality"><option value="low">标准</option><option value="medium">中等</option><option value="high" selected>高清</option><option value="auto">自动</option></select>
               </div>
@@ -1607,6 +1620,7 @@ HTML_PAGE = """<!doctype html>
         </div>
 
         <div class="run-wrap">
+          <button id="continueImagesBtn" class="btn-continue" type="button" style="display:none" title="自动补生缺失的海报/细节/菜谱/封面、平台文案与 PS 合成">继续生图</button>
           <button id="runBtn" class="btn-primary" type="button">开始运行</button>
           <div id="status" class="status">就绪。先在左侧配置参数，再点击开始运行。</div>
         </div>
@@ -1765,6 +1779,8 @@ HTML_PAGE = """<!doctype html>
       lightboxSource: "gallery",
       activeRightTab: "image",
       selectedHistoryPath: "",
+      continueSupplementTargets: [],
+      lastDishDetail: null,
       galleryFilter: "all",
       galleryReplaceMode: false,
       galleryReplaceSelected: [],
@@ -1820,6 +1836,7 @@ HTML_PAGE = """<!doctype html>
     const HISTORY_SORT_STORAGE_KEY = "v2_history_sort_v1";
     const HISTORY_COLS_STORAGE_KEY = "v2_history_pool_cols_v1";
     const IMAGE_GEN_PREFS_STORAGE_KEY = "v2_image_gen_prefs_v1";
+    const TEXT_GEN_PREFS_STORAGE_KEY = "v2_text_gen_prefs_v1";
 
     function setSegGroupValue(groupId, attr, value){
       document.querySelectorAll(`#${groupId} .top-seg-btn`).forEach((btn) => {
@@ -1834,11 +1851,13 @@ HTML_PAGE = """<!doctype html>
 
     function collectImageGenControls(){
       const provider = $("imgProviderOfficial").classList.contains("active") ? "official" : "silkroad";
+      const textProvider = $("textProviderCursor").classList.contains("active") ? "cursor" : "doubao";
       return {
         image_provider: provider,
         image_quality: readSegGroupValue("qualitySeg", "quality", "high"),
         image_resolution_tier: readSegGroupValue("tierSeg", "tier", "1k"),
-        image_aspect_ratio: readSegGroupValue("ratioSeg", "ratio", "2:3")
+        image_aspect_ratio: readSegGroupValue("ratioSeg", "ratio", "2:3"),
+        text_provider: textProvider
       };
     }
 
@@ -1869,6 +1888,12 @@ HTML_PAGE = """<!doctype html>
       }
     }
 
+    function setTextProvider(provider){
+      const useCursor = provider !== "doubao";
+      $("textProviderCursor").classList.toggle("active", useCursor);
+      $("textProviderDoubao").classList.toggle("active", !useCursor);
+    }
+
     function setImageProvider(provider){
       const official = provider !== "silkroad";
       $("imgProviderOfficial").classList.toggle("active", official);
@@ -1891,12 +1916,18 @@ HTML_PAGE = """<!doctype html>
       updateImageSizePreview();
     }
 
+    function applyTextGenControlsToUi(prefs){
+      const data = prefs || {};
+      setTextProvider((data.text_provider || "cursor") === "doubao" ? "doubao" : "cursor");
+    }
+
     function applyImageGenControlsToUi(prefs){
       const data = prefs || {};
       setImageProvider((data.image_provider || data.provider || "official") === "silkroad" ? "silkroad" : "official");
       if(data.image_quality){ setImageQuality(data.image_quality); }
       if(data.image_resolution_tier){ setTierValue(data.image_resolution_tier); }
       if(data.image_aspect_ratio){ setImageAspectRatio(data.image_aspect_ratio); }
+      applyTextGenControlsToUi(data);
       updateImageSizePreview();
     }
 
@@ -1910,10 +1941,21 @@ HTML_PAGE = """<!doctype html>
       }
     }
 
-    async function persistImageGenPrefs(){
+    function loadTextGenPrefsFromStorage(){
+      try{
+        const raw = localStorage.getItem(TEXT_GEN_PREFS_STORAGE_KEY);
+        if(!raw){ return null; }
+        return JSON.parse(raw);
+      }catch{
+        return null;
+      }
+    }
+
+    async function persistRuntimeGenPrefs(){
       const prefs = collectImageGenControls();
       try{
         localStorage.setItem(IMAGE_GEN_PREFS_STORAGE_KEY, JSON.stringify(prefs));
+        localStorage.setItem(TEXT_GEN_PREFS_STORAGE_KEY, JSON.stringify({text_provider: prefs.text_provider}));
       }catch{}
       try{
         await fetch("/api/image_gen_prefs", {
@@ -1921,8 +1963,17 @@ HTML_PAGE = """<!doctype html>
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify(prefs)
         });
+        await fetch("/api/text_gen_prefs", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({text_provider: prefs.text_provider})
+        });
       }catch{}
       updateImageSizePreview();
+    }
+
+    async function persistImageGenPrefs(){
+      await persistRuntimeGenPrefs();
     }
 
     function bindSegGroup(groupId, attr, onPick){
@@ -1936,8 +1987,10 @@ HTML_PAGE = """<!doctype html>
     }
 
     function bindImageGenControls(){
-      $("imgProviderOfficial").onclick = () => { setImageProvider("official"); persistImageGenPrefs(); };
-      $("imgProviderSilkroad").onclick = () => { setImageProvider("silkroad"); persistImageGenPrefs(); };
+      $("imgProviderOfficial").onclick = () => { setImageProvider("official"); persistRuntimeGenPrefs(); };
+      $("imgProviderSilkroad").onclick = () => { setImageProvider("silkroad"); persistRuntimeGenPrefs(); };
+      $("textProviderCursor").onclick = () => { setTextProvider("cursor"); persistRuntimeGenPrefs(); };
+      $("textProviderDoubao").onclick = () => { setTextProvider("doubao"); persistRuntimeGenPrefs(); };
       bindSegGroup("qualitySeg", "quality", (value) => setImageQuality(value));
       bindSegGroup("tierSeg", "tier", (value) => setTierValue(value));
       bindSegGroup("ratioSeg", "ratio", (value) => setImageAspectRatio(value));
@@ -3794,8 +3847,24 @@ HTML_PAGE = """<!doctype html>
       return text;
     }
 
+    function updateContinueImagesButton(detail){
+      const btn = $("continueImagesBtn");
+      if(!btn){ return; }
+      const targets = Array.isArray(detail?.continue_supplement_targets) ? detail.continue_supplement_targets : [];
+      state.continueSupplementTargets = targets;
+      const enabled = Boolean(detail?.can_continue_images) && Boolean(state.selectedHistoryPath) && !state.submittingTask;
+      btn.style.display = enabled ? "block" : "none";
+      btn.disabled = !enabled;
+      const labelMap = {poster:"海报", detail:"细节", recipe:"菜谱", cover:"封面", copy:"平台文案", photoshop:"PS合成"};
+      const shown = targets.map((item) => labelMap[item] || item).join("、");
+      const reason = String(detail?.continue_reason || "").trim();
+      btn.textContent = reason ? `继续生图（${reason}）` : "继续生图";
+      btn.title = shown ? `将自动补生：${shown}` : "自动补生缺失的图片与文案";
+    }
+
     function applyDishDetail(detail){
       if(!detail){ return; }
+      state.lastDishDetail = detail;
       更新结果信息(
         detail.dish_name,
         展示字段(detail.reference_dish, "未记录"),
@@ -3814,7 +3883,14 @@ HTML_PAGE = """<!doctype html>
       const allImages = detail.images || [];
       const publishImages = detail.publish_images || [];
       setGallerySource(allImages, publishImages.length ? publishImages : allImages);
-      if(detail.workflow_status){
+      updateContinueImagesButton(detail);
+      if(detail.can_continue_images){
+        const hint = String(detail.image_failure_hint || "").trim();
+        $("resultMsg").textContent = hint
+          ? `可继续生图：${detail.continue_reason || "流程未完成"}（上次：${hint.split("\\n")[0].slice(0, 80)}）`
+          : `可继续生图：${detail.continue_reason || "流程未完成"}`;
+        $("resultMsg").className = "status warn";
+      }else if(detail.workflow_status){
         $("resultMsg").textContent = detail.workflow_status;
         $("resultMsg").className = "status ok";
       }
@@ -4829,10 +4905,22 @@ HTML_PAGE = """<!doctype html>
       const data = await res.json();
       if(data.image_gen_options){
         state.imageSizeTable = data.image_gen_options.size_table || {};
-        applyImageGenControlsToUi(data.image_gen_options.current || loadImageGenPrefsFromStorage() || {});
+        const merged = {
+          ...(loadImageGenPrefsFromStorage() || {}),
+          ...(loadTextGenPrefsFromStorage() || {}),
+          ...(data.image_gen_options.current || {}),
+          ...(data.text_gen_options?.current || {})
+        };
+        applyImageGenControlsToUi(merged);
       }else{
-        applyImageGenControlsToUi(loadImageGenPrefsFromStorage() || {});
+        applyImageGenControlsToUi({
+          ...(loadImageGenPrefsFromStorage() || {}),
+          ...(loadTextGenPrefsFromStorage() || {}),
+          text_provider: "cursor"
+        });
       }
+      const textProvider = (data.config?.TEXT_PROVIDER || "cursor").trim().toLowerCase();
+      setTextProvider(textProvider === "doubao" ? "doubao" : "cursor");
       $("cuisineMode").value = data.config.AUTO_DISH_CUISINE_MODE || "1";
       $("posterCount").value = data.config.MODE2_POSTER_IMAGE_COUNT || data.config.OPENAI_IMAGE_COUNT;
       $("posterQuality").value = data.config.MODE2_POSTER_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
@@ -4846,7 +4934,7 @@ HTML_PAGE = """<!doctype html>
       $("dishName").value = data.idea.dish_name || "";
       $("dishNotes").value = data.idea.notes || "";
       setMode(data.config.AUTO_GENERATE_DISH_IDEA === "1" ? "auto" : "file");
-      $("posterCount").value = $("detailCount").value = $("recipeCount").value = $("coverMode2Count").value = "2";
+      $("posterCount").value = $("detailCount").value = $("recipeCount").value = $("coverMode2Count").value = "1";
       $("posterQuality").value = $("detailQuality").value = $("recipeQuality").value = $("coverMode2Quality").value = "high";
       同步参数滑块();
       if(data.last_result && !state.selectedHistoryPath){ renderResult(data.last_result); }
@@ -4875,6 +4963,7 @@ HTML_PAGE = """<!doctype html>
         return;
       }
       state.submittingTask = true;
+      updateContinueImagesButton(state.lastDishDetail);
       if(state.logViewIsLive){
         state.logNextIndex = 0;
         if(!state.pollTimer){ $("logPanel").textContent = ""; }
@@ -4920,7 +5009,36 @@ HTML_PAGE = """<!doctype html>
         setStatus("失败：" + err.message, "warn");
       }finally{
         state.submittingTask = false;
+        updateContinueImagesButton(state.lastDishDetail);
       }
+    }
+
+    async function submitContinueImages(){
+      if(!state.selectedHistoryPath){
+        setStatus("请先在左侧菜品池选中一个菜品。", "danger");
+        return;
+      }
+      const targets = state.continueSupplementTargets || [];
+      if(!targets.length){
+        setStatus("当前菜品无需继续生图。", "warn");
+        return;
+      }
+      await submitTask({
+        action: "supplement",
+        mode: "supplement",
+        target_output_dir: state.selectedHistoryPath,
+        supplement_targets: targets,
+        model_temperature: $("temperature").value.trim(),
+        poster_quality: $("posterQuality").value.trim(),
+        poster_count: $("posterCount").value.trim(),
+        detail_quality: $("detailQuality").value.trim(),
+        detail_count: $("detailCount").value.trim(),
+        recipe_quality: $("recipeQuality").value.trim(),
+        recipe_count: $("recipeCount").value.trim(),
+        cover_mode2_quality: $("coverMode2Quality").value.trim(),
+        cover_mode2_count: $("coverMode2Count").value.trim(),
+        ...collectImageGenControls()
+      }, `继续生图任务已提交（${targets.length} 项）。`);
     }
 
     async function runNow(){
@@ -5126,6 +5244,7 @@ HTML_PAGE = """<!doctype html>
         }
       });
       $("runBtn").onclick = runNow;
+      $("continueImagesBtn").onclick = () => { submitContinueImages(); };
       $("prevImgBtn").onclick = () => showGalleryImage(state.galleryIndex - 1);
       $("nextImgBtn").onclick = () => showGalleryImage(state.galleryIndex + 1);
       $("filterPublishBtn").onclick = () => { state.galleryFilter = "publish"; applyGalleryFilter(true); };
@@ -5374,6 +5493,7 @@ def build_task_run_params(task: dict[str, Any]) -> dict[str, Any]:
         "recipe_count": str(task.get("recipe_count", "")).strip(),
         "cover_mode2_quality": str(task.get("cover_mode2_quality", "")).strip(),
         "cover_mode2_count": str(task.get("cover_mode2_count", "")).strip(),
+        "text_provider": str(task.get("text_provider", "")).strip(),
         "supplement_targets": list(task.get("supplement_targets") or []),
         "target_output_dir": str(task.get("target_output_dir", "")).strip(),
         "anchor_poster_path": str(task.get("anchor_poster_path", "")).strip(),
@@ -5382,7 +5502,11 @@ def build_task_run_params(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def resolve_run_log_dir(result: dict[str, Any] | None, task: dict[str, Any]) -> Path | None:
+def resolve_run_log_dir(
+    result: dict[str, Any] | None,
+    task: dict[str, Any],
+    log_lines: list[str] | None = None,
+) -> Path | None:
     if isinstance(result, dict):
         output_dir_text = str(result.get("output_dir", "")).strip()
         if output_dir_text:
@@ -5399,6 +5523,13 @@ def resolve_run_log_dir(result: dict[str, Any] | None, task: dict[str, Any]) -> 
         target_dir = Path(target_output_dir)
         if target_dir.exists() and target_dir.is_dir():
             return target_dir
+    for line in log_lines or []:
+        marker = "输出目录："
+        if marker in line:
+            output_dir_text = line.split(marker, 1)[1].strip()
+            output_dir = Path(output_dir_text)
+            if output_dir.exists() and output_dir.is_dir():
+                return output_dir
     return None
 
 
@@ -5410,7 +5541,7 @@ def write_run_log_file(
     success: bool,
     error_text: str = "",
 ) -> str:
-    log_dir = resolve_run_log_dir(result, task)
+    log_dir = resolve_run_log_dir(result, task, log_lines)
     if log_dir is None:
         return ""
     header = [
@@ -5783,6 +5914,8 @@ def read_dish_output_summary(folder: Path) -> dict[str, Any]:
 
     preview_image = poster_selected or (publish_images[0] if publish_images else (images[0] if images else ""))
 
+    continue_info = infer_continue_supplement_targets(folder)
+
     return {
         "dish_name": dish_name,
         "region_label": region_label,
@@ -5803,6 +5936,10 @@ def read_dish_output_summary(folder: Path) -> dict[str, Any]:
         "images": images,
         "publish_images": publish_images,
         "preview_image": preview_image,
+        "can_continue_images": bool(continue_info.get("can_continue_images")),
+        "continue_supplement_targets": list(continue_info.get("continue_supplement_targets") or []),
+        "continue_reason": str(continue_info.get("continue_reason", "")).strip(),
+        "image_failure_hint": str(continue_info.get("image_failure_hint", "")).strip(),
     }
 
 
@@ -6099,6 +6236,28 @@ def current_config_snapshot() -> dict[str, str]:
         "MODE2_RECIPE_IMAGE_COUNT": os.getenv("MODE2_RECIPE_IMAGE_COUNT", "").strip(),
         "MODE2_COVER_IMAGE_QUALITY": os.getenv("MODE2_COVER_IMAGE_QUALITY", "").strip(),
         "MODE2_COVER_IMAGE_COUNT": os.getenv("MODE2_COVER_IMAGE_COUNT", "").strip(),
+        "TEXT_PROVIDER": os.getenv("TEXT_PROVIDER", "cursor").strip() or "cursor",
+    }
+
+
+def sync_panel_text_gen_prefs(payload: dict[str, Any] | None = None) -> dict[str, str]:
+    global PANEL_TEXT_GEN_PREFS
+    merged = {**PANEL_TEXT_GEN_PREFS, **(payload or {})}
+    provider = str(merged.get("text_provider", "cursor")).strip().lower()
+    if provider not in {"cursor", "doubao"}:
+        provider = "cursor"
+    PANEL_TEXT_GEN_PREFS = {"text_provider": provider}
+    return dict(PANEL_TEXT_GEN_PREFS)
+
+
+def text_gen_options_for_frontend(current: dict[str, str] | None = None) -> dict[str, Any]:
+    prefs = current or PANEL_TEXT_GEN_PREFS
+    return {
+        "current": prefs,
+        "providers": [
+            {"id": "cursor", "label": "Cursor"},
+            {"id": "doubao", "label": "豆包"},
+        ],
     }
 
 
@@ -6142,6 +6301,13 @@ def apply_runtime_overrides(payload: dict[str, Any]) -> None:
         os.environ["AUTO_DISH_CUISINE_MODE"] = cuisine_mode
     if str(payload.get("model_temperature", "")).strip():
         os.environ["MODEL_TEMPERATURE"] = str(payload["model_temperature"]).strip()
+
+    text_provider = str(payload.get("text_provider", "")).strip().lower()
+    if text_provider in {"cursor", "doubao"}:
+        sync_panel_text_gen_prefs({"text_provider": text_provider})
+        os.environ["TEXT_PROVIDER"] = text_provider
+    else:
+        sync_panel_text_gen_prefs()
 
     mode2_pairs = (
         ("poster", "poster_quality", "poster_count"),
@@ -6436,10 +6602,12 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/state":
             sync_panel_image_gen_prefs()
+            sync_panel_text_gen_prefs()
             self._send_json(
                 {
                     "config": current_config_snapshot(),
                     "image_gen_options": image_gen_options_for_frontend(PANEL_IMAGE_GEN_PREFS),
+                    "text_gen_options": text_gen_options_for_frontend(PANEL_TEXT_GEN_PREFS),
                     "idea": read_idea_file(),
                     "history": list_history(limit=12, offset=0),
                     "history_revision": history_revision(),
@@ -6450,6 +6618,10 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                     "custom_images_dir": str((ROOT_DIR / "custom_image_gen" / "images").resolve()),
                 }
             )
+            return
+        if parsed.path == "/api/text_gen_prefs":
+            sync_panel_text_gen_prefs()
+            self._send_json(text_gen_options_for_frontend(PANEL_TEXT_GEN_PREFS))
             return
         if parsed.path == "/api/publish_plan":
             self._send_json(load_publish_plan())
@@ -6603,6 +6775,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
             "/api/publish_plan",
             "/api/text_assets_save",
             "/api/image_gen_prefs",
+            "/api/text_gen_prefs",
             "/api/work_stop",
             "/api/panel_shutdown",
             "/api/panel_restart",
@@ -6740,7 +6913,17 @@ class V2PanelHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/image_gen_prefs":
             try:
                 controls = sync_panel_image_gen_prefs(payload)
+                if str(payload.get("text_provider", "")).strip():
+                    sync_panel_text_gen_prefs({"text_provider": payload["text_provider"]})
                 self._send_json({"ok": True, "current": controls})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, code=400)
+            return
+        if parsed.path == "/api/text_gen_prefs":
+            try:
+                prefs = sync_panel_text_gen_prefs(payload)
+                os.environ["TEXT_PROVIDER"] = prefs["text_provider"]
+                self._send_json({"ok": True, "current": prefs})
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": str(exc)}, code=400)
             return
@@ -6869,6 +7052,11 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 "recipe_count": str(payload.get("recipe_count", "")).strip(),
                 "cover_mode2_quality": str(payload.get("cover_mode2_quality", "")).strip(),
                 "cover_mode2_count": str(payload.get("cover_mode2_count", "")).strip(),
+                "text_provider": str(payload.get("text_provider", "")).strip() or PANEL_TEXT_GEN_PREFS.get("text_provider", "cursor"),
+                "image_provider": str(payload.get("image_provider", "")).strip(),
+                "image_quality": str(payload.get("image_quality", "")).strip(),
+                "image_aspect_ratio": str(payload.get("image_aspect_ratio", "")).strip(),
+                "image_resolution_tier": str(payload.get("image_resolution_tier", "")).strip(),
                 "poster_reference_paths": list(poster_reference_paths) if action == "run" and mode == "file" else [],
                 "queued_at": time.time(),
             }
@@ -6896,6 +7084,8 @@ def main() -> None:
     reexec_in_project_venv_if_needed()
     ensure_runtime_config_loaded()
     sync_panel_image_gen_prefs()
+    sync_panel_text_gen_prefs()
+    os.environ["TEXT_PROVIDER"] = PANEL_TEXT_GEN_PREFS.get("text_provider", "cursor")
     init_custom_image_service()
     server = ThreadingHTTPServer((HOST, PORT), V2PanelHandler)
     PANEL_SERVER = server
