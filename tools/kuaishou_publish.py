@@ -36,6 +36,8 @@ from tools.douyin_publish import (  # noqa: E402
     DEFAULT_TYPING_DELAY_MS,
     PublishSettings,
     click_locator,
+    connect_cdp_browser,
+    connect_cdp_browser_resilient,
     ensure_cdp_browser_available,
     find_optional_locator,
     normalize_schedule_at,
@@ -49,6 +51,7 @@ from tools.weixin_mp_publish import confirm_windows_open_dialog, paste_text_to_c
 
 DEFAULT_URL_KEYWORD = "cp.kuaishou.com"
 DEFAULT_KUAISHOU_HOME_URL = "https://cp.kuaishou.com/"
+DEFAULT_KUAISHOU_GRAPHIC_PUBLISH_URL = "https://cp.kuaishou.com/article/publish/video"
 DEFAULT_AFTER_PUBLISH_WORK_WAIT_MS = 15_000
 DEFAULT_AFTER_GRAPHIC_TAB_WAIT_MS = 5_000
 DEFAULT_AFTER_UPLOAD_BUTTON_WAIT_MS = 3_000
@@ -66,6 +69,8 @@ DEFAULT_PUBLISH_LOCATION = "成都市"
 DEFAULT_DEBUG_SCREENSHOT = ROOT_DIR / "tools" / "kuaishou_publish_last_error.png"
 DEFAULT_UPLOAD_STEP_SCREENSHOT = ROOT_DIR / "tools" / "kuaishou_publish_upload_step.png"
 EXPECTED_TOPIC_COUNT = 4
+KUAISHOU_MUSIC_SEARCH_KEYWORD = "好美味"
+KUAISHOU_MUSIC_TITLE = "好美味(美食BGM)"
 
 
 @dataclass(frozen=True)
@@ -445,15 +450,49 @@ def ensure_graphic_editor_ready(page: Page, settings: KuaishouPublishSettings) -
     print("作品描述输入框已就绪。")
 
 
+def recover_kuaishou_app_load_failure(page: Page, *, max_retries: int = 3) -> None:
+    for attempt in range(1, max_retries + 1):
+        load_failed = find_optional_locator(
+            page,
+            (
+                page.get_by_text("应用加载失败", exact=False),
+                page.get_by_text("请刷新重试", exact=False),
+            ),
+            timeout_ms=1_500,
+        )
+        if load_failed is None:
+            return
+        print(f"检测到快手「应用加载失败」，刷新重试（{attempt}/{max_retries}）…")
+        page.reload(wait_until="domcontentloaded", timeout=60_000)
+        page.wait_for_timeout(3_000)
+    raise RuntimeError("快手发布页反复出现「应用加载失败」，请手动刷新浏览器后重试。")
+
+
 def open_graphic_publish_flow(page: Page, settings: KuaishouPublishSettings) -> None:
-    click_locator(page, publish_work_button_locators(page), description="发布作品", timeout_ms=30_000)
-    page.wait_for_timeout(settings.after_publish_work_wait_ms)
+    if "/article/publish" not in page.url:
+        try:
+            page.goto(DEFAULT_KUAISHOU_GRAPHIC_PUBLISH_URL, wait_until="domcontentloaded", timeout=60_000)
+        except Exception:
+            page.goto(DEFAULT_KUAISHOU_GRAPHIC_PUBLISH_URL, wait_until="commit", timeout=60_000)
+        page.wait_for_timeout(2_000)
+        print(f"已直达快手图文发布页：{page.url}")
+    recover_kuaishou_app_load_failure(page)
 
     upload_panel_ready = find_optional_locator(page, main_upload_button_locators(page), timeout_ms=3_000)
     editor_ready = find_optional_locator(page, description_editor_locators(page), timeout_ms=1_500)
     if upload_panel_ready is None and editor_ready is None:
-        print("发布作品后未立即出现上传区，等待页面加载…")
-        page.wait_for_timeout(3_000)
+        click_locator(page, publish_work_button_locators(page), description="发布作品", timeout_ms=30_000)
+        page.wait_for_timeout(settings.after_publish_work_wait_ms)
+        recover_kuaishou_app_load_failure(page)
+        upload_panel_ready = find_optional_locator(page, main_upload_button_locators(page), timeout_ms=5_000)
+        editor_ready = find_optional_locator(page, description_editor_locators(page), timeout_ms=2_000)
+        if upload_panel_ready is None and editor_ready is None:
+            print("发布作品后未立即出现上传区，等待页面加载…")
+            page.wait_for_timeout(3_000)
+
+    if editor_ready is not None:
+        print("当前已在快手图文编辑页，跳过上传图文标签切换。")
+        return
 
     activate_graphic_tab(page, settings)
 
@@ -644,10 +683,95 @@ def select_publish_location(page: Page, settings: KuaishouPublishSettings) -> No
 
 def scheduled_publish_label_locators(page: Page) -> tuple:
     return (
-        page.locator('label:has(input[type="radio"][value="2"])'),
         page.locator("label").filter(has_text="定时发布"),
         page.get_by_text("定时发布", exact=True).locator("xpath=ancestor-or-self::label[1]"),
     )
+
+
+def public_visibility_label_locators(page: Page) -> tuple:
+    return (
+        page.locator("label").filter(has_text="所有人可见"),
+        page.get_by_text("所有人可见", exact=True).locator("xpath=ancestor-or-self::label[1]"),
+        page.locator("label").filter(has_text="公开"),
+    )
+
+
+def music_add_button_locators(page: Page) -> tuple:
+    return (
+        page.get_by_text("添加音乐", exact=True),
+        page.locator("button").filter(has_text="添加音乐"),
+        page.get_by_text("+ 添加音乐", exact=False),
+    )
+
+
+def music_search_input_locators(page: Page) -> tuple:
+    return (
+        page.get_by_placeholder("搜索音乐"),
+        page.locator("input[placeholder*='搜索']"),
+        page.locator("input[type='search']"),
+    )
+
+
+def ensure_kuaishou_public_visibility(page: Page) -> None:
+    for locators in (public_visibility_label_locators(page),):
+        option = find_optional_locator(page, locators, timeout_ms=5_000)
+        if option is None:
+            continue
+        radio = option.locator('input[type="radio"]').first
+        if radio.count() and radio.is_checked():
+            print("快手查看权限已是「所有人可见」。")
+            return
+        option.scroll_into_view_if_needed()
+        option.click(force=True)
+        page.wait_for_timeout(400)
+        print("已选择快手查看权限：所有人可见")
+        return
+    print("未找到「所有人可见」选项，跳过权限设置。")
+
+
+def select_kuaishou_music(page: Page) -> None:
+    add_button = find_optional_locator(page, music_add_button_locators(page), timeout_ms=8_000)
+    if add_button is None:
+        print("未找到「添加音乐」入口，跳过音乐设置。")
+        return
+    add_button.scroll_into_view_if_needed()
+    add_button.click()
+    page.wait_for_timeout(1_200)
+    search_input = wait_for_locator(page, music_search_input_locators(page), description="快手音乐搜索框", timeout_ms=15_000)
+    search_input.click()
+    page.keyboard.press("Control+A")
+    page.keyboard.press("Backspace")
+    type_text_humanly(page, KUAISHOU_MUSIC_SEARCH_KEYWORD, delay_ms=80)
+    page.wait_for_timeout(2_000)
+    song_item = find_optional_locator(
+        page,
+        (
+            page.get_by_text(KUAISHOU_MUSIC_TITLE, exact=False).first,
+            page.locator("div").filter(has_text=KUAISHOU_MUSIC_TITLE).first,
+            page.locator("div").filter(has_text=KUAISHOU_MUSIC_SEARCH_KEYWORD).filter(has_text="BGM").first,
+            page.locator("div").filter(has_text=KUAISHOU_MUSIC_SEARCH_KEYWORD).filter(has_text="释先生").first,
+            page.locator("[class*='music']").filter(has_text=KUAISHOU_MUSIC_SEARCH_KEYWORD).first,
+        ),
+        timeout_ms=15_000,
+    )
+    if song_item is None:
+        raise RuntimeError(f"未找到快手音乐：{KUAISHOU_MUSIC_TITLE}")
+    song_item.scroll_into_view_if_needed()
+    song_item.click()
+    page.wait_for_timeout(800)
+    confirm = find_optional_locator(
+        page,
+        (
+            page.get_by_role("button", name="确定"),
+            page.get_by_role("button", name="使用"),
+            page.locator("button").filter(has_text="确定"),
+        ),
+        timeout_ms=5_000,
+    )
+    if confirm is not None:
+        confirm.click()
+        page.wait_for_timeout(400)
+    print(f"已选择快手音乐：{KUAISHOU_MUSIC_TITLE}")
 
 
 def scheduled_datetime_input_locators(page: Page) -> tuple:
@@ -768,7 +892,7 @@ def set_kuaishou_scheduled_publish_time(page: Page, schedule_at: str, settings: 
     if ant_picker_dropdown_locator(page).count():
         raise RuntimeError("快手定时发布弹层仍未关闭，请检查确定按钮。")
 
-    scheduled_mode = page.locator('input[type="radio"][value="2"]').first
+    scheduled_mode = page.locator("label").filter(has_text="定时发布").locator('input[type="radio"]').first
     if scheduled_mode.count() and not scheduled_mode.is_checked():
         raise RuntimeError("快手定时发布模式未保持选中状态。")
 
@@ -802,7 +926,7 @@ def run_kuaishou_publish(settings: KuaishouPublishSettings, assets: KuaishouPubl
         ensure_cdp_browser_available(to_cdp_settings(settings))
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.connect_over_cdp(settings.cdp_url)
+        browser = connect_cdp_browser_resilient(playwright, to_cdp_settings(settings))
         page = resolve_kuaishou_page(browser, settings.url_keyword)
 
         try:
@@ -813,6 +937,11 @@ def run_kuaishou_publish(settings: KuaishouPublishSettings, assets: KuaishouPubl
             upload_cover_image(page, assets, settings)
             select_author_statement(page, settings)
             select_publish_location(page, settings)
+            try:
+                select_kuaishou_music(page)
+            except Exception as music_exc:
+                print(f"快手音乐选择失败（继续其余步骤）：{music_exc}")
+            ensure_kuaishou_public_visibility(page)
             if settings.schedule_at:
                 set_kuaishou_scheduled_publish_time(page, settings.schedule_at, settings)
         except Exception:

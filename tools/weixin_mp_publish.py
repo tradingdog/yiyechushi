@@ -38,6 +38,8 @@ from tools.douyin_publish import (  # noqa: E402
     PublishSettings,
     click_locator,
     click_locator_via_dom,
+    connect_cdp_browser,
+    connect_cdp_browser_resilient,
     ensure_cdp_browser_available,
     find_default_chrome_path,
     find_optional_locator,
@@ -71,8 +73,8 @@ DEFAULT_UPLOAD3_MENU_X = 883
 DEFAULT_UPLOAD3_MENU_Y = 728
 DEFAULT_UPLOAD3_CLICK_X = 881
 DEFAULT_UPLOAD3_CLICK_Y = 768
-DEFAULT_WINDOWS_OPEN_DIALOG_WAIT_MS = 1_500
-DEFAULT_AFTER_COVER_EDITOR_WAIT_MS = 1_200
+DEFAULT_WINDOWS_OPEN_DIALOG_WAIT_MS = 3_500
+DEFAULT_AFTER_COVER_EDITOR_WAIT_MS = 1_800
 DEFAULT_COVER_CROP_DRAG_START_X = 662
 DEFAULT_COVER_CROP_DRAG_START_Y = 555
 DEFAULT_COVER_CROP_DRAG_END_Y = 410
@@ -232,9 +234,15 @@ def modify_cover_button_locators(page: Page) -> tuple[Locator, ...]:
 
 def cover_preview_hover_locators(page: Page) -> tuple[Locator, ...]:
     return (
+        page.locator(".image-selector__preview-center-img").first,
+        page.locator(".image-selector__preview-center").first,
         page.locator(".share_cover").first,
         page.locator(".js_cover_area").first,
         page.locator("#js_cover_area").first,
+        page.locator(".weui-desktop-upload__img").first,
+        page.locator(".share-image__list .share-image__item").first,
+        page.locator(".share-image__list img").first,
+        page.locator(".appmsg_edit_container img").first,
         page.locator("a.js_modifyCover").first.locator(
             "xpath=ancestor::*[contains(@class,'cover') or contains(@class,'share')][1]"
         ),
@@ -245,8 +253,12 @@ def cover_crop_confirm_button_locators(page: Page) -> tuple[Locator, ...]:
     dialog = page.locator("div.weui-desktop-dialog:visible")
     return (
         dialog.locator("button.weui-desktop-btn_primary").filter(has_text="确认"),
+        dialog.locator("button.weui-desktop-btn_primary").filter(has_text="确定"),
         dialog.locator("div.weui-desktop-dialog__ft button.weui-desktop-btn_primary"),
         dialog.get_by_role("button", name="确认"),
+        dialog.get_by_role("button", name="确定"),
+        page.locator(".image-selector button").filter(has_text="确定"),
+        page.locator(".image-selector button").filter(has_text="确认"),
         page.locator("button.weui-desktop-btn_primary").filter(has_text="确认"),
         page.get_by_role("button", name="确认"),
     )
@@ -588,32 +600,238 @@ def open_local_upload_menu_at(
     pyautogui.click()
 
 
+def tietu_add_image_button_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.locator(".image-selector__bottom-add"),
+        page.locator(".share-image__list .weui-desktop-upload"),
+        page.locator(".share-image__list .weui-desktop-upload__input__box"),
+        page.locator(".weui-desktop-upload__input__box"),
+        page.locator(".js_img_add"),
+        page.locator("div[class*='upload']").filter(has_text="+"),
+    )
+
+
+def tietu_file_input_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.locator(".image-selector input[type='file']"),
+        page.locator(".image-selector__bottom-add input[type='file']"),
+        page.locator(".share-image__list input[type='file']"),
+        page.locator(".weui-desktop-upload input[type='file']"),
+        page.locator("input[type='file'][accept*='image']"),
+        page.locator("input[type='file']"),
+    )
+
+
+def count_tietu_images(page: Page) -> int:
+    list_item_selectors = (
+        ".image-selector__bottom-list .weui-desktop-drag-list__item",
+        ".share-image__list .share-image__item:not(.share-image__item_add)",
+        ".share-image__list > div:not(.share-image__item_add)",
+        ".share-image__list .weui-desktop-upload__img",
+    )
+    for selector in list_item_selectors:
+        count = page.locator(selector).count()
+        if count > 0:
+            return count
+
+    selectors = (
+        ".share-image__list img",
+        ".appmsg_edit_img_item img",
+        ".weui-desktop-upload__img",
+        ".share-image__wrp img",
+        ".js_shareItem img",
+        ".share_pic_item img",
+        ".share_media_list img",
+        ".weui-desktop-media-img",
+        ".appmsg_edit_container img",
+    )
+    max_count = 0
+    for selector in selectors:
+        count = page.locator(selector).count()
+        if count > max_count:
+            max_count = count
+    try:
+        dom_count = page.evaluate(
+            """
+            () => {
+              const tips = document.querySelector('.image-selector__preview-center-tips-area__num');
+              if (tips) {
+                const nums = (tips.innerText || '').trim().split(/\\s+/).map((n) => parseInt(n, 10)).filter((n) => !Number.isNaN(n));
+                if (nums.length >= 2 && nums[1] > 0 && nums[1] <= 9) return nums[1];
+              }
+              const bottom = document.querySelector('.image-selector__bottom-list');
+              if (bottom) {
+                const items = bottom.querySelectorAll('.weui-desktop-drag-list__item');
+                if (items.length) return items.length;
+              }
+              const list = document.querySelector('.share-image__list');
+              if (list) {
+                const items = list.querySelectorAll(
+                  '.share-image__item:not(.share-image__item_add), .weui-desktop-upload__img'
+                );
+                if (items.length) return items.length;
+                const badge = (list.textContent || '').match(/(\\d+)\\s*\\/\\s*(\\d+)/);
+                if (badge) {
+                  const total = parseInt(badge[2], 10);
+                  if (total > 0 && total <= 9) return total;
+                }
+              }
+              const root = document.querySelector('.appmsg_edit_container')
+                || document.querySelector('.share-image__list')
+                || document.body;
+              const imgs = [...root.querySelectorAll('img')].filter((img) => {
+                const rect = img.getBoundingClientRect();
+                const src = (img.getAttribute('src') || '').toLowerCase();
+                if (rect.width < 48 || rect.height < 48) return false;
+                if (src.includes('svg') || src.includes('icon') || src.includes('emoji')) return false;
+                return true;
+              });
+              return imgs.length;
+            }
+            """
+        )
+        max_count = max(max_count, int(dom_count or 0))
+    except Exception:
+        pass
+    return max_count
+
+
+def click_tietu_add_slot(page: Page) -> bool:
+    add_button = find_optional_locator(
+        page,
+        (
+            page.locator(".share-image__item_add"),
+            page.locator(".share-image__list .share-image__item_add"),
+            *tietu_add_image_button_locators(page),
+            page.locator(".share-image__list").locator("div").filter(has_text="+").last,
+        ),
+        timeout_ms=3_000,
+    )
+    if add_button is not None:
+        add_button.scroll_into_view_if_needed()
+        add_button.click(force=True)
+        page.wait_for_timeout(400)
+        print("已点击贴图「+」添加位。")
+        return True
+    clicked = page.evaluate(
+        """
+        () => {
+          const selectors = [
+            '.image-selector__bottom-add',
+            '.share-image__item_add',
+            '.share-image__list .weui-desktop-upload',
+            '.share-image__list .weui-desktop-upload__input__box',
+          ];
+          for (const selector of selectors) {
+            const el = document.querySelector(selector);
+            if (el) {
+              el.click();
+              return selector;
+            }
+          }
+          return '';
+        }
+        """
+    )
+    if clicked:
+        page.wait_for_timeout(400)
+        print(f"已通过 DOM 点击贴图「+」添加位：{clicked}")
+        return True
+    return False
+
+
+def upload_tietu_image_via_playwright(page: Page, image_path: Path, *, click_add_first: bool) -> bool:
+    if click_add_first:
+        click_tietu_add_slot(page)
+
+    scoped_inputs = (
+        page.locator(".image-selector__bottom-add input[type='file']"),
+        page.locator(".image-selector input[type='file']").last,
+    )
+    for locator in scoped_inputs:
+        try:
+            if locator.count():
+                locator.set_input_files(str(image_path.resolve()))
+                print(f"已通过 scoped file input 上传：{image_path.name}")
+                return True
+        except Exception:
+            continue
+
+    if click_add_first:
+        add_button = find_optional_locator(
+            page,
+            (page.locator(".image-selector__bottom-add"), *tietu_add_image_button_locators(page)),
+            timeout_ms=3_000,
+        )
+        if add_button is not None:
+            try:
+                with page.expect_file_chooser(timeout=8_000) as chooser_info:
+                    add_button.click(force=True)
+                chooser_info.value.set_files(str(image_path.resolve()))
+                print(f"已通过 file chooser 上传：{image_path.name}")
+                return True
+            except Exception:
+                pass
+
+    if not click_add_first:
+        for locators in (tietu_file_input_locators(page),):
+            upload_input = find_optional_locator(page, locators, state="attached", timeout_ms=2_000)
+            if upload_input is not None:
+                try:
+                    upload_input.set_input_files(str(image_path.resolve()))
+                    print(f"已通过 Playwright file input 上传：{image_path.name}")
+                    return True
+                except Exception:
+                    continue
+    return False
+
+
 def upload_local_images(page: Page, assets: WeixinPublishAssets, settings: WeixinPublishSettings) -> None:
     prepare_weixin_chrome_page(page)
+    expected = len(assets.image_paths)
 
     for index, image_path in enumerate(assets.image_paths, start=1):
-        hover_x, hover_y, click_x, click_y = upload_screen_coords_for_index(settings, index)
-        print(f"开始上传第 {index} 张：{image_path.name}")
-        open_local_upload_menu_at(
-            page,
-            hover_x=hover_x,
-            hover_y=hover_y,
-            click_x=click_x,
-            click_y=click_y,
-            hover_ms=settings.upload_hover_ms,
-        )
-        print(
-            f"已在 ({hover_x}, {hover_y}) 悬停 {settings.upload_hover_ms}ms，"
-            f"并点击 ({click_x}, {click_y}) 打开本地上传。"
-        )
-        confirm_windows_open_dialog(
-            [image_path],
-            wait_ms=settings.windows_open_dialog_wait_ms,
-            focus_page=page,
-        )
-        page.wait_for_timeout(2_500)
+        for attempt in range(1, 3):
+            current_count = count_tietu_images(page)
+            if current_count >= index:
+                print(f"第 {index} 张已存在（当前 {current_count} 张），跳过重复上传。")
+                break
+            hover_x, hover_y, click_x, click_y = upload_screen_coords_for_index(settings, index)
+            print(f"开始上传第 {index} 张（尝试 {attempt}/2）：{image_path.name}")
+            uploaded = upload_tietu_image_via_playwright(
+                page,
+                image_path,
+                click_add_first=current_count > 0,
+            )
+            if not uploaded:
+                open_local_upload_menu_at(
+                    page,
+                    hover_x=hover_x,
+                    hover_y=hover_y,
+                    click_x=click_x,
+                    click_y=click_y,
+                    hover_ms=settings.upload_hover_ms,
+                )
+                confirm_windows_open_dialog(
+                    [image_path],
+                    wait_ms=settings.windows_open_dialog_wait_ms,
+                    focus_page=page,
+                )
+            page.wait_for_timeout(4_000)
+            after_count = count_tietu_images(page)
+            if after_count >= index:
+                print(f"第 {index} 张上传成功（当前共 {after_count} 张）。")
+                break
+            if attempt == 2:
+                raise RuntimeError(
+                    f"公众号第 {index} 张图片上传后计数仍不足（期望 >= {index}，当前 {after_count}）。"
+                )
+            print(f"第 {index} 张上传后计数不足（{after_count}），重试一次。")
 
-    print(f"公众号贴图上传完成，共 {len(assets.image_paths)} 张。")
+    final_count = count_tietu_images(page)
+    if final_count < expected:
+        raise RuntimeError(f"公众号贴图上传不完整：期望 {expected} 张，当前 {final_count} 张。")
+    print(f"公众号贴图上传完成，共 {final_count} 张。")
 
 
 def dismiss_blocking_dialogs(page: Page) -> None:
@@ -630,6 +848,22 @@ def dismiss_blocking_dialogs(page: Page) -> None:
                 return
         except Exception:
             continue
+
+    for label in ("我知道了", "知道了", "关闭"):
+        tip_button = find_optional_locator(
+            page,
+            (
+                page.get_by_role("button", name=label),
+                page.locator("button").filter(has_text=label),
+                page.get_by_text(label, exact=True),
+            ),
+            timeout_ms=1_500,
+        )
+        if tip_button is not None:
+            tip_button.click(force=True)
+            page.wait_for_timeout(400)
+            print(f"已关闭功能提示弹窗：{label}")
+            return
 
 
 def submit_declaration(page: Page) -> None:
@@ -684,12 +918,38 @@ def wait_cover_crop_icon_visible(page: Page, timeout_ms: int = 5_000) -> Locator
     raise RuntimeError("悬停封面后仍未出现裁剪图标（js_modifyCover）。")
 
 
+def image_selector_crop_button_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.locator(".image-selector__edit-bar-item").nth(1),
+        page.locator(".image-selector__edit-bar [title*='裁剪']"),
+        page.locator(".image-selector__edit-bar-item").filter(has=page.locator("[title*='裁剪']")),
+    )
+
+
 def open_cover_crop_modal(page: Page) -> None:
     prepare_weixin_chrome_page(page)
+    crop_button = find_optional_locator(page, image_selector_crop_button_locators(page), timeout_ms=5_000)
+    if crop_button is not None:
+        crop_button.scroll_into_view_if_needed()
+        page.wait_for_timeout(300)
+        try:
+            crop_button.click(force=True)
+        except Exception:
+            crop_button.evaluate("el => el.click()")
+        print("已点击 image-selector 裁剪按钮。")
+        page.wait_for_timeout(1_200)
+        dismiss_blocking_dialogs(page)
+        return
+
     hover_target = find_cover_hover_target(page)
     hover_target.scroll_into_view_if_needed()
     page.wait_for_timeout(300)
-    hover_target.hover()
+    try:
+        hover_target.hover(force=True)
+    except Exception:
+        box = hover_target.bounding_box()
+        if box:
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
     print("已悬停封面预览区，等待裁剪图标出现。")
     page.wait_for_timeout(600)
     crop_icon = wait_cover_crop_icon_visible(page)
@@ -700,6 +960,30 @@ def open_cover_crop_modal(page: Page) -> None:
 
 def drag_cover_crop_up(page: Page, settings: WeixinPublishSettings) -> None:
     prepare_weixin_chrome_page(page)
+    crop_handles = (
+        page.locator(".cropper-drag-box"),
+        page.locator(".cropper-crop-box"),
+        page.locator(".weui-desktop-crop__drag-box"),
+        page.locator(".cover-crop__drag-box"),
+    )
+    for locator in crop_handles:
+        try:
+            handle = locator.first
+            if handle.count() and handle.is_visible():
+                box = handle.bounding_box()
+                if box and box.get("width", 0) > 20:
+                    start_x = box["x"] + box["width"] / 2
+                    start_y = box["y"] + box["height"] / 2
+                    end_y = max(10, start_y - 120)
+                    page.mouse.move(start_x, start_y)
+                    page.mouse.down()
+                    page.mouse.move(start_x, end_y, steps=18)
+                    page.mouse.up()
+                    print(f"已在裁剪弹窗内上拖封面区域：({int(start_x)}, {int(start_y)}) → ({int(start_x)}, {int(end_y)})")
+                    return
+        except Exception:
+            continue
+
     start_x = settings.cover_crop_drag_start_x
     start_y = settings.cover_crop_drag_start_y
     end_y = settings.cover_crop_drag_end_y
@@ -709,18 +993,34 @@ def drag_cover_crop_up(page: Page, settings: WeixinPublishSettings) -> None:
     time.sleep(0.12)
     pyautogui.moveTo(start_x, end_y, duration=0.55)
     pyautogui.mouseUp()
-    print(
-        f"已拖动封面裁剪框：({start_x}, {start_y}) → ({start_x}, {end_y})。"
-    )
+    print(f"已拖动封面裁剪框（坐标回退）：({start_x}, {start_y}) → ({start_x}, {end_y})。")
 
 
 def adjust_weixin_cover_crop(page: Page, settings: WeixinPublishSettings) -> None:
+    dismiss_blocking_dialogs(page)
     open_cover_crop_modal(page)
-    select_forward_card_cover_preview(page)
+    dismiss_blocking_dialogs(page)
+    forward_card = find_optional_locator(
+        page,
+        forward_card_preview_card_locators(page),
+        timeout_ms=8_000,
+    )
+    if forward_card is not None:
+        select_forward_card_cover_preview(page)
+    else:
+        print("未检测到 3:4 转发卡片弹窗，尝试在当前裁剪界面直接拖拽。")
     page.wait_for_timeout(settings.after_cover_editor_wait_ms)
     drag_cover_crop_up(page, settings)
     page.wait_for_timeout(500)
-    click_locator_via_dom(page, cover_crop_confirm_button_locators(page), description="封面裁剪确认", timeout_ms=30_000)
+    confirm_button = find_optional_locator(
+        page,
+        cover_crop_confirm_button_locators(page),
+        timeout_ms=8_000,
+    )
+    if confirm_button is not None:
+        click_locator_via_dom(page, cover_crop_confirm_button_locators(page), description="封面裁剪确认", timeout_ms=30_000)
+    else:
+        print("未找到裁剪确认按钮，视为裁剪已自动生效。")
     page.wait_for_timeout(1_000)
     print("已完成公众号封面裁剪调整（含确认）。")
 
@@ -763,7 +1063,7 @@ def run_weixin_publish(settings: WeixinPublishSettings, assets: WeixinPublishAss
         ensure_cdp_browser_available(to_cdp_settings(settings))
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.connect_over_cdp(settings.cdp_url)
+        browser = connect_cdp_browser_resilient(playwright, to_cdp_settings(settings))
         page = resolve_weixin_mp_page(browser, settings)
         editor_page = page
 

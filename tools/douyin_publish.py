@@ -42,7 +42,12 @@ from image_generator import ensure_runtime_config_loaded, get_required_publish_t
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "output" / "20260525_043309_葱香海参酿"
 DEFAULT_PUBLISH_DIR_NAME = "publish"
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+DEFAULT_CDP_CONNECT_TIMEOUT_MS = 90_000
+DEFAULT_CDP_CONNECT_RETRIES = 3
+DEFAULT_CDP_POST_CONNECT_WAIT_MS = 1_500
 DEFAULT_URL_KEYWORD = "creator.douyin.com"
+DOUYIN_GRAPHIC_PUBLISH_URL = "https://creator.douyin.com/creator-micro/content/upload?enter_from=publish"
+DOUYIN_FAVORITE_MUSIC_KEYWORD = "好美味"
 DEFAULT_CREATOR_HOME_URL = "https://creator.douyin.com/creator-micro/home"
 DEFAULT_TYPING_DELAY_MS = 120
 DEFAULT_AFTER_UPLOAD_WAIT_MS = 10_000
@@ -467,6 +472,104 @@ def ensure_cdp_browser_available(settings: PublishSettings) -> None:
     )
 
 
+def kill_chrome_listening_on_cdp_port(cdp_port: int) -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        script = (
+            f"$conn = Get-NetTCPConnection -LocalPort {cdp_port} -State Listen "
+            "-ErrorAction SilentlyContinue | Select-Object -First 1; "
+            "if ($null -eq $conn) { exit 1 }; "
+            "Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue; exit 0"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+
+
+def relaunch_automation_chrome(settings: PublishSettings) -> None:
+    if settings.chrome_path is None:
+        raise RuntimeError("无法重启自动化 Chrome：未找到 Chrome.exe 路径。")
+
+    cdp_port = extract_cdp_port(settings.cdp_url)
+    if kill_chrome_listening_on_cdp_port(cdp_port):
+        print(f"已终止占用 {cdp_port} 端口的 Chrome 进程，准备重新拉起。")
+        time.sleep(2)
+
+    settings.automation_profile_dir.mkdir(parents=True, exist_ok=True)
+    launch_command = [
+        str(settings.chrome_path),
+        f"--remote-debugging-port={cdp_port}",
+        f"--user-data-dir={settings.automation_profile_dir}",
+        "--new-window",
+        "--start-maximized",
+        "--no-first-run",
+        "--no-default-browser-check",
+        settings.creator_home_url,
+    ]
+    subprocess.Popen(launch_command)
+    print("已重新拉起自动化 Chrome 窗口。")
+
+    deadline = time.time() + settings.cdp_ready_timeout_ms / 1000
+    while time.time() < deadline:
+        if is_cdp_endpoint_ready(settings.cdp_url):
+            print(f"Chrome 调试端口已就绪：{settings.cdp_url}")
+            return
+        time.sleep(0.5)
+
+    raise RuntimeError(
+        "重启自动化 Chrome 后调试端口仍未就绪。"
+        f"\n当前连接地址：{settings.cdp_url}"
+    )
+
+
+def connect_cdp_browser_resilient(playwright, settings: PublishSettings) -> Browser:
+    fast_timeout_ms = 25_000
+    try:
+        return connect_cdp_browser(
+            playwright,
+            settings.cdp_url,
+            timeout_ms=fast_timeout_ms,
+            retries=1,
+        )
+    except RuntimeError as exc:
+        if not settings.auto_launch_browser:
+            raise
+        print(f"CDP 快速连接失败（{exc}），尝试重启自动化 Chrome 后重连…")
+        relaunch_automation_chrome(settings)
+        return connect_cdp_browser(playwright, settings.cdp_url)
+
+
+def connect_cdp_browser(
+    playwright,
+    cdp_url: str,
+    *,
+    timeout_ms: int = DEFAULT_CDP_CONNECT_TIMEOUT_MS,
+    retries: int = DEFAULT_CDP_CONNECT_RETRIES,
+) -> Browser:
+    last_exc: Exception | None = None
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            browser = playwright.chromium.connect_over_cdp(cdp_url, timeout=timeout_ms)
+            time.sleep(DEFAULT_CDP_POST_CONNECT_WAIT_MS / 1000)
+            _ = browser.contexts
+            if attempt > 1:
+                print(f"CDP 第 {attempt} 次连接成功：{cdp_url}")
+            return browser
+        except Exception as exc:
+            last_exc = exc
+            print(f"CDP 连接失败（{attempt}/{retries}）：{exc}")
+            time.sleep(min(8, 2 * attempt))
+    raise RuntimeError(f"无法连接 Chrome CDP：{cdp_url}") from last_exc
+
+
 def find_target_page(browser: Browser, url_keyword: str) -> Page:
     matched_pages: list[Page] = []
     for context in browser.contexts:
@@ -516,7 +619,10 @@ def resolve_page_by_keyword(
     )
     context = browser.contexts[0]
     page = context.new_page()
-    page.goto(creator_home_url, wait_until="domcontentloaded")
+    try:
+        page.goto(creator_home_url, wait_until="domcontentloaded", timeout=60_000)
+    except Exception:
+        page.goto(creator_home_url, wait_until="commit", timeout=60_000)
     page.wait_for_timeout(2000)
     print(f"已打开{platform_label}页面：{page.url}")
     return page
@@ -1102,6 +1208,135 @@ def set_scheduled_publish_time(page: Page, schedule_at: str, settings: PublishSe
     print(f"已设置定时发布时间：{schedule_at}")
 
 
+def click_publish_graphic_menu(page: Page) -> None:
+    menu_item = wait_for_locator(
+        page,
+        publish_graphic_menu_locators(page),
+        description="发布图文菜单项",
+        timeout_ms=15_000,
+    )
+    menu_item.scroll_into_view_if_needed()
+    page.wait_for_timeout(200)
+    try:
+        menu_item.click(timeout=5_000)
+    except Exception:
+        try:
+            menu_item.click(force=True, timeout=5_000)
+        except Exception:
+            menu_item.evaluate("el => el.click()")
+    print("已点击：发布图文菜单项")
+
+
+def open_douyin_graphic_publish_page(page: Page) -> None:
+    if find_optional_locator(page, title_input_locators(page), timeout_ms=1_500):
+        return
+    if find_optional_locator(page, main_upload_input_locators(page), state="attached", timeout_ms=1_500):
+        return
+    try:
+        page.goto(DOUYIN_GRAPHIC_PUBLISH_URL, wait_until="domcontentloaded")
+        page.wait_for_timeout(1_500)
+        if find_optional_locator(page, title_input_locators(page), timeout_ms=5_000):
+            print(f"已通过直达链接进入图文发布页：{page.url}")
+            return
+        if find_optional_locator(page, main_upload_input_locators(page), state="attached", timeout_ms=5_000):
+            print(f"已通过直达链接进入图文上传页：{page.url}")
+            return
+    except Exception as exc:
+        print(f"直达图文发布页失败，改走顶部菜单：{exc}")
+
+    publish_button = wait_for_locator(page, publish_button_locators(page), description="顶部发布按钮", timeout_ms=20_000)
+    publish_button.hover()
+    page.wait_for_timeout(600)
+    publish_button.click()
+    page.wait_for_timeout(500)
+    click_publish_graphic_menu(page)
+    page.wait_for_load_state("domcontentloaded")
+
+
+def music_select_button_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.get_by_role("button", name="选择音乐"),
+        page.locator("button").filter(has_text="选择音乐"),
+        page.get_by_text("选择音乐", exact=True),
+    )
+
+
+def music_favorite_tab_locators(page: Page) -> tuple[Locator, ...]:
+    return (
+        page.get_by_role("tab", name="收藏"),
+        page.locator("[role='tab']").filter(has_text="收藏"),
+        page.get_by_text("收藏", exact=True),
+    )
+
+
+def music_item_locators(page: Page, keyword: str) -> tuple[Locator, ...]:
+    return (
+        page.get_by_text("好美味(美食BGM)", exact=False).first,
+        page.locator("div").filter(has_text="美食BGM").filter(has_text="释先生").first,
+        page.locator("div").filter(has_text=keyword).filter(has_text="释先生").first,
+        page.locator("[class*='music']").filter(has_text=keyword).first,
+        page.locator("[class*='list']").filter(has_text=keyword).first,
+        page.get_by_text(keyword, exact=False).first,
+    )
+
+
+def select_douyin_favorite_music(page: Page) -> None:
+    select_button = find_optional_locator(page, music_select_button_locators(page), timeout_ms=8_000)
+    if select_button is None:
+        print("未找到「选择音乐」按钮，跳过音乐设置。")
+        return
+    select_button.scroll_into_view_if_needed()
+    select_button.click()
+    page.wait_for_timeout(1_200)
+    favorite_tab = find_optional_locator(page, music_favorite_tab_locators(page), timeout_ms=8_000)
+    if favorite_tab is not None:
+        favorite_tab.click()
+        print("已切换到音乐「收藏」列表。")
+        page.wait_for_timeout(1_500)
+    song_item = find_optional_locator(
+        page,
+        music_item_locators(page, DOUYIN_FAVORITE_MUSIC_KEYWORD),
+        timeout_ms=12_000,
+    )
+    if song_item is None:
+        search_input = find_optional_locator(
+            page,
+            (
+                page.get_by_placeholder("搜索音乐"),
+                page.locator("input[placeholder*='搜索音乐']"),
+            ),
+            timeout_ms=3_000,
+        )
+        if search_input is not None:
+            search_input.click()
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+            type_text_humanly(page, DOUYIN_FAVORITE_MUSIC_KEYWORD, delay_ms=80)
+            page.wait_for_timeout(1_200)
+            song_item = find_optional_locator(
+                page,
+                music_item_locators(page, DOUYIN_FAVORITE_MUSIC_KEYWORD),
+                timeout_ms=8_000,
+            )
+    if song_item is None:
+        raise RuntimeError(f"收藏列表中未找到音乐：{DOUYIN_FAVORITE_MUSIC_KEYWORD}")
+    song_item.click()
+    page.wait_for_timeout(600)
+    use_button = find_optional_locator(
+        page,
+        (
+            page.get_by_role("button", name="使用"),
+            page.locator("button").filter(has_text="使用"),
+            page.get_by_text("使用", exact=True),
+        ),
+        timeout_ms=5_000,
+    )
+    if use_button is not None:
+        use_button.click()
+        page.wait_for_timeout(400)
+    print(f"已选择抖音收藏音乐：{DOUYIN_FAVORITE_MUSIC_KEYWORD}")
+
+
 def ensure_publish_editor_ready(page: Page) -> None:
     if find_optional_locator(page, title_input_locators(page), timeout_ms=2_000):
         print("当前已在抖音图文发布页。")
@@ -1111,9 +1346,7 @@ def ensure_publish_editor_ready(page: Page) -> None:
         print("当前已在图文上传页，已检测到多图上传控件。")
         return
 
-    click_locator(page, publish_button_locators(page), description="顶部发布按钮")
-    click_locator(page, publish_graphic_menu_locators(page), description="发布图文菜单项")
-    page.wait_for_load_state("domcontentloaded")
+    open_douyin_graphic_publish_page(page)
 
     if find_optional_locator(page, title_input_locators(page), timeout_ms=5_000):
         print("已进入图文发布页。")
@@ -1122,9 +1355,6 @@ def ensure_publish_editor_ready(page: Page) -> None:
     if find_optional_locator(page, main_upload_input_locators(page), state="attached", timeout_ms=5_000):
         print("已进入图文上传页，已检测到多图上传控件。")
         return
-
-    # 这里不要再点击“上传图文”入口，否则会弹出 Windows 原生文件对话框，
-    # 直接阻塞后续的 set_input_files 自动上传链路。
 
     wait_for_locator(page, main_upload_input_locators(page), description="图文上传 input", state="attached", timeout_ms=30_000)
     print("图文上传页已就绪。")
@@ -1283,7 +1513,7 @@ def run_publish(settings: PublishSettings, assets: PublishAssets) -> None:
 
     with sync_playwright() as playwright:
         try:
-            browser = playwright.chromium.connect_over_cdp(settings.cdp_url)
+            browser = connect_cdp_browser_resilient(playwright, settings)
         except Exception as exc:
             error_text = str(exc)
             if "ECONNREFUSED" in error_text or "connect_over_cdp" in error_text:
@@ -1306,6 +1536,10 @@ def run_publish(settings: PublishSettings, assets: PublishAssets) -> None:
             input_publish_title(page, assets, settings)
             input_publish_description(page, assets, settings)
             upload_cover(page, assets, settings)
+            try:
+                select_douyin_favorite_music(page)
+            except Exception as music_exc:
+                print(f"抖音音乐选择失败（继续其余步骤）：{music_exc}")
             submit_declaration(page, settings)
             try:
                 select_publish_location(page, settings)

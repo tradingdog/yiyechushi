@@ -77,7 +77,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.72"
+PANEL_VERSION = "v1.73"
 PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
     "image_provider": "official",
     "image_aspect_ratio": "2:3",
@@ -581,8 +581,11 @@ def publish_worker(output_dir_text: str, platform_keys: list[str], schedule_at: 
             PUBLISH_OUTPUT_DIR = str(output_dir)
             PUBLISH_QUEUE = list(platform_keys)
         failed_platforms: list[str] = []
-        for platform_key in platform_keys:
+        for index, platform_key in enumerate(platform_keys):
             raise_if_work_cancelled("发布")
+            if index > 0:
+                append_publish_log("等待浏览器 CDP 释放（10 秒）…")
+                time.sleep(10)
             with PUBLISH_LOCK:
                 PUBLISH_CURRENT_PLATFORM = platform_key
                 if platform_key in PUBLISH_QUEUE:

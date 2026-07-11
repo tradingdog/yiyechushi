@@ -35,6 +35,8 @@ from tools.douyin_publish import (  # noqa: E402
     PublishSettings,
     click_locator,
     click_locator_via_dom,
+    connect_cdp_browser,
+    connect_cdp_browser_resilient,
     ensure_cdp_browser_available,
     find_optional_locator,
     normalize_schedule_at,
@@ -65,6 +67,7 @@ DEFAULT_WINDOWS_OPEN_DIALOG_WAIT_MS = 3_500
 DEFAULT_DEBUG_SCREENSHOT = ROOT_DIR / "tools" / "weixin_channels_publish_last_error.png"
 DEFAULT_UPLOAD_STEP_SCREENSHOT = ROOT_DIR / "tools" / "weixin_channels_publish_upload_step.png"
 DEFAULT_STEP_SCREENSHOT_DIR = ROOT_DIR / "tools" / "weixin_channels_publish_steps"
+CHANNELS_MUSIC_SEARCH_KEYWORD = "好美味-释先生"
 
 
 @dataclass(frozen=True)
@@ -664,6 +667,41 @@ def fill_description_and_topics(
     save_flow_step_screenshot(page, settings, "07", "描述与话题输入后")
 
 
+def select_weixin_channels_music(page: Page, settings: WeixinChannelsPublishSettings) -> None:
+    music_input = find_optional_locator(
+        page,
+        (
+            page.get_by_placeholder("搜索音乐"),
+            page.locator("input[placeholder*='搜索']"),
+            page.locator("label").filter(has_text="音乐").locator("..").locator("input").first,
+            page.locator("input").filter(has=page.get_by_text("音乐", exact=False)),
+        ),
+        timeout_ms=10_000,
+    )
+    if music_input is None:
+        print("未找到视频号音乐搜索框，跳过音乐设置。")
+        return
+    music_input.scroll_into_view_if_needed()
+    music_input.click()
+    page.keyboard.press("Control+A")
+    page.keyboard.press("Backspace")
+    type_text_humanly(page, CHANNELS_MUSIC_SEARCH_KEYWORD, delay_ms=settings.typing_delay_ms)
+    page.wait_for_timeout(1_200)
+    first_result = find_optional_locator(
+        page,
+        (
+            page.locator("div").filter(has_text="好美味").filter(has_text="释先生").first,
+            page.get_by_text("好美味", exact=False).first,
+        ),
+        timeout_ms=10_000,
+    )
+    if first_result is None:
+        raise RuntimeError(f"视频号音乐搜索结果为空：{CHANNELS_MUSIC_SEARCH_KEYWORD}")
+    first_result.click()
+    page.wait_for_timeout(600)
+    print(f"已选择视频号音乐：{CHANNELS_MUSIC_SEARCH_KEYWORD}")
+
+
 def scroll_to_schedule_section(page: Page) -> None:
     page.evaluate(
         """() => {
@@ -881,7 +919,7 @@ def run_weixin_channels_publish(
         ensure_cdp_browser_available(to_cdp_settings(settings))
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.connect_over_cdp(settings.cdp_url)
+        browser = connect_cdp_browser_resilient(playwright, to_cdp_settings(settings))
         page = resolve_channels_page(browser, settings.url_keyword)
 
         try:
@@ -889,6 +927,10 @@ def run_weixin_channels_publish(
             upload_graphic_images(page, assets, settings)
             fill_title(page, assets, settings)
             fill_description_and_topics(page, assets, settings)
+            try:
+                select_weixin_channels_music(page, settings)
+            except Exception as music_exc:
+                print(f"视频号音乐选择失败（继续其余步骤）：{music_exc}")
             if settings.schedule_at:
                 set_weixin_channels_scheduled_publish_time(page, settings.schedule_at, settings)
         except Exception:
