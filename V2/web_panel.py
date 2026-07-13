@@ -77,7 +77,7 @@ def _panel_port() -> int:
 
 HOST = os.getenv("V2_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _panel_port()
-PANEL_VERSION = "v1.75"
+PANEL_VERSION = "v1.77"
 PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
     "image_provider": "official",
     "image_aspect_ratio": "2:3",
@@ -85,7 +85,7 @@ PANEL_IMAGE_GEN_PREFS: dict[str, str] = {
     "image_quality": "high",
 }
 PANEL_TEXT_GEN_PREFS: dict[str, str] = {
-    "text_provider": "cursor",
+    "text_provider": "doubao",
 }
 DISH_ARCHIVE_DIR = ROOT_DIR / "dish_archive"
 FAVORITES_FILE = ROOT_DIR / "dish_favorites.json"
@@ -1921,7 +1921,7 @@ HTML_PAGE = """<!doctype html>
 
     function applyTextGenControlsToUi(prefs){
       const data = prefs || {};
-      setTextProvider((data.text_provider || "cursor") === "doubao" ? "doubao" : "cursor");
+      setTextProvider((data.text_provider || "doubao") === "cursor" ? "cursor" : "doubao");
     }
 
     function applyImageGenControlsToUi(prefs){
@@ -4919,11 +4919,11 @@ HTML_PAGE = """<!doctype html>
         applyImageGenControlsToUi({
           ...(loadImageGenPrefsFromStorage() || {}),
           ...(loadTextGenPrefsFromStorage() || {}),
-          text_provider: "cursor"
+          text_provider: "doubao"
         });
       }
-      const textProvider = (data.config?.TEXT_PROVIDER || "cursor").trim().toLowerCase();
-      setTextProvider(textProvider === "doubao" ? "doubao" : "cursor");
+      const textProvider = (data.config?.TEXT_PROVIDER || "doubao").trim().toLowerCase();
+      setTextProvider(textProvider === "cursor" ? "cursor" : "doubao");
       $("cuisineMode").value = data.config.AUTO_DISH_CUISINE_MODE || "1";
       $("posterCount").value = data.config.MODE2_POSTER_IMAGE_COUNT || data.config.OPENAI_IMAGE_COUNT;
       $("posterQuality").value = data.config.MODE2_POSTER_IMAGE_QUALITY || data.config.OPENAI_IMAGE_QUALITY;
@@ -6239,16 +6239,16 @@ def current_config_snapshot() -> dict[str, str]:
         "MODE2_RECIPE_IMAGE_COUNT": os.getenv("MODE2_RECIPE_IMAGE_COUNT", "").strip(),
         "MODE2_COVER_IMAGE_QUALITY": os.getenv("MODE2_COVER_IMAGE_QUALITY", "").strip(),
         "MODE2_COVER_IMAGE_COUNT": os.getenv("MODE2_COVER_IMAGE_COUNT", "").strip(),
-        "TEXT_PROVIDER": os.getenv("TEXT_PROVIDER", "cursor").strip() or "cursor",
+        "TEXT_PROVIDER": os.getenv("TEXT_PROVIDER", "doubao").strip() or "doubao",
     }
 
 
 def sync_panel_text_gen_prefs(payload: dict[str, Any] | None = None) -> dict[str, str]:
     global PANEL_TEXT_GEN_PREFS
     merged = {**PANEL_TEXT_GEN_PREFS, **(payload or {})}
-    provider = str(merged.get("text_provider", "cursor")).strip().lower()
+    provider = str(merged.get("text_provider", "doubao")).strip().lower()
     if provider not in {"cursor", "doubao"}:
-        provider = "cursor"
+        provider = "doubao"
     PANEL_TEXT_GEN_PREFS = {"text_provider": provider}
     return dict(PANEL_TEXT_GEN_PREFS)
 
@@ -7055,7 +7055,7 @@ class V2PanelHandler(BaseHTTPRequestHandler):
                 "recipe_count": str(payload.get("recipe_count", "")).strip(),
                 "cover_mode2_quality": str(payload.get("cover_mode2_quality", "")).strip(),
                 "cover_mode2_count": str(payload.get("cover_mode2_count", "")).strip(),
-                "text_provider": str(payload.get("text_provider", "")).strip() or PANEL_TEXT_GEN_PREFS.get("text_provider", "cursor"),
+                "text_provider": str(payload.get("text_provider", "")).strip() or PANEL_TEXT_GEN_PREFS.get("text_provider", "doubao"),
                 "image_provider": str(payload.get("image_provider", "")).strip(),
                 "image_quality": str(payload.get("image_quality", "")).strip(),
                 "image_aspect_ratio": str(payload.get("image_aspect_ratio", "")).strip(),
@@ -7088,7 +7088,7 @@ def main() -> None:
     ensure_runtime_config_loaded()
     sync_panel_image_gen_prefs()
     sync_panel_text_gen_prefs()
-    os.environ["TEXT_PROVIDER"] = PANEL_TEXT_GEN_PREFS.get("text_provider", "cursor")
+    os.environ["TEXT_PROVIDER"] = PANEL_TEXT_GEN_PREFS.get("text_provider", "doubao")
     init_custom_image_service()
     server = ThreadingHTTPServer((HOST, PORT), V2PanelHandler)
     PANEL_SERVER = server

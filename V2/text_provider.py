@@ -14,11 +14,108 @@ TEXT_PROVIDER_CURSOR = "cursor"
 DEFAULT_TEXT_PROVIDER = TEXT_PROVIDER_CURSOR
 DEFAULT_CURSOR_TEXT_MODEL = "default"
 DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+DEFAULT_DOUBAO_PLAN_BASE_URL = "https://ark.cn-beijing.volces.com/api/plan/v3"
 DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-lite-260428"
 CURSOR_API_BASE = "https://api.cursor.com"
 CURSOR_MODEL_FALLBACKS = ("gpt-latest", "default")
 
 _DATA_URL_PATTERN = re.compile(r"^data:([^;]+);base64,(.+)$", re.DOTALL)
+
+
+def _looks_like_billing_or_auth_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    markers = (
+        "accountoverdue",
+        "overdue",
+        "insufficient",
+        "quota",
+        "balance",
+        "billing",
+        "payment",
+        "401",
+        "403",
+        "429",
+        "unauthorized",
+        "forbidden",
+        "invalid api",
+        "authentication",
+        "expired",
+        "欠费",
+        "过期",
+        "余额",
+        "套餐",
+        "connection error",
+        "timeout",
+        "temporarily",
+    )
+    return any(marker in text for marker in markers)
+
+
+class DoubaoFailoverClient:
+    """先旧按量（/api/v3），失败再订阅套餐（/api/plan/v3）；两边都失败则标明欠费/过期。"""
+
+    def __init__(self, clients: list[tuple[str, OpenAI]]) -> None:
+        if not clients:
+            raise RuntimeError(
+                "未配置任何豆包 API Key。请在根目录 .env 配置 DOUBAO_API_KEY（旧按量）"
+                " 和/或 DOUBAO_PLAN_API_KEY（订阅套餐）。"
+            )
+        self._clients = clients
+        self._active_label = clients[0][0]
+
+    @property
+    def active_label(self) -> str:
+        return self._active_label
+
+    @property
+    def chat(self) -> "_DoubaoChatProxy":
+        return _DoubaoChatProxy(self)
+
+    def close(self) -> None:
+        for _, client in self._clients:
+            close_fn = getattr(client, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+
+    def create_chat_completion(self, **kwargs: Any) -> Any:
+        errors: list[str] = []
+        for label, client in self._clients:
+            try:
+                response = client.chat.completions.create(**kwargs)
+                self._active_label = label
+                print(f"豆包文本通道：{label}")
+                return response
+            except Exception as exc:
+                errors.append(f"{label}: {exc}")
+                # 计费/鉴权/超时类错误走下一通道；模型参数错误等也尝试互备
+                if not _looks_like_billing_or_auth_error(exc) and "model" not in str(exc).lower():
+                    continue
+                continue
+        detail = " | ".join(errors) if errors else "未知错误"
+        raise RuntimeError(
+            "豆包双通道均失败：旧按量账户可能欠费，订阅套餐可能过期或未生效。"
+            f" 详情：{detail}"
+        )
+
+
+class _DoubaoChatProxy:
+    def __init__(self, owner: DoubaoFailoverClient) -> None:
+        self._owner = owner
+
+    @property
+    def completions(self) -> "_DoubaoCompletionsProxy":
+        return _DoubaoCompletionsProxy(self._owner)
+
+
+class _DoubaoCompletionsProxy:
+    def __init__(self, owner: DoubaoFailoverClient) -> None:
+        self._owner = owner
+
+    def create(self, **kwargs: Any) -> Any:
+        return self._owner.create_chat_completion(**kwargs)
 
 
 def normalize_text_provider(value: str | None = None) -> str:
@@ -60,22 +157,24 @@ def format_text_runtime_label(provider: str | None = None) -> str:
         key = os.getenv("CURSOR_API_KEY", "").strip()
         key_hint = f"{key[:10]}..." if len(key) > 10 else "(未配置)"
         return f"文本环境：Cursor model={resolve_text_model(resolved)}，key={key_hint}"
-    key = os.getenv("DOUBAO_API_KEY", "").strip()
-    key_hint = f"{key[:10]}..." if len(key) > 10 else "(未配置)"
-    base_url = os.getenv("DOUBAO_BASE_URL", DEFAULT_DOUBAO_BASE_URL).strip() or DEFAULT_DOUBAO_BASE_URL
+    metered = os.getenv("DOUBAO_API_KEY", "").strip()
+    plan = os.getenv("DOUBAO_PLAN_API_KEY", "").strip()
+    metered_hint = f"{metered[:10]}..." if len(metered) > 10 else "(未配置)"
+    plan_hint = f"{plan[:12]}..." if len(plan) > 12 else "(未配置)"
+    metered_base = os.getenv("DOUBAO_BASE_URL", DEFAULT_DOUBAO_BASE_URL).strip() or DEFAULT_DOUBAO_BASE_URL
+    plan_base = (
+        os.getenv("DOUBAO_PLAN_BASE_URL", DEFAULT_DOUBAO_PLAN_BASE_URL).strip()
+        or DEFAULT_DOUBAO_PLAN_BASE_URL
+    )
     return (
-        f"文本环境：豆包 base_url={base_url}，model={resolve_text_model(resolved)}，key={key_hint}"
+        f"文本环境：豆包双通道 model={resolve_text_model(resolved)}，"
+        f"旧按量={metered_hint}@{metered_base}，订阅套餐={plan_hint}@{plan_base}"
     )
 
 
-def build_doubao_openai_client() -> OpenAI:
-    from v2_core import build_httpx_client, ensure_runtime_config_loaded, parse_bool_env, parse_float_env
+def _build_single_doubao_openai_client(*, api_key: str, base_url: str) -> OpenAI:
+    from v2_core import build_httpx_client, parse_bool_env, parse_float_env
 
-    ensure_runtime_config_loaded()
-    api_key = os.getenv("DOUBAO_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("未找到 DOUBAO_API_KEY，请在根目录 .env 中配置。")
-    base_url = os.getenv("DOUBAO_BASE_URL", DEFAULT_DOUBAO_BASE_URL).strip() or DEFAULT_DOUBAO_BASE_URL
     timeout = parse_float_env("TEXT_REQUEST_TIMEOUT_SECONDS", 120.0)
     trust_env = parse_bool_env("DOUBAO_HTTP_TRUST_ENV", default=False)
     return OpenAI(
@@ -84,6 +183,26 @@ def build_doubao_openai_client() -> OpenAI:
         timeout=timeout,
         http_client=build_httpx_client(timeout_seconds=timeout, trust_env=trust_env),
     )
+
+
+def build_doubao_openai_client() -> DoubaoFailoverClient:
+    """构建豆包双通道客户端：先旧按量，再订阅套餐。"""
+    from v2_core import ensure_runtime_config_loaded
+
+    ensure_runtime_config_loaded()
+    channels: list[tuple[str, OpenAI]] = []
+    metered_key = os.getenv("DOUBAO_API_KEY", "").strip()
+    plan_key = os.getenv("DOUBAO_PLAN_API_KEY", "").strip()
+    metered_base = os.getenv("DOUBAO_BASE_URL", DEFAULT_DOUBAO_BASE_URL).strip() or DEFAULT_DOUBAO_BASE_URL
+    plan_base = (
+        os.getenv("DOUBAO_PLAN_BASE_URL", DEFAULT_DOUBAO_PLAN_BASE_URL).strip()
+        or DEFAULT_DOUBAO_PLAN_BASE_URL
+    )
+    if metered_key:
+        channels.append(("旧按量", _build_single_doubao_openai_client(api_key=metered_key, base_url=metered_base)))
+    if plan_key:
+        channels.append(("订阅套餐", _build_single_doubao_openai_client(api_key=plan_key, base_url=plan_base)))
+    return DoubaoFailoverClient(channels)
 
 
 @dataclass
@@ -152,7 +271,7 @@ class TextCompletionClient:
         self.provider = normalize_text_provider(provider)
         self.model = resolve_text_model(self.provider)
         self.chat = _Chat(self)
-        self._doubao_client: OpenAI | None = None
+        self._doubao_client: DoubaoFailoverClient | None = None
         if self.provider == TEXT_PROVIDER_DOUBAO:
             self._doubao_client = build_doubao_openai_client()
 

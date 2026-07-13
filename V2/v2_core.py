@@ -1026,7 +1026,7 @@ def extract_chat_text_output(response: Any) -> str:
     return "\n".join(text_parts).strip()
 
 
-def build_doubao_client() -> OpenAI:
+def build_doubao_client():
     from text_provider import build_doubao_openai_client
 
     return build_doubao_openai_client()
