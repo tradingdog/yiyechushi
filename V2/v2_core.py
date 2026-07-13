@@ -2124,6 +2124,82 @@ def generate_cankao_prompt_with_images(
 
 BUBBLE_COPY_MIN_CHARS = 5
 BUBBLE_COPY_MAX_CHARS = 12
+BUBBLE_COPY_GOOD_EXAMPLES = (
+    "这虾太弹了",
+    "酱香扑鼻受不了",
+    "咬一口汁水狂飙",
+    "馋得我直扒饭",
+    "嫩到想连汤喝完",
+)
+BUBBLE_COPY_BAD_EXAMPLES = (
+    "闷热晚饭嚼弹须越想扒饭",
+    "嚼弹须越",
+    "初夏咬这脆嫩鲜辣超开胃",
+    "天热胃沉嚼酱脆绿拌饭就馋",
+)
+BUBBLE_AWKWARD_PREFIXES = (
+    "闷热晚饭",
+    "夏夜嚼",
+    "初夏咬",
+    "天热胃沉",
+    "天热没胃口",
+    "午后戳破",
+    "周末一桌",
+    "叉起酒香",
+    "热天嚼",
+)
+BUBBLE_AWKWARD_PATTERNS = (
+    r"嚼弹须",
+    r"须越",
+    r"嘴发馋",
+    r"解夏腻",
+    r"解夏馋",
+    r"直勾馋",
+    r"超开胃$",
+    r"超下饭$",
+    r"就馋$",
+    r"胃就醒",
+)
+BUBBLE_ORAL_MARKERS = re.compile(
+    r"(这|太|真|好|啊|呀|呢|吧|嘛|嘿|哎|呜|想|馋|咋|就|也|都|咬|闻|忍不住|受不了|好香|想吃|直|给我|满是|扑鼻)"
+)
+
+
+def build_bubble_copy_scene_hint(
+    dish_payload: dict[str, str],
+    *,
+    output_dir: Path | None = None,
+) -> str:
+    """气泡专用：只给轻量场景提示，避免塞满三要素导致拗口堆词。"""
+    meal_context = build_dish_copy_meal_context(dish_payload, output_dir=output_dir)
+    parts: list[str] = []
+    if meal_context["primary_labels_cn"]:
+        parts.append(f"适餐：{'、'.join(meal_context['primary_labels_cn'])}")
+    notes = str(dish_payload.get("notes", "")).strip()
+    if notes:
+        parts.append(f"菜品要点：{notes[:80]}")
+    if not parts:
+        return ""
+    return "（" + "；".join(parts) + "）"
+
+
+def validate_bubble_copy_naturalness(text: str) -> str | None:
+    """校验口语顺口；返回错误信息，通过则返回 None。"""
+    normalized = normalize_bubble_copy_text(text)
+    for prefix in BUBBLE_AWKWARD_PREFIXES:
+        if normalized.startswith(prefix):
+            return f"气泡文案拗口：勿以「{prefix}…」式书面堆词开头，请改口语。"
+    for pattern in BUBBLE_AWKWARD_PATTERNS:
+        if re.search(pattern, normalized):
+            return "气泡文案拗口：存在堆词/缩写句式，请像跟朋友说话一样重写。"
+    if not BUBBLE_ORAL_MARKERS.search(normalized):
+        return "气泡文案不够口语：须含「这/太/真/啊/了/吧/想/馋」等日常语气词。"
+    # 连续 4+ 个汉字无语气助词，常见于强行压缩的「嚼弹须越想」类句式
+    if re.search(r"[\u4e00-\u9fff]{5,}", normalized) and not re.search(
+        r"[的了啊呀呢吧嘛就想也直给]", normalized
+    ):
+        return "气泡文案像压缩标题而非人话，请改成顺口的一句感叹。"
+    return None
 
 
 def iter_bubble_copy_source_files() -> list[Path]:
@@ -2212,6 +2288,9 @@ def validate_bubble_copy_text(text: str) -> str:
     forbidden_error = reject_forbidden_copy_phrase(normalized, label="气泡文案")
     if forbidden_error:
         raise ValueError(forbidden_error)
+    naturalness_error = validate_bubble_copy_naturalness(normalized)
+    if naturalness_error:
+        raise ValueError(naturalness_error)
     return normalized
 
 
@@ -2237,17 +2316,23 @@ def build_bubble_copy_prompt(
             f"\n\n以下历史气泡文案均已使用过{scope_note}，"
             f"禁止重复、仅改几个字或同义改写，必须写出全新句式：\n{lines}"
         )
-    scene_block = build_copy_dish_scene_context_block(
+    scene_hint = build_bubble_copy_scene_hint(
         {"dish_name": dish_name.strip(), "notes": notes.strip()},
     )
+    good_examples = "、".join(f"「{item}」" for item in BUBBLE_COPY_GOOD_EXAMPLES)
+    bad_examples = "、".join(f"「{item}」" for item in BUBBLE_COPY_BAD_EXAMPLES)
     return (
         f"{dish_line}上图是这道菜的海报，另有阿叶厨师角色参考。"
-        f"写他在品尝这道菜时，气泡里最能勾起食欲的一句话——他是说话的人，不是菜。"
-        f"须同时扣住：①与本菜匹配的餐次/生活场景 ②本菜特色 ③人的食欲冲动（解馋/好奇/治愈等），用具体感官瞬间表达。"
-        f"禁止「绝了」「太香了」等空话；禁止因凌晨生成就把早餐类菜写成夜宵佐酒。"
-        f"{BUBBLE_COPY_MIN_CHARS}–{BUBBLE_COPY_MAX_CHARS} 个汉字，只输出这一句。"
-        f"\n{scene_block}\n"
-        f"{build_huasu_forbidden_prompt_block(max_items=20)}"
+        f"写他在品尝时脱口而出的一句话，放进漫画气泡——像跟朋友安利这道菜，口语、顺嘴、一听就懂。"
+        f"\n\n写法要求："
+        f"\n- {BUBBLE_COPY_MIN_CHARS}–{BUBBLE_COPY_MAX_CHARS} 个汉字，一句说完，不要诗行缩写或标题体堆词"
+        f"\n- 用日常口语：这、太、真、啊、了、吧、想、馋、忍不住、受不了"
+        f"\n- 写当下闻/夹/咬到的具体感受（弹、嫩、香、汁、酱味…），他是说话的人，不是菜"
+        f"\n- 餐次/场景可轻点一句带过，禁止为凑「三要素」把多个名词硬挤进 {BUBBLE_COPY_MAX_CHARS} 字"
+        f"\n- 好例子：{good_examples}"
+        f"\n- 坏例子（拗口禁止）：{bad_examples}"
+        f"\n只输出这一句。{scene_hint}"
+        f"\n{build_huasu_forbidden_prompt_block(max_items=16)}"
         f"{history_block}{feedback_block}"
     )
 
