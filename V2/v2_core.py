@@ -127,7 +127,7 @@ _FORBIDDEN_COPY_REGEX: tuple[tuple[re.Pattern[str], str], ...] = (
 _HUASU_FORBIDDEN_PHRASES_CACHE: tuple[str, ...] | None = None
 
 DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-pro-260215"
+DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-lite-260428"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_SILKROAD_BASE_URL = "https://ai.silkroadai.io/v1"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
