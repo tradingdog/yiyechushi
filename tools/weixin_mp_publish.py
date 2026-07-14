@@ -75,10 +75,11 @@ DEFAULT_UPLOAD3_CLICK_X = 881
 DEFAULT_UPLOAD3_CLICK_Y = 768
 DEFAULT_WINDOWS_OPEN_DIALOG_WAIT_MS = 3_500
 DEFAULT_AFTER_COVER_EDITOR_WAIT_MS = 1_800
-DEFAULT_COVER_CROP_DRAG_START_X = 662
-DEFAULT_COVER_CROP_DRAG_START_Y = 420
-# 按住左侧预览图向下拖，把裁剪框顶到海报上沿（Y 增大为向下）
-DEFAULT_COVER_CROP_DRAG_END_Y = 620
+# 编辑封面内：按住左键从 (367,539) 向上拖 50px → (367,489)，使标题不再顶格
+DEFAULT_COVER_CROP_DRAG_START_X = 367
+DEFAULT_COVER_CROP_DRAG_START_Y = 539
+DEFAULT_COVER_CROP_DRAG_END_Y = 489
+DEFAULT_COVER_CROP_DRAG_DELTA_UP = 50
 DEFAULT_DEBUG_SCREENSHOT_WEIXIN = ROOT_DIR / "tools" / "weixin_mp_publish_last_error.png"
 
 
@@ -226,10 +227,15 @@ def save_draft_button_locators(page: Page) -> tuple[Locator, ...]:
 
 
 def modify_cover_button_locators(page: Page) -> tuple[Locator, ...]:
-    # 必须优先点左侧封面区内图标；页面上可能还有别的 js_modifyCover
+    # 图2：悬停封面后出现的裁剪图标 a.js_modifyCover
     return (
+        page.locator(
+            "div.js_cover_preview_new.select-cover_preview.first_appmsg_cover "
+            "a.js_modifyCover"
+        ),
         page.locator("#js_cover_area a.js_modifyCover"),
         page.locator(".js_cover_area a.js_modifyCover"),
+        page.locator(".cover-hover-link-group a.js_modifyCover"),
         page.locator("a.js_modifyCover"),
         page.locator("a.common_edit.js_modifyCover"),
         page.locator("a.weui-desktop-icon-btn.js_modifyCover"),
@@ -237,15 +243,15 @@ def modify_cover_button_locators(page: Page) -> tuple[Locator, ...]:
 
 
 def cover_preview_hover_locators(page: Page) -> tuple[Locator, ...]:
-    """左侧封面预览区（绿色虚线框 / js_cover_area），不是中间贴图大图。"""
+    """图1：左侧封面缩略图预览区（非中间贴图大图）。"""
     return (
+        page.locator("div.js_cover_preview_new.select-cover_preview.first_appmsg_cover").first,
+        page.locator("div.js_cover_preview_new.select-cover_preview").first,
+        page.locator("div.js_cover_preview_new.first_appmsg_cover").first,
+        page.locator("#js_cover_area .js_cover_preview_new").first,
         page.locator("#js_cover_area").first,
         page.locator(".js_cover_area").first,
         page.locator(".share_cover").first,
-        page.locator("a.js_modifyCover").first.locator(
-            "xpath=ancestor::*[contains(@class,'cover') or contains(@id,'cover')][1]"
-        ),
-        page.locator(".weui-desktop-upload__img").first,
     )
 
 
@@ -269,18 +275,19 @@ def _cover_crop_dialog(page: Page) -> Locator:
 
 
 def forward_card_preview_card_locators(page: Page) -> tuple[Locator, ...]:
-    """3:4 裁剪弹窗内「转发卡片」整张预览卡（第二个 cover-preview-card）。"""
+    """图3：编辑封面内「3:4（转发卡片）」整块预览区（非上方「公众号列表」）。"""
     dialog = _cover_crop_dialog(page)
+    forward_block = dialog.locator("div.cover-preview-con").filter(has_text="转发卡片")
     three_four = dialog.locator("div.cover-preview-con[edit-cover-type='3_4']")
-    forward = three_four.locator("div.cover-preview-card").filter(has_text="转发卡片")
     return (
-        forward.first,
+        forward_block.locator("div.cover-preview-card").first,
+        forward_block.locator("img.card-cover-img").first,
+        forward_block.first,
+        three_four.locator("div.cover-preview-card").filter(has_text="转发卡片").first,
         three_four.locator("div.cover-preview-card").nth(1),
-        three_four.locator("div.cover-preview-card").last,
-        page.locator("div.cover-preview-con[edit-cover-type='3_4'] div.cover-preview-card").filter(
-            has_text="转发卡片"
-        ),
-        page.locator("div.cover-preview-con[edit-cover-type='3_4'] div.cover-preview-card").nth(1),
+        page.locator("div.cover-preview-con").filter(has_text="转发卡片").locator(
+            "div.cover-preview-card"
+        ).first,
     )
 
 
@@ -292,18 +299,25 @@ def _forward_card_cover_selected_state(page: Page) -> dict:
     return page.evaluate(
         """
         () => {
-          const con = document.querySelector('div.cover-preview-con[edit-cover-type="3_4"]');
-          if (!con) return { ok: false, reason: 'no_3_4_container' };
-          const cards = [...con.querySelectorAll('div.cover-preview-card')];
-          if (cards.length < 2) return { ok: false, reason: 'card_count_' + cards.length };
-          const second = cards[1];
-          const cls = (second.className || '').toString();
-          const style = window.getComputedStyle(second);
-          const border = (style.borderTopColor || '') + (style.outlineColor || '');
-          const active = /\\bactive\\b|selected|current|checked/i.test(cls)
-            || second.getAttribute('aria-selected') === 'true'
-            || /7\\s*,\\s*193|0\\s*,\\s*18[0-9]|rgb\\(7/.test(border);
-          return { ok: !!active, cls, border };
+          const cons = [...document.querySelectorAll('div.cover-preview-con')];
+          const forwardCon = cons.find(c => (c.innerText || '').includes('转发卡片'));
+          if (!forwardCon) return { ok: false, reason: 'no_forward_container' };
+          const card = forwardCon.querySelector('div.cover-preview-card') || forwardCon;
+          const cls = (card.className || '').toString();
+          const probe = (el) => {
+            const s = window.getComputedStyle(el);
+            return [s.borderTopColor, s.borderColor, s.outlineColor, s.boxShadow, s.color].join(' ');
+          };
+          let styleText = probe(card);
+          for (const el of forwardCon.querySelectorAll('div,img,span')) {
+            styleText += ' ' + probe(el);
+            if (styleText.length > 800) break;
+          }
+          const green = /7\\s*,\\s*193\\s*,\\s*96|#07c160|07C160|rgb\\(\\s*7\\s*,\\s*193/i.test(styleText);
+          const active = green
+            || /\\bactive\\b|selected|current|checked/i.test(cls)
+            || card.getAttribute('aria-selected') === 'true';
+          return { ok: !!active, cls, green, sample: styleText.slice(0, 160) };
         }
         """
     )
@@ -336,12 +350,13 @@ def _click_forward_card_preview(page: Page, card: Locator) -> None:
     clicked = page.evaluate(
         """
         () => {
-          const con = document.querySelector('div.cover-preview-con[edit-cover-type="3_4"]');
-          if (!con) return false;
-          const cards = [...con.querySelectorAll('div.cover-preview-card')];
-          const forward = cards.find(c => (c.innerText || '').includes('转发卡片')) || cards[1];
-          if (!forward) return false;
-          const target = forward.querySelector('img, .card-cover-con, .card-content') || forward;
+          const cons = [...document.querySelectorAll('div.cover-preview-con')];
+          const forwardCon = cons.find(c => (c.innerText || '').includes('转发卡片'));
+          if (!forwardCon) return false;
+          const forward = forwardCon.querySelector('div.cover-preview-card') || forwardCon;
+          const target = forward.querySelector('img.card-cover-img, img, .card-cover-con, .card-content') || forward;
+          target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window}));
+          target.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, view: window}));
           target.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
           target.click();
           return true;
@@ -935,11 +950,14 @@ def save_as_draft(page: Page) -> None:
 
 
 def scroll_left_cover_into_view(page: Page) -> None:
-    """左侧封面常因页面滚动落到视口外（y 为负），必须先滚入中央再点裁剪。"""
+    """左侧封面常因页面滚动落到视口外，必须先滚入再点裁剪。"""
     page.evaluate(
         """
         () => {
-          const el = document.querySelector('#js_cover_area')
+          const el = document.querySelector(
+            'div.js_cover_preview_new.select-cover_preview.first_appmsg_cover'
+          ) || document.querySelector('div.js_cover_preview_new')
+            || document.querySelector('#js_cover_area')
             || document.querySelector('.js_cover_area');
           if (el) el.scrollIntoView({block: 'center', inline: 'nearest'});
         }
@@ -955,12 +973,14 @@ def find_cover_hover_target(page: Page) -> Locator:
             if locator.count() == 0:
                 continue
             box = locator.bounding_box()
-            if box and box.get("width", 0) > 60 and box.get("height", 0) > 60:
-                print(f"已定位左侧封面悬停区域：{box}")
+            if box and box.get("width", 0) > 40 and box.get("height", 0) > 40:
+                print(f"已定位左侧封面悬停区域（图1）：{box}")
                 return locator
         except Exception:
             continue
-    raise RuntimeError("未找到公众号左侧封面区域（#js_cover_area / .js_cover_area）。")
+    raise RuntimeError(
+        "未找到公众号左侧封面预览（div.js_cover_preview_new / #js_cover_area）。"
+    )
 
 
 def wait_cover_crop_icon_visible(page: Page, timeout_ms: int = 5_000) -> Locator:
@@ -974,7 +994,7 @@ def wait_cover_crop_icon_visible(page: Page, timeout_ms: int = 5_000) -> Locator
             except Exception:
                 pass
         page.wait_for_timeout(200)
-    raise RuntimeError("悬停封面后仍未出现裁剪图标（js_modifyCover）。")
+    raise RuntimeError("悬停封面后仍未出现裁剪图标（js_modifyCover，图2）。")
 
 
 def image_selector_crop_button_locators(page: Page) -> tuple[Locator, ...]:
@@ -1005,7 +1025,7 @@ def _edit_cover_dialog_opened(page: Page) -> bool:
 
 
 def open_cover_crop_modal(page: Page) -> None:
-    """点击左侧封面区内的裁剪图标进入「编辑封面」，不要点中间贴图裁剪栏。"""
+    """图1 悬停封面 → 图2 点 js_modifyCover → 弹出「编辑封面」。"""
     prepare_weixin_chrome_page(page)
     if _edit_cover_dialog_opened(page):
         print("编辑封面弹窗已打开，跳过重复打开。")
@@ -1018,90 +1038,138 @@ def open_cover_crop_modal(page: Page) -> None:
         box = hover_target.bounding_box()
         if box:
             page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-    print("已悬停左侧封面预览区，等待裁剪图标出现。")
-    page.wait_for_timeout(600)
+    print("已将鼠标移到左侧封面预览（图1），等待裁剪图标。")
+    page.wait_for_timeout(700)
 
-    # 优先点左侧 #js_cover_area 内的 js_modifyCover
-    crop_icon = find_optional_locator(page, modify_cover_button_locators(page), timeout_ms=2_000)
-    if crop_icon is not None and crop_icon.is_visible():
-        crop_icon.click(force=True)
-        print("已点击左侧封面裁剪图标（#js_cover_area a.js_modifyCover）。")
-    else:
-        try:
-            hover_target.click(force=True)
-            print("已点击左侧封面区域打开编辑封面。")
-        except Exception:
-            crop_icon = wait_cover_crop_icon_visible(page)
-            crop_icon.click(force=True)
-            print("已点击封面裁剪图标（回退等待可见）。")
+    crop_icon = find_optional_locator(page, modify_cover_button_locators(page), timeout_ms=2_500)
+    if crop_icon is None or not crop_icon.is_visible():
+        crop_icon = wait_cover_crop_icon_visible(page)
+    crop_icon.click(force=True)
+    print("已点击封面裁剪图标（图2 / a.js_modifyCover）。")
 
     deadline = time.time() + 8
     while time.time() < deadline:
         if _edit_cover_dialog_opened(page):
-            print("已打开编辑封面弹窗（检测到 3:4 预览区）。")
+            print("已打开编辑封面弹窗。")
             return
         page.wait_for_timeout(250)
 
-    if not _edit_cover_dialog_opened(page):
-        raise RuntimeError(
-            "已点击左侧封面裁剪，但仍未出现「编辑封面」弹窗（缺少 3:4 cover-preview-con）。"
-        )
+    raise RuntimeError("已点击裁剪图标，但仍未出现「编辑封面」弹窗。")
+
+
+def _resolve_cover_crop_drag_points(settings: WeixinPublishSettings) -> tuple[int, int, int]:
+    start_x = int(settings.cover_crop_drag_start_x)
+    start_y = int(settings.cover_crop_drag_start_y)
+    end_y = int(settings.cover_crop_drag_end_y)
+    # 必须向上拖：end_y < start_y；默认上移 50px
+    if end_y >= start_y:
+        end_y = start_y - DEFAULT_COVER_CROP_DRAG_DELTA_UP
+    return start_x, start_y, end_y
 
 
 def drag_cover_crop_to_top(page: Page, settings: WeixinPublishSettings) -> None:
-    """按住左侧预览图向下拖，使 3:4 裁剪框顶格贴到海报上沿。"""
+    """图4：在 (367,539) 按住左键，向上拖 50px 到 Y=489，使标题不再顶格。"""
     prepare_weixin_chrome_page(page)
-    crop_handles = (
-        page.locator("div.weui-desktop-dialog:visible .cropper-wrap-box img"),
-        page.locator("div.weui-desktop-dialog:visible .cropper-canvas img"),
-        page.locator("div.weui-desktop-dialog:visible .cropper-container img"),
-        page.locator("div.weui-desktop-dialog:visible .cropper-drag-box"),
-        page.locator("div.weui-desktop-dialog:visible .cropper-crop-box"),
-        page.locator("div.weui-desktop-dialog:visible .weui-desktop-crop__drag-box"),
-        page.locator("div.weui-desktop-dialog:visible .cover-crop__drag-box"),
-        page.locator("div.weui-desktop-dialog:visible img").first,
-        page.locator(".cropper-drag-box"),
-        page.locator(".cropper-crop-box"),
-    )
-    for locator in crop_handles:
-        try:
-            handle = locator.first
-            if handle.count() and handle.is_visible():
-                box = handle.bounding_box()
-                if box and box.get("width", 0) > 20:
-                    start_x = box["x"] + box["width"] / 2
-                    start_y = box["y"] + box["height"] * 0.35
-                    end_y = start_y + abs(float(settings.cover_crop_drag_end_y - settings.cover_crop_drag_start_y) or 180)
-                    page.mouse.move(start_x, start_y)
-                    page.mouse.down()
-                    page.mouse.move(start_x, end_y, steps=24)
-                    page.mouse.up()
-                    print(
-                        f"已在裁剪弹窗内向下拖动封面图：({int(start_x)}, {int(start_y)}) → "
-                        f"({int(start_x)}, {int(end_y)})"
-                    )
-                    return
-        except Exception:
-            continue
+    start_x, start_y, end_y = _resolve_cover_crop_drag_points(settings)
 
-    start_x = settings.cover_crop_drag_start_x
-    start_y = settings.cover_crop_drag_start_y
-    end_y = settings.cover_crop_drag_end_y
-    if end_y <= start_y:
-        end_y = start_y + 180
-    pyautogui.moveTo(start_x, start_y, duration=0.3)
-    time.sleep(0.15)
-    pyautogui.mouseDown()
-    time.sleep(0.12)
-    pyautogui.moveTo(start_x, end_y, duration=0.55)
-    pyautogui.mouseUp()
-    print(f"已向下拖动封面裁剪图（坐标回退）：({start_x}, {start_y}) → ({start_x}, {end_y})。")
+    # 若标定坐标落在裁剪画布外，则改在画布内相对点向上拖 50px
+    try:
+        dialog = _cover_crop_dialog(page)
+        canvas = dialog.locator(
+            ".cropper-wrap-box, .cropper-canvas, .cropper-container, .cropper-drag-box"
+        ).first
+        if canvas.count():
+            box = canvas.bounding_box()
+            if box and box.get("width", 0) > 40 and box.get("height", 0) > 40:
+                inside = (
+                    box["x"] <= start_x <= box["x"] + box["width"]
+                    and box["y"] <= start_y <= box["y"] + box["height"]
+                )
+                print(f"裁剪画布位置：{box}，标定点是否在画布内={inside}")
+                if not inside:
+                    start_x = int(box["x"] + box["width"] * 0.45)
+                    start_y = int(box["y"] + box["height"] * 0.55)
+                    end_y = start_y - DEFAULT_COVER_CROP_DRAG_DELTA_UP
+                    print(f"标定点偏离画布，改用画布内点：({start_x}, {start_y}) → ({start_x}, {end_y})")
+    except Exception as exc:
+        print(f"WARN: 读取裁剪画布失败，仍用标定坐标：{exc}")
+
+    # 1) Playwright 页面坐标
+    page.mouse.move(start_x, start_y)
+    page.wait_for_timeout(150)
+    page.mouse.down()
+    page.wait_for_timeout(100)
+    page.mouse.move(start_x, end_y, steps=24)
+    page.wait_for_timeout(100)
+    page.mouse.up()
+    print(f"已向上拖动封面裁剪图（页面坐标）：({start_x}, {start_y}) → ({start_x}, {end_y})")
+
+    # 2) 再以 pyautogui 屏幕坐标补拖一次，提高 cropper 响应率
+    try:
+        viewport = page.viewport_size or {"width": 0, "height": 0}
+        # 窗口左上：用 JS 拿 screenX/Y + outer-inner 差近似 chrome 偏移
+        offset = page.evaluate(
+            """
+            () => {
+              const chromeH = Math.max(0, (window.outerHeight || 0) - (window.innerHeight || 0));
+              const chromeW = Math.max(0, (window.outerWidth || 0) - (window.innerWidth || 0));
+              return {
+                sx: window.screenX || window.screenLeft || 0,
+                sy: (window.screenY || window.screenTop || 0) + chromeH,
+                leftPad: Math.floor(chromeW / 2),
+              };
+            }
+            """
+        )
+        screen_x = int(offset["sx"] + offset.get("leftPad", 0) + start_x)
+        screen_y1 = int(offset["sy"] + start_y)
+        screen_y2 = int(offset["sy"] + end_y)
+        pyautogui.moveTo(screen_x, screen_y1, duration=0.2)
+        time.sleep(0.1)
+        pyautogui.mouseDown()
+        time.sleep(0.08)
+        pyautogui.moveTo(screen_x, screen_y2, duration=0.4)
+        pyautogui.mouseUp()
+        print(
+            f"已向上拖动封面裁剪图（屏幕补拖）：({screen_x}, {screen_y1}) → ({screen_x}, {screen_y2}) "
+            f"viewport={viewport}"
+        )
+    except Exception as exc:
+        print(f"WARN: 屏幕坐标补拖跳过：{exc}")
+
+
+def _cover_thumbnail_state(page: Page) -> dict:
+    """图6：封面缩略图须有背景图，且不宜是「默认首图」空态。"""
+    return page.evaluate(
+        """
+        () => {
+          const preview = document.querySelector(
+            'div.js_cover_preview_new.select-cover_preview.first_appmsg_cover'
+          ) || document.querySelector('div.js_cover_preview_new.select-cover_preview')
+            || document.querySelector('div.js_cover_preview_new');
+          if (!preview) return {ok:false, reason:'no_preview'};
+          const styleAttr = preview.getAttribute('style') || '';
+          const bg = window.getComputedStyle(preview).backgroundImage || '';
+          const text = (preview.innerText || '').replace(/\\s+/g, '');
+          const hasBg = /url\\(/i.test(styleAttr) || /url\\(/i.test(bg);
+          const isDefault = text.includes('默认首图');
+          return {
+            ok: hasBg && !isDefault,
+            hasBg,
+            isDefault,
+            text: text.slice(0, 40),
+            style: styleAttr.slice(0, 160),
+          };
+        }
+        """
+    )
 
 
 def adjust_weixin_cover_crop(page: Page, settings: WeixinPublishSettings) -> None:
+    """按人工标定：图1悬停 → 图2裁剪图标 → 图3转发卡片 → 图4上拖50 → 图5确认 → 图6缩略图。"""
     dismiss_blocking_dialogs(page)
     open_cover_crop_modal(page)
-    # 切勿在编辑封面打开后再 dismiss：旧逻辑会点「取消」关掉弹窗
+    # 切勿在编辑封面打开后再 dismiss：会误点「取消」关掉弹窗
     forward_card = find_optional_locator(
         page,
         forward_card_preview_card_locators(page),
@@ -1109,21 +1177,69 @@ def adjust_weixin_cover_crop(page: Page, settings: WeixinPublishSettings) -> Non
     )
     if forward_card is not None:
         select_forward_card_cover_preview(page)
+        print("已点击 3:4（转发卡片）区域（图3）。")
     else:
-        raise RuntimeError("编辑封面已打开，但未找到 3:4「转发卡片」预览，无法完成裁剪。")
+        raise RuntimeError("编辑封面已打开，但未找到 3:4「转发卡片」预览（图3）。")
     page.wait_for_timeout(settings.after_cover_editor_wait_ms)
     drag_cover_crop_to_top(page, settings)
-    page.wait_for_timeout(500)
-    confirm_button = find_optional_locator(
-        page,
-        cover_crop_confirm_button_locators(page),
-        timeout_ms=8_000,
-    )
-    if confirm_button is None:
-        raise RuntimeError("未找到封面裁剪「确认」按钮。")
-    click_locator_via_dom(page, cover_crop_confirm_button_locators(page), description="封面裁剪确认", timeout_ms=30_000)
-    page.wait_for_timeout(1_000)
-    print("已完成公众号封面裁剪调整（含确认）。")
+    page.wait_for_timeout(400)
+
+    # 图5：只点编辑封面弹窗内的确认
+    confirm = _cover_crop_dialog(page).locator(
+        "button.weui-desktop-btn_primary"
+    ).filter(has_text="确认")
+    if confirm.count() == 0 or not confirm.first.is_visible():
+        confirm_button = find_optional_locator(
+            page,
+            cover_crop_confirm_button_locators(page),
+            timeout_ms=8_000,
+        )
+        if confirm_button is None:
+            raise RuntimeError("未找到封面裁剪「确认」按钮（图5）。")
+        confirm_button.click(force=True)
+    else:
+        confirm.first.click(force=True)
+    print("已点击编辑封面「确认」（图5）。")
+
+    # 等待弹窗关闭、封面缩略图刷新
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        if not _edit_cover_dialog_opened(page):
+            break
+        page.wait_for_timeout(200)
+    page.wait_for_timeout(1_500)
+
+    state = _cover_thumbnail_state(page)
+    print(f"封面缩略图校验（图6）：{state}")
+    shot = ROOT_DIR / "tools" / "weixin_cover_crop_result.png"
+    try:
+        area = page.locator("#js_cover_area").first
+        if area.count() and area.is_visible():
+            area.screenshot(path=str(shot))
+        else:
+            page.locator("div.js_cover_preview_new.select-cover_preview").first.screenshot(
+                path=str(shot)
+            )
+        print(f"已截取封面区域：{shot}")
+    except Exception as exc:
+        print(f"WARN: 封面区域截取失败，改整页：{exc}")
+        page.screenshot(path=str(shot), full_page=False)
+
+    if not state.get("ok"):
+        page.screenshot(
+            path=str(ROOT_DIR / "tools" / "weixin_cover_crop_result_full.png"),
+            full_page=False,
+        )
+        raise RuntimeError(
+            "封面裁剪确认后缩略图仍异常（缺背景或仍为「默认首图」），"
+            f"state={state}。已保存 tools/weixin_cover_crop_result.png"
+        )
+    # 确认后再存一次草稿，保证图6效果落盘
+    try:
+        save_as_draft(page)
+    except Exception as exc:
+        print(f"WARN: 裁剪后保存草稿失败：{exc}")
+    print("已完成公众号封面裁剪调整（图1→图6）。")
 
 
 def to_cdp_settings(settings: WeixinPublishSettings) -> PublishSettings:
