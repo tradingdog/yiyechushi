@@ -2508,8 +2508,9 @@ def filter_defective_publish_candidates(
             "text": (
                 f"你是图文质量审核员。请逐一检查下面 {len(image_paths)} 张{image_kind}候选图，"
                 "判断是否存在**一眼可辨的明显生成错误**，例如："
-                "手/筷子/勺子/食材悬空无依托、肢体或餐具断开漂浮、"
-                "主菜切块被抽出悬在空中/像抠图层漂浮、切块与盘面无接触阴影、"
+                "手/筷子/勺子/肢体断开漂浮；"
+                "食材或主菜切块悬空且无筷子/勺子/手等合理承托（纯漂浮抠图——有餐具或手稳妥夹托的不算）；"
+                "主菜切块被抽出悬在空中/像抠图层漂浮、切块与盘面无接触阴影；"
                 "多指/畸形手、文字乱码、容器与食材比例严重失真。"
                 "轻微风格化、景深模糊不算缺陷。"
                 "只输出 JSON："
@@ -2649,9 +2650,7 @@ def select_and_publish_image_group(
     publish_dir.mkdir(parents=True, exist_ok=True)
     pool = paths
     rejected: list[dict[str, Any]] = []
-    # 仅 1 张候选时无择优空间，跳过缺陷审核直接留用。
-    if len(paths) == 1:
-        skip_defect_filter = True
+    # 数量=1 也做缺陷审核；不合格由上层 regenerate_fn 重生成，不再跳过。
     if not skip_defect_filter:
         try:
             pool, rejected = filter_defective_publish_candidates(client, pool, image_kind=image_kind)
@@ -2660,17 +2659,11 @@ def select_and_publish_image_group(
             pool = paths
 
     if not pool:
-        if len(paths) == 1:
-            selected = move_image_to_publish(str(paths[0]), publish_dir)
-            result = {
-                "auto_selected": True,
-                "winner_index": 1,
-                "winner_image_name": paths[0].name,
-                "winner_reason": f"仅 1 张{image_kind}，缺陷审核未通过仍直接留用。",
-                "rejected_candidates": rejected,
-            }
-            print(f"{image_kind}仅 1 张候选，审核未通过仍入 publish：{selected}")
-            return selected, "direct_keep", result
+        if rejected:
+            save_text_output(
+                json.dumps({"rejected_candidates": rejected}, ensure_ascii=False, indent=2),
+                publish_dir / selection_report_name.replace(".json", "_剔除.json"),
+            )
         raise AllCandidatesDefectiveError(
             f"{image_kind}候选均含明显生成缺陷，已全部剔除（共 {len(rejected)} 张）。",
             rejected=rejected,

@@ -194,6 +194,45 @@ def generate_group_images(
     return saved_images, image_error
 
 
+def make_image_regenerate_fn(
+    *,
+    image_client,
+    prompt_text: str,
+    reference_paths: list[str | Path],
+    settings: dict[str, Any],
+    output_dir: Path,
+    timestamp: str,
+    dish_name: str,
+    name_suffix: str,
+    stage_label: str,
+    errors: list[str],
+    all_saved_images: list[str] | None = None,
+    moderation_fallback: bool = False,
+):
+    """构造缺陷审核失败后的同参数重新生图回调。"""
+
+    def _regen() -> list[str]:
+        saved, err = generate_group_images(
+            image_client=image_client,
+            prompt_text=prompt_text,
+            reference_paths=reference_paths,
+            settings=settings,
+            output_dir=output_dir,
+            timestamp=timestamp,
+            dish_name=dish_name,
+            name_suffix=name_suffix,
+            stage_label=stage_label,
+            moderation_fallback=moderation_fallback,
+        )
+        if err:
+            errors.append(err)
+        if all_saved_images is not None and saved:
+            all_saved_images.extend(saved)
+        return list(saved)
+
+    return _regen
+
+
 def select_publish_group_with_defect_regeneration(
     doubao_client,
     *,
@@ -319,9 +358,10 @@ def run_v2_mode2(
     )
     if poster_reference_paths:
         print("海报参考图生图输入：" + "，".join(str(path) for path in poster_reference_paths))
+    poster_prompt_text = poster_prompt_result["prompt"]
     poster_saved_images, poster_error = generate_group_images(
         image_client=image_client,
-        prompt_text=poster_prompt_result["prompt"],
+        prompt_text=poster_prompt_text,
         reference_paths=poster_reference_paths,
         settings=poster_settings,
         output_dir=run_output_dir,
@@ -333,16 +373,32 @@ def run_v2_mode2(
     if poster_error:
         errors.append(poster_error)
     all_saved_images.extend(poster_saved_images)
+    poster_regenerate_fn = make_image_regenerate_fn(
+        image_client=image_client,
+        prompt_text=poster_prompt_text,
+        reference_paths=poster_reference_paths,
+        settings=poster_settings,
+        output_dir=run_output_dir,
+        timestamp=timestamp,
+        dish_name=dish_name,
+        name_suffix="海报",
+        stage_label="海报图",
+        errors=errors,
+        all_saved_images=all_saved_images,
+    )
 
     detail_selection_mode = ""
     detail_selection_result: dict[str, Any] = {}
     detail_selected_image = ""
+    detail_regenerate_fn = None
     recipe_selection_mode = ""
     recipe_selection_result: dict[str, Any] = {}
     recipe_selected_image = ""
+    recipe_regenerate_fn = None
     cover_selection_mode = ""
     cover_selection_result: dict[str, Any] = {}
     cover_selected_image = ""
+    cover_regenerate_fn = None
 
     if poster_saved_images:
         poster_selected_image, poster_selection_mode, poster_selection_result = publish_image_group_safe(
@@ -352,6 +408,7 @@ def run_v2_mode2(
             image_kind="图文海报",
             selection_report_name="海报筛选结果.json",
             errors=errors,
+            regenerate_fn=poster_regenerate_fn,
         )
         if poster_selected_image:
             poster_saved_images = [poster_selected_image]
@@ -423,10 +480,12 @@ def run_v2_mode2(
                 print(f"细节图提示词已生成：{detail_prompt_file}")
 
                 detail_settings = get_mode2_group_settings("detail")
+                detail_prompt_text = detail_prompt_result["prompt"]
+                detail_reference_paths = build_detail_reference_paths(poster_selected_image)
                 detail_saved_images, detail_error = generate_group_images(
                     image_client=image_client,
-                    prompt_text=detail_prompt_result["prompt"],
-                    reference_paths=build_detail_reference_paths(poster_selected_image),
+                    prompt_text=detail_prompt_text,
+                    reference_paths=detail_reference_paths,
                     settings=detail_settings,
                     output_dir=run_output_dir,
                     timestamp=timestamp,
@@ -439,6 +498,20 @@ def run_v2_mode2(
                     errors.append(detail_error)
                 all_saved_images.extend(detail_saved_images)
                 detail_candidate_images = list(detail_saved_images)
+                detail_regenerate_fn = make_image_regenerate_fn(
+                    image_client=image_client,
+                    prompt_text=detail_prompt_text,
+                    reference_paths=detail_reference_paths,
+                    settings=detail_settings,
+                    output_dir=run_output_dir,
+                    timestamp=timestamp,
+                    dish_name=dish_name,
+                    name_suffix="细节图",
+                    stage_label="细节图",
+                    errors=errors,
+                    all_saved_images=all_saved_images,
+                    moderation_fallback=True,
+                )
             except Exception as detail_exc:
                 errors.append(f"细节图流程失败：{detail_exc}")
                 print(f"细节图流程失败：{detail_exc}")
@@ -458,10 +531,12 @@ def run_v2_mode2(
             print(f"菜谱图提示词已生成：{recipe_prompt_file}")
 
             recipe_settings = get_mode2_group_settings("recipe")
+            recipe_prompt_text = recipe_prompt_result["prompt"]
+            recipe_reference_paths = [poster_selected_image]
             recipe_saved_images, recipe_error = generate_group_images(
                 image_client=image_client,
-                prompt_text=recipe_prompt_result["prompt"],
-                reference_paths=[poster_selected_image],
+                prompt_text=recipe_prompt_text,
+                reference_paths=recipe_reference_paths,
                 settings=recipe_settings,
                 output_dir=run_output_dir,
                 timestamp=timestamp,
@@ -473,6 +548,19 @@ def run_v2_mode2(
                 errors.append(recipe_error)
             all_saved_images.extend(recipe_saved_images)
             recipe_candidate_images = list(recipe_saved_images)
+            recipe_regenerate_fn = make_image_regenerate_fn(
+                image_client=image_client,
+                prompt_text=recipe_prompt_text,
+                reference_paths=recipe_reference_paths,
+                settings=recipe_settings,
+                output_dir=run_output_dir,
+                timestamp=timestamp,
+                dish_name=dish_name,
+                name_suffix="菜谱图",
+                stage_label="菜谱图",
+                errors=errors,
+                all_saved_images=all_saved_images,
+            )
         except Exception as recipe_exc:
             errors.append(f"菜谱图流程失败：{recipe_exc}")
             print(f"菜谱图流程失败：{recipe_exc}")
@@ -492,10 +580,12 @@ def run_v2_mode2(
             print(f"封面图提示词已生成：{cover_prompt_file}")
 
             cover_settings = get_mode2_group_settings("cover")
+            cover_prompt_text = cover_prompt_result["prompt"]
+            cover_reference_paths = [poster_selected_image]
             cover_saved_images, cover_error = generate_group_images(
                 image_client=image_client,
-                prompt_text=cover_prompt_result["prompt"],
-                reference_paths=[poster_selected_image],
+                prompt_text=cover_prompt_text,
+                reference_paths=cover_reference_paths,
                 settings=cover_settings,
                 output_dir=run_output_dir,
                 timestamp=timestamp,
@@ -507,6 +597,19 @@ def run_v2_mode2(
                 errors.append(cover_error)
             all_saved_images.extend(cover_saved_images)
             cover_candidate_images = list(cover_saved_images)
+            cover_regenerate_fn = make_image_regenerate_fn(
+                image_client=image_client,
+                prompt_text=cover_prompt_text,
+                reference_paths=cover_reference_paths,
+                settings=cover_settings,
+                output_dir=run_output_dir,
+                timestamp=timestamp,
+                dish_name=dish_name,
+                name_suffix="封面图",
+                stage_label="封面图",
+                errors=errors,
+                all_saved_images=all_saved_images,
+            )
         except Exception as cover_exc:
             errors.append(f"封面图流程失败：{cover_exc}")
             print(f"封面图流程失败：{cover_exc}")
@@ -519,6 +622,7 @@ def run_v2_mode2(
             image_kind="细节图",
             selection_report_name="细节图筛选结果.json",
             errors=errors,
+            regenerate_fn=detail_regenerate_fn,
         )
 
     if recipe_candidate_images:
@@ -529,6 +633,7 @@ def run_v2_mode2(
             image_kind="菜谱图",
             selection_report_name="菜谱图筛选结果.json",
             errors=errors,
+            regenerate_fn=recipe_regenerate_fn,
         )
 
     if cover_candidate_images:
@@ -539,6 +644,7 @@ def run_v2_mode2(
             image_kind="封面图",
             selection_report_name="封面图筛选结果.json",
             errors=errors,
+            regenerate_fn=cover_regenerate_fn,
         )
 
     photoshop_processed_files: list[str] = []
@@ -673,25 +779,72 @@ def publish_image_group_safe(
     image_kind: str,
     selection_report_name: str,
     errors: list[str],
+    regenerate_fn=None,
+    max_regenerate_rounds: int = 1,
 ) -> tuple[str, str, dict[str, Any]]:
-    try:
-        return select_and_publish_image_group(
-            client,
-            publish_dir=publish_dir,
-            candidate_paths=candidate_paths,
-            image_kind=image_kind,
-            selection_report_name=selection_report_name,
-        )
-    except AllCandidatesDefectiveError as exc:
-        paths = [str(path) for path in candidate_paths if str(path).strip() and Path(path).is_file()]
+    """选图入 publish；缺陷全灭时若提供 regenerate_fn 则自动重生成再审，仍失败才回退首张。"""
+    paths = [str(path) for path in candidate_paths if str(path).strip() and Path(path).is_file()]
+    last_defect_exc: AllCandidatesDefectiveError | None = None
+    rounds = max_regenerate_rounds if regenerate_fn is not None else 0
+    for round_idx in range(rounds + 1):
+        try:
+            return select_and_publish_image_group(
+                client,
+                publish_dir=publish_dir,
+                candidate_paths=paths,
+                image_kind=image_kind,
+                selection_report_name=selection_report_name,
+            )
+        except AllCandidatesDefectiveError as exc:
+            last_defect_exc = exc
+            if regenerate_fn is None or round_idx >= rounds:
+                break
+            print(f"{image_kind}候选均含明显缺陷，开始第 {round_idx + 1} 次重新生图…")
+            try:
+                new_paths = regenerate_fn()
+            except Exception as regen_exc:
+                msg = f"{image_kind}重新生图失败：{regen_exc}"
+                errors.append(msg)
+                print(msg)
+                break
+            new_paths = [str(path) for path in (new_paths or []) if str(path).strip() and Path(path).is_file()]
+            if not new_paths:
+                msg = f"{image_kind}重新生图未返回新候选。"
+                errors.append(msg)
+                print(msg)
+                break
+            paths = new_paths
+        except Exception as exc:
+            if not paths:
+                errors.append(f"{image_kind}选图失败：{exc}")
+                print(f"{image_kind}选图失败：{exc}")
+                return "", "", {}
+            from v2_core import move_image_to_publish
+
+            selected = move_image_to_publish(paths[0], publish_dir)
+            msg = f"{image_kind}选图失败，已回退首张：{exc}"
+            errors.append(msg)
+            print(msg)
+            return (
+                selected,
+                "fallback_direct",
+                {
+                    "auto_selected": True,
+                    "winner_index": 1,
+                    "winner_image_name": Path(paths[0]).name,
+                    "winner_reason": msg,
+                },
+            )
+
+    if last_defect_exc is not None:
         if not paths:
-            errors.append(str(exc))
-            print(str(exc))
+            errors.append(str(last_defect_exc))
+            print(str(last_defect_exc))
             return "", "", {}
         from v2_core import move_image_to_publish
 
         selected = move_image_to_publish(paths[0], publish_dir)
-        msg = f"{image_kind}缺陷审核全部剔除，已回退首张入 publish：{exc}"
+        msg = f"{image_kind}缺陷审核全部剔除，已回退首张入 publish：{last_defect_exc}"
         errors.append(msg)
         print(msg)
         return (
@@ -704,28 +857,7 @@ def publish_image_group_safe(
                 "winner_reason": msg,
             },
         )
-    except Exception as exc:
-        paths = [str(path) for path in candidate_paths if str(path).strip() and Path(path).is_file()]
-        if not paths:
-            errors.append(f"{image_kind}选图失败：{exc}")
-            print(f"{image_kind}选图失败：{exc}")
-            return "", "", {}
-        from v2_core import move_image_to_publish
-
-        selected = move_image_to_publish(paths[0], publish_dir)
-        msg = f"{image_kind}选图失败，已回退首张：{exc}"
-        errors.append(msg)
-        print(msg)
-        return (
-            selected,
-            "fallback_direct",
-            {
-                "auto_selected": True,
-                "winner_index": 1,
-                "winner_image_name": Path(paths[0]).name,
-                "winner_reason": msg,
-            },
-        )
+    return "", "", {}
 
 
 def find_publish_image_by_kind(publish_dir: Path, kind_keyword: str) -> str:
@@ -842,10 +974,11 @@ def retry_detail_stage_for_output_dir(run_output_dir: str | Path) -> dict[str, o
         f"补跑细节图：quality={detail_settings['quality']}，"
         f"n={detail_settings['image_count']}，目录={run_output_dir}"
     )
+    detail_reference_paths = build_detail_reference_paths(poster_selected_image)
     detail_saved_images, detail_error = generate_group_images(
         image_client=image_client,
         prompt_text=prompt_text,
-        reference_paths=build_detail_reference_paths(poster_selected_image),
+        reference_paths=detail_reference_paths,
         settings=detail_settings,
         output_dir=run_output_dir,
         timestamp=timestamp,
@@ -859,15 +992,30 @@ def retry_detail_stage_for_output_dir(run_output_dir: str | Path) -> dict[str, o
     if not detail_saved_images:
         raise RuntimeError("细节图生图未返回任何图片。")
 
-    detail_selected_image, detail_selection_mode, detail_selection_result = select_and_publish_image_group(
+    errors: list[str] = []
+    detail_selected_image, detail_selection_mode, detail_selection_result = publish_image_group_safe(
         doubao_client,
         publish_dir=publish_dir,
         candidate_paths=detail_saved_images,
         image_kind="细节图",
         selection_report_name="细节图筛选结果.json",
+        errors=errors,
+        regenerate_fn=make_image_regenerate_fn(
+            image_client=image_client,
+            prompt_text=prompt_text,
+            reference_paths=detail_reference_paths,
+            settings=detail_settings,
+            output_dir=run_output_dir,
+            timestamp=timestamp,
+            dish_name=dish_name,
+            name_suffix="细节图",
+            stage_label="细节图",
+            errors=errors,
+            moderation_fallback=True,
+        ),
     )
     if not detail_selected_image:
-        raise RuntimeError("细节图筛选未选出发布图。")
+        raise RuntimeError("细节图筛选未选出发布图。" + (" " + "；".join(errors) if errors else ""))
 
     photoshop_processed_files = rerun_photoshop_for_publish_dir(
         publish_dir=publish_dir,
@@ -1380,9 +1528,10 @@ def run_supplement_for_output_dir(
                 poster_prompt_path = run_output_dir / f"{dish_name}_海报_文生图prompt.txt"
                 save_text_output(poster_prompt_result["prompt"], poster_prompt_path)
                 poster_settings = get_mode2_group_settings("poster")
+                poster_prompt_text = poster_prompt_result["prompt"]
                 poster_saved_images, poster_error = generate_group_images(
                     image_client=image_client,
-                    prompt_text=poster_prompt_result["prompt"],
+                    prompt_text=poster_prompt_text,
                     reference_paths=[],
                     settings=poster_settings,
                     output_dir=run_output_dir,
@@ -1402,6 +1551,19 @@ def run_supplement_for_output_dir(
                         image_kind="图文海报",
                         selection_report_name="海报筛选结果.json",
                         errors=errors,
+                        regenerate_fn=make_image_regenerate_fn(
+                            image_client=image_client,
+                            prompt_text=poster_prompt_text,
+                            reference_paths=[],
+                            settings=poster_settings,
+                            output_dir=run_output_dir,
+                            timestamp=timestamp,
+                            dish_name=dish_name,
+                            name_suffix="海报",
+                            stage_label="海报图",
+                            errors=errors,
+                            all_saved_images=all_saved_images,
+                        ),
                     )
             if not poster_selected_image:
                 raise RuntimeError("海报图补生失败，未选出发布图。")
@@ -1463,10 +1625,12 @@ def run_supplement_for_output_dir(
                     detail_prompt_path = run_output_dir / f"{dish_name}_细节图_文生图prompt.txt"
                     save_text_output(detail_prompt_result["prompt"], detail_prompt_path)
                     detail_settings = get_mode2_group_settings("detail")
+                    detail_prompt_text = detail_prompt_result["prompt"]
+                    detail_reference_paths = build_detail_reference_paths(poster_selected_image)
                     detail_saved_images, detail_error = generate_group_images(
                         image_client=image_client,
-                        prompt_text=detail_prompt_result["prompt"],
-                        reference_paths=build_detail_reference_paths(poster_selected_image),
+                        prompt_text=detail_prompt_text,
+                        reference_paths=detail_reference_paths,
                         settings=detail_settings,
                         output_dir=run_output_dir,
                         timestamp=timestamp,
@@ -1486,6 +1650,20 @@ def run_supplement_for_output_dir(
                             image_kind="细节图",
                             selection_report_name="细节图筛选结果.json",
                             errors=errors,
+                            regenerate_fn=make_image_regenerate_fn(
+                                image_client=image_client,
+                                prompt_text=detail_prompt_text,
+                                reference_paths=detail_reference_paths,
+                                settings=detail_settings,
+                                output_dir=run_output_dir,
+                                timestamp=timestamp,
+                                dish_name=dish_name,
+                                name_suffix="细节图",
+                                stage_label="细节图",
+                                errors=errors,
+                                all_saved_images=all_saved_images,
+                                moderation_fallback=True,
+                            ),
                         )
             except Exception as detail_exc:
                 errors.append(f"细节图流程失败：{detail_exc}")
@@ -1516,10 +1694,12 @@ def run_supplement_for_output_dir(
                 recipe_prompt_path = run_output_dir / f"{dish_name}_菜谱图_文生图prompt.txt"
                 save_text_output(recipe_prompt_result["prompt"], recipe_prompt_path)
                 recipe_settings = get_mode2_group_settings("recipe")
+                recipe_prompt_text = recipe_prompt_result["prompt"]
+                recipe_reference_paths = [poster_selected_image]
                 recipe_saved_images, recipe_error = generate_group_images(
                     image_client=image_client,
-                    prompt_text=recipe_prompt_result["prompt"],
-                    reference_paths=[poster_selected_image],
+                    prompt_text=recipe_prompt_text,
+                    reference_paths=recipe_reference_paths,
                     settings=recipe_settings,
                     output_dir=run_output_dir,
                     timestamp=timestamp,
@@ -1538,6 +1718,19 @@ def run_supplement_for_output_dir(
                         image_kind="菜谱图",
                         selection_report_name="菜谱图筛选结果.json",
                         errors=errors,
+                        regenerate_fn=make_image_regenerate_fn(
+                            image_client=image_client,
+                            prompt_text=recipe_prompt_text,
+                            reference_paths=recipe_reference_paths,
+                            settings=recipe_settings,
+                            output_dir=run_output_dir,
+                            timestamp=timestamp,
+                            dish_name=dish_name,
+                            name_suffix="菜谱图",
+                            stage_label="菜谱图",
+                            errors=errors,
+                            all_saved_images=all_saved_images,
+                        ),
                     )
         except Exception as recipe_exc:
             errors.append(f"菜谱图流程失败：{recipe_exc}")
@@ -1568,10 +1761,12 @@ def run_supplement_for_output_dir(
                 cover_prompt_path = run_output_dir / f"{dish_name}_封面图_文生图prompt.txt"
                 save_text_output(cover_prompt_result["prompt"], cover_prompt_path)
                 cover_settings = get_mode2_group_settings("cover")
+                cover_prompt_text = cover_prompt_result["prompt"]
+                cover_reference_paths = [poster_selected_image]
                 cover_saved_images, cover_error = generate_group_images(
                     image_client=image_client,
-                    prompt_text=cover_prompt_result["prompt"],
-                    reference_paths=[poster_selected_image],
+                    prompt_text=cover_prompt_text,
+                    reference_paths=cover_reference_paths,
                     settings=cover_settings,
                     output_dir=run_output_dir,
                     timestamp=timestamp,
@@ -1590,6 +1785,19 @@ def run_supplement_for_output_dir(
                         image_kind="封面图",
                         selection_report_name="封面图筛选结果.json",
                         errors=errors,
+                        regenerate_fn=make_image_regenerate_fn(
+                            image_client=image_client,
+                            prompt_text=cover_prompt_text,
+                            reference_paths=cover_reference_paths,
+                            settings=cover_settings,
+                            output_dir=run_output_dir,
+                            timestamp=timestamp,
+                            dish_name=dish_name,
+                            name_suffix="封面图",
+                            stage_label="封面图",
+                            errors=errors,
+                            all_saved_images=all_saved_images,
+                        ),
                     )
         except Exception as cover_exc:
             errors.append(f"封面图流程失败：{cover_exc}")
