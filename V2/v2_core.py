@@ -123,6 +123,8 @@ _FORBIDDEN_COPY_REGEX: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"谁懂啊"), "谁懂啊"),
     (re.compile(r"天花板"), "天花板"),
     (re.compile(r"绝绝子|yyds", re.I), "绝绝子/yyds"),
+    # 「不太香」等否定不拦；「太香了/太下饭了」类高潮套话拦截
+    (re.compile(r"(?<![不没])太(香|绝|下饭|好吃|上头|爽|嫩|清爽|费饭|费米饭|开胃|巴适|治愈|舒服)了"), "太…了固定套话"),
 )
 _HUASU_FORBIDDEN_PHRASES_CACHE: tuple[str, ...] | None = None
 
@@ -2125,17 +2127,21 @@ def generate_cankao_prompt_with_images(
 BUBBLE_COPY_MIN_CHARS = 5
 BUBBLE_COPY_MAX_CHARS = 12
 BUBBLE_COPY_GOOD_EXAMPLES = (
-    "这虾太弹了",
     "酱香扑鼻受不了",
-    "咬一口汁水狂飙",
+    "咬开就汁水狂飙",
     "馋得我直扒饭",
     "嫩到想连汤喝完",
+    "这口鲜劲够呛",
+    "夹起来就停不下",
 )
 BUBBLE_COPY_BAD_EXAMPLES = (
     "闷热晚饭嚼弹须越想扒饭",
     "嚼弹须越",
     "初夏咬这脆嫩鲜辣超开胃",
     "天热胃沉嚼酱脆绿拌饭就馋",
+    "嫩肉浸酒香太下饭了",
+    "这软心果香太清爽了",
+    "太香了",
 )
 BUBBLE_AWKWARD_PREFIXES = (
     "闷热晚饭",
@@ -2160,9 +2166,12 @@ BUBBLE_AWKWARD_PATTERNS = (
     r"就馋$",
     r"胃就醒",
 )
+# 口语标记：刻意不把「太」当必选项，避免模型退回「太…了」套话
 BUBBLE_ORAL_MARKERS = re.compile(
-    r"(这|太|真|好|啊|呀|呢|吧|嘛|嘿|哎|呜|想|馋|咋|就|也|都|咬|闻|忍不住|受不了|好香|想吃|直|给我|满是|扑鼻)"
+    r"(这|真|好|啊|呀|呢|吧|嘛|嘿|哎|呜|想|馋|咋|就|也|都|咬|闻|夹|忍不住|受不了|好香|想吃|直|给我|满是|扑鼻|停不下|眯眼)"
 )
+# 气泡短句里「(也)太…了」几乎全是偷懒高潮句，一律拦截（「不太」除外）
+BUBBLE_TAI_LE_CLICHE = re.compile(r"(?<![不没])(?:也)?太[\u4e00-\u9fff]{1,6}了")
 
 
 def build_bubble_copy_scene_hint(
@@ -2192,11 +2201,16 @@ def validate_bubble_copy_naturalness(text: str) -> str | None:
     for pattern in BUBBLE_AWKWARD_PATTERNS:
         if re.search(pattern, normalized):
             return "气泡文案拗口：存在堆词/缩写句式，请像跟朋友说话一样重写。"
+    if BUBBLE_TAI_LE_CLICHE.search(normalized):
+        return (
+            "气泡文案套话：禁止「太…了 / 也太…了」固定句式"
+            "（如太下饭了、太清爽了、太嫩了），请换动作/比喻/冲动感等多样口语。"
+        )
     if not BUBBLE_ORAL_MARKERS.search(normalized):
-        return "气泡文案不够口语：须含「这/太/真/啊/了/吧/想/馋」等日常语气词。"
-    # 连续 4+ 个汉字无语气助词，常见于强行压缩的「嚼弹须越想」类句式
-    if re.search(r"[\u4e00-\u9fff]{5,}", normalized) and not re.search(
-        r"[的了啊呀呢吧嘛就想也直给]", normalized
+        return "气泡文案不够口语：须含「这/真/啊/了/吧/想/馋/咬/夹」等日常语气，勿只堆形容词。"
+    # 长串汉字且几乎无语气词：常见于强行压缩的「嚼弹须越想」类句式
+    if len(re.findall(r"[\u4e00-\u9fff]", normalized)) >= 8 and not re.search(
+        r"[的了啊呀呢吧嘛就想也直给得开起]", normalized
     ):
         return "气泡文案像压缩标题而非人话，请改成顺口的一句感叹。"
     return None
@@ -2326,11 +2340,13 @@ def build_bubble_copy_prompt(
         f"写他在品尝时脱口而出的一句话，放进漫画气泡——像跟朋友安利这道菜，口语、顺嘴、一听就懂。"
         f"\n\n写法要求："
         f"\n- {BUBBLE_COPY_MIN_CHARS}–{BUBBLE_COPY_MAX_CHARS} 个汉字，一句说完，不要诗行缩写或标题体堆词"
-        f"\n- 用日常口语：这、太、真、啊、了、吧、想、馋、忍不住、受不了"
+        f"\n- 用多样日常口语（这/真/啊/了/吧/想/馋/忍不住/受不了/停不下等），"
+        f"**禁止**以「太…了」「也太…了」当高潮句式（如太下饭了、太清爽了、太嫩了、太香了）"
+        f"\n- 句式要换着来：动作（咬/夹/闻）、比喻、冲动感、具体滋味，不要篇篇同一骨架"
         f"\n- 写当下闻/夹/咬到的具体感受（弹、嫩、香、汁、酱味…），他是说话的人，不是菜"
         f"\n- 餐次/场景可轻点一句带过，禁止为凑「三要素」把多个名词硬挤进 {BUBBLE_COPY_MAX_CHARS} 字"
         f"\n- 好例子：{good_examples}"
-        f"\n- 坏例子（拗口禁止）：{bad_examples}"
+        f"\n- 坏例子（拗口或太…了套话，禁止）：{bad_examples}"
         f"\n只输出这一句。{scene_hint}"
         f"\n{build_huasu_forbidden_prompt_block(max_items=16)}"
         f"{history_block}{feedback_block}"
@@ -3381,8 +3397,13 @@ _FORBIDDEN_ORIGIN_MARKERS = ("原创", "自制", "自创", "自主研发")
 
 _PUBLISH_EXTRA_FORBIDDEN_HINT = (
     "另外禁止：话题不得使用 #家常硬菜，不得含「天花板」字样；"
-    "标题与正文不得出现「连炫几碗饭」「连吃三碗」「连炫三碗」等碗饭数量套话。"
+    "标题与正文不得出现「连炫几碗饭」「连吃三碗」「连炫三碗」等碗饭数量套话；"
+    "标题禁止「太…了 / 也太…了」固定高潮句式（如太香了、太绝了、太下饭了）；"
+    "正文勿用「太香了/太绝了/太下饭了」等当收尾套话，句式要多变。"
 )
+
+_PUBLISH_TAI_LE_CLICHE = re.compile(r"(?<![不没])(?:也)?太[\u4e00-\u9fff]{1,5}了")
+_PUBLISH_TAI_LE_ENDING = re.compile(r"(?<![不没])太[\u4e00-\u9fff]{1,5}了[!！。]?$")
 
 _PUBLISH_FORBIDDEN_TOPIC_EXACT = frozenset({"家常硬菜"})
 
@@ -3874,6 +3895,30 @@ def validate_publish_bowl_rice_cliche(text: str, *, platform_label: str, field_l
             raise ValueError(f"{platform_label}{field_label}禁止{label}，请改写：{body}")
 
 
+def validate_publish_tai_le_cliche(text: str, *, platform_label: str, field_label: str) -> None:
+    """拦截「太…了」模板化高潮，逼模型换句式。"""
+    body = str(text or "").strip()
+    if not body:
+        return
+    if field_label == "标题":
+        if _PUBLISH_TAI_LE_CLICHE.search(body):
+            raise ValueError(
+                f"{platform_label}{field_label}禁止「太…了」固定句式"
+                f"（如太香了/太绝了/太下饭了），请换钩子结构：{body}"
+            )
+        return
+    # 正文：禁止常见太…了收尾，以及全文堆两个以上太…了
+    if _PUBLISH_TAI_LE_ENDING.search(body):
+        raise ValueError(
+            f"{platform_label}{field_label}勿用「太…了」收尾套话，请换具体感官或动作收束：{body}"
+        )
+    hits = _PUBLISH_TAI_LE_CLICHE.findall(body)
+    if len(hits) >= 2:
+        raise ValueError(
+            f"{platform_label}{field_label}「太…了」出现过多，请改写得更具体多变：{body}"
+        )
+
+
 def validate_publish_forbidden_topics(topics: list[str], *, platform_label: str) -> None:
     for topic in topics:
         tag = str(topic).lstrip("#").strip()
@@ -4145,8 +4190,10 @@ def parse_v2_publish_single_platform_block(
     validate_publish_title_mentions_ingredient(title, payload, platform_label=platform_label)
     validate_publish_no_origin_markers(title, platform_label=platform_label, field_label="标题")
     validate_publish_bowl_rice_cliche(title, platform_label=platform_label, field_label="标题")
+    validate_publish_tai_le_cliche(title, platform_label=platform_label, field_label="标题")
     validate_publish_no_origin_markers(description, platform_label=platform_label, field_label="正文")
     validate_publish_bowl_rice_cliche(description, platform_label=platform_label, field_label="正文")
+    validate_publish_tai_le_cliche(description, platform_label=platform_label, field_label="正文")
     topics = normalize_v2_publish_topics(block.get("topics"), topic_count)
     validate_publish_topics_no_dish_name(topics, dish_name, platform_label=platform_label)
     validate_publish_forbidden_topics(topics, platform_label=platform_label)
