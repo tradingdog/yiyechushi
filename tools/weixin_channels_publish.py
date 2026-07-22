@@ -488,29 +488,94 @@ def fill_locator_text(
     print(f"已通过剪贴板输入{description}。")
 
 
-def ensure_channels_logged_in(page: Page, settings: WeixinChannelsPublishSettings) -> None:
-    if not settings.login_marker_path.exists():
-        raise RuntimeError(f"登录识别模板不存在：{settings.login_marker_path}")
+def is_channels_login_required(page: Page) -> bool:
+    """页面上出现扫码/登录入口时，判定为未登录。"""
+    login_keywords = (
+        "扫码登录",
+        "微信扫一扫",
+        "请使用微信扫码",
+        "登录视频号助手",
+        "扫码关注后登录",
+    )
+    for keyword in login_keywords:
+        try:
+            if page.get_by_text(keyword, exact=False).first.is_visible(timeout=600):
+                return True
+        except Exception:
+            continue
+    url = (page.url or "").lower()
+    if "channels.weixin.qq.com" in url and any(token in url for token in ("/login", "loginpage", "auth")):
+        return True
+    return False
 
+
+def is_channels_logged_in_dom(page: Page) -> bool:
+    """用平台后台 DOM 判定登录态（比头像模板匹配更稳）。"""
+    url = page.url or ""
+    if "channels.weixin.qq.com" not in url:
+        return False
+    if is_channels_login_required(page):
+        return False
+    if is_graphic_compose_page(page) or is_publish_graphic_entry_visible(page):
+        return True
+    if find_optional_locator(page, content_manage_menu_locators(page), timeout_ms=1_500) is not None:
+        return True
+    if find_optional_locator(page, graphic_menu_locators(page), timeout_ms=1_000) is not None:
+        return True
+    try:
+        if page.locator("#menuBar").first.is_visible(timeout=1_000):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def ensure_channels_logged_in(page: Page, settings: WeixinChannelsPublishSettings) -> None:
+    """优先 DOM 判定登录；头像模板仅作补充。避免已登录仍因模板失败反复弹窗刷新。"""
     while True:
-        matched, score = match_template_on_page(
-            page,
-            settings.login_marker_path,
-            threshold=settings.login_match_threshold,
-        )
-        if matched:
-            print(f"已检测到视频号登录态（匹配度 {score:.3f}）。")
+        if is_channels_logged_in_dom(page):
+            print("已检测到视频号登录态（DOM：平台后台可见）。")
             return
+
+        if settings.login_marker_path.exists():
+            matched, score = match_template_on_page(
+                page,
+                settings.login_marker_path,
+                threshold=settings.login_match_threshold,
+            )
+            if matched:
+                print(f"已检测到视频号登录态（模板匹配度 {score:.3f}）。")
+                return
+            print(
+                f"视频号头像模板未命中（匹配度 {score:.3f}，阈值 "
+                f"{settings.login_match_threshold}），改用 DOM/登录页判定。"
+            )
+        elif not settings.login_marker_path.exists():
+            print(f"登录识别模板不存在，仅用 DOM 判定：{settings.login_marker_path}")
+
+        if not is_channels_login_required(page) and "channels.weixin.qq.com/platform" in (page.url or ""):
+            # 平台页可能仍在加载侧栏，稍等再判一次，避免误弹登录框。
+            page.wait_for_timeout(1_200)
+            if is_channels_logged_in_dom(page):
+                print("已检测到视频号登录态（DOM：平台页加载后）。")
+                return
 
         wait_for_panel_login(
             platform_label="微信视频号",
             confirm_kind="enter",
             hint=(
-                "未在页面中匹配到视频号登录标识（阈值 "
-                f"{settings.login_match_threshold}）。可能已退出登录，请重新扫码登录。"
+                "未检测到视频号平台后台登录态。若浏览器已登录，请点「已完成登录，继续」；"
+                "若仍在扫码页，请先扫码登录。"
             ),
         )
-        page.reload(wait_until="domcontentloaded")
+        # 用户确认后先立刻再判 DOM，已登录则无需刷新（刷新会再次打乱页面）。
+        if is_channels_logged_in_dom(page):
+            print("已检测到视频号登录态（用户确认后 DOM 复核通过）。")
+            return
+        try:
+            page.goto(DEFAULT_CHANNELS_HOME_URL, wait_until="domcontentloaded", timeout=30_000)
+        except Exception:
+            page.reload(wait_until="domcontentloaded")
         page.wait_for_timeout(1_500)
 
 
@@ -522,7 +587,7 @@ def _click_sidebar_menu(page: Page, locators: tuple, *, description: str) -> Non
 
 
 def open_graphic_publish_editor(page: Page, settings: WeixinChannelsPublishSettings) -> None:
-    """按用户步骤：仅图1做登录匹配；导航与发表优先用 #menuBar / 按钮 DOM。"""
+    """登录优先 DOM 判定；导航与发表优先用 #menuBar / 按钮 DOM。"""
     page.bring_to_front()
     ensure_channels_logged_in(page, settings)
     save_flow_step_screenshot(page, settings, "01", "登录检测通过")
