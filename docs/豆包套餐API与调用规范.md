@@ -70,8 +70,8 @@ DOUBAO_HTTP_TRUST_ENV=0
 注意：
 
 - `model` 填控制台/文档给出的 **接入点 ID 或模型名**（以你账号实际开通为准）。  
-- Agent Plan 控制台若提供 Auto/路由类模型名（如部分文档写的 `ark-code-latest`），仅在该套餐支持时使用；日常业务文本建议固定 Lite。  
-- ≤32k 语境下，Lite 相对 Pro 大约输入 ~5×、输出 ~4× 更便宜（按量价目），不是「整一个数量级」。
+- Agent Plan 控制台若提供 Auto/路由类模型名（如部分文档写的 `ark-code-latest`），仅在该套餐支持时使用；日常业务文本建议固定 **Seed 2.1 Turbo**。  
+- 2.0 Pro / 2.0 Code 将下线，新项目勿再默认它们。
 
 ---
 
