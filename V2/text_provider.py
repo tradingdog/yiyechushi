@@ -15,7 +15,7 @@ DEFAULT_TEXT_PROVIDER = TEXT_PROVIDER_CURSOR
 DEFAULT_CURSOR_TEXT_MODEL = "default"
 DEFAULT_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 DEFAULT_DOUBAO_PLAN_BASE_URL = "https://ark.cn-beijing.volces.com/api/plan/v3"
-DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-0-lite-260428"
+DEFAULT_DOUBAO_TEXT_MODEL = "doubao-seed-2-1-turbo-260628"
 CURSOR_API_BASE = "https://api.cursor.com"
 CURSOR_MODEL_FALLBACKS = ("gpt-latest", "default")
 
